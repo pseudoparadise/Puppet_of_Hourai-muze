@@ -1,0 +1,53 @@
+{
+  "trigger_rules": [
+    {
+      "name": "测试规则",
+      "time_window": ["00:00", "23:59"],
+      "silence_minutes": 10,
+      "probability": 0.7,
+      "cooldown_minutes": 5,
+      "actions_pool": [
+        "发Bark推送问候",
+        "继续沉睡",
+        "委托写日记",
+        "委托检索记忆"
+      ]
+    },
+    {
+      "name": "全天候陪伴",
+      "time_window": ["00:00", "23:59"],
+      "silence_minutes": 15,
+      "probability": 0.6,
+      "cooldown_minutes": 10,
+      "actions_pool": [
+        "发Bark推送问候",
+        "查看手机使用记录",
+        "浏览GitHub trending",
+        "写一段日记",
+        "继续沉睡"
+      ]
+    },
+    {
+      "name": "夜间自由",
+      "time_window": ["00:00", "05:00"],
+      "silence_minutes": 1,
+      "probability": 1.0,
+      "cooldown_minutes": 1,
+      "actions_pool": [
+        "发Bark推送问候",
+        "查看手机使用记录",
+        "浏览GitHub trending",
+        "写一段日记",
+        "继续沉睡"
+      ]
+    }
+  ],
+  "global": {
+    "bark_device_key": "j73RPTLGwaCTkg2dYryV5f",
+    "supabase_url": "https://rbqtyhcbitwzrtelbdwp.supabase.co",
+    "supabase_key": "sb_publishable_RhUWs541dKd2V5T8YxTERw_HrgUsbVj",
+    "deepseek_api_key": "sk-4b17fead645c4b40bc91458efb12acb0",
+    "state_file": "state.json",
+    "log_file": "trigger.log"
+  }
+}
