@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 *.pyo
+*$py.class
 
 # ── 敏感文件（API Key、私人对话、状态数据） ──
 config.json
@@ -37,3 +38,15 @@ rolling_summary.md
 .idea/
 *.swp
 *.swo
+
+# ── 根目录重复文件（正版在子目录） ──
+/card_manager.py
+/create_db.py
+/dreaming.py
+/encoder.py
+/lifecycle.py
+/memory_manager.py
+/retriever.py
+/review.py
+/test_memory.py
+/va_estimator.py

@@ -61,9 +61,9 @@ def setup():
         try:
             vec = embed(row["content"])
             add_to_index(index, row["id"], vec)
-            print(f"  ✓ 卡片 {row['id']} 向量化成功")
+            print(f"  [OK] 卡片 {row['id']} 向量化成功")
         except Exception as e:
-            print(f"  ✗ 卡片 {row['id']} 向量化失败: {e}")
+            print(f"  [FAIL] 卡片 {row['id']} 向量化失败: {e}")
     conn.close()
     save_index(index)
     print("向量索引构建完成并已保存。")
@@ -84,7 +84,7 @@ def test_empty():
     # 清理临时文件
     if os.path.exists(temp_db):
         os.remove(temp_db)
-    print("✅ 空库测试通过")
+    print("[PASS] 空库测试通过")
 
 def test_keyword():
     """关键词命中测试：'我们去图书馆吧' 应命中卡片1"""
@@ -95,15 +95,15 @@ def test_keyword():
     for c in ret:
         if c["id"] == "1":
             assert c["hit_count"] >= 1, f"hit_count应>=1, 实际: {c['hit_count']}"
-    print("✅ 关键词命中测试通过")
+    print("[PASS] 关键词命中测试通过")
 
 def test_semantic():
     """语义召回测试：'需要一个不被打扰的地方' 应召回卡片2"""
     setup()
-    ret = retrieve("需要一个不被打扰的地方")
+    ret = retrieve("需要一个不被打扰的地方", top_k=3)
     ids = [c["id"] for c in ret]
     assert "2" in ids, f"语义召回失败，结果ids: {ids}"
-    print("✅ 语义召回测试通过")
+    print("[PASS] 语义召回测试通过")
 
 def test_rerank():
     """重排公平性测试：高importance不一定排第一，需结合关键词命中"""
@@ -115,7 +115,7 @@ def test_rerank():
     for cid in ["1", "3"]:
         if cid in scores:
             print(f"卡片{cid} score={scores[cid]:.2f}")
-    print("✅ 重排公平性测试通过")
+    print("[PASS] 重排公平性测试通过")
 
 def test_diversity():
     """多样性约束测试：返回的 top 3 至少跨 2 个 category"""
@@ -140,7 +140,7 @@ def test_diversity():
     ret = retrieve("测试 测试 测试")
     categories = [c["category"] for c in ret]
     assert len(set(categories)) >= 2, f"多样性约束失败，返回类别: {categories}"
-    print("✅ 多样性约束测试通过")
+    print("[PASS] 多样性约束测试通过")
 
 
 def test_va_switch():
@@ -183,7 +183,7 @@ def test_va_switch():
     # 验证：low模式不会返回空
     assert len(ret_low) > 0, "low模式应有结果"
 
-    print("✅ VA切换测试通过")
+    print("[PASS] VA切换测试通过")
 
 
 if __name__ == "__main__":
@@ -194,4 +194,4 @@ if __name__ == "__main__":
     test_rerank()
     test_diversity()
     test_va_switch()
-    print("\n🎉 全部测试通过！")
+    print("\n[ALL PASS] 全部测试通过！")

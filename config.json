@@ -16,9 +16,9 @@
     {
       "name": "全天候陪伴",
       "time_window": ["00:00", "23:59"],
-      "silence_minutes": 15,
+      "silence_minutes": 60,
       "probability": 0.6,
-      "cooldown_minutes": 10,
+      "cooldown_minutes": 120,
       "actions_pool": [
         "发Bark推送问候",
         "查看手机使用记录",
@@ -31,7 +31,7 @@
       "name": "夜间自由",
       "time_window": ["00:00", "05:00"],
       "silence_minutes": 1,
-      "probability": 1.0,
+      "probability": 0.8,
       "cooldown_minutes": 1,
       "actions_pool": [
         "发Bark推送问候",
@@ -46,7 +46,7 @@
     "bark_device_key": "j73RPTLGwaCTkg2dYryV5f",
     "supabase_url": "https://rbqtyhcbitwzrtelbdwp.supabase.co",
     "supabase_key": "sb_publishable_RhUWs541dKd2V5T8YxTERw_HrgUsbVj",
-    "deepseek_api_key": "sk-4b17fead645c4b40bc91458efb12acb0",
+    "deepseek_api_key": "sk-bdc957ebb58e41b6a9427e65227cfcde",
     "state_file": "state.json",
     "log_file": "trigger.log"
   }

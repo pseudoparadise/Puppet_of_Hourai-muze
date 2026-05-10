@@ -5,6 +5,7 @@ encoder.py - 豆包 Embedding API 封装 + FAISS 索引管理（修复版）
 FIX #1: 使用 requests.Session() 复用 TCP 连接，解决首次调用 ConnectionResetError(10054)
 FIX #2: 添加指数退避重试（最多3次）
 FIX #3: 引入 id_map.json 双向映射系统，解决字符串ID（如 "20260506_约定去海边"）无法作为FAISS int64 ID的问题
+ER-1: save_index/load_index 通过 model_meta.json 校验 key_fingerprint 防止密钥更换后语义空间错乱
 NEW: 预留 _score_card() 打分扩展点，配合 retriever 未来重排优化
 """
 import numpy as np
@@ -14,6 +15,7 @@ import json
 import time
 import requests
 import yaml
+import hashlib
 
 DIM = 2048
 INDEX_PATH = os.path.join(os.path.dirname(__file__), "vectors.faiss")
@@ -178,8 +180,10 @@ def search_index(index: faiss.Index, query_vector: np.ndarray, k: int = 5) -> li
 
 def save_index(index: faiss.Index):
     faiss.write_index(index, INDEX_PATH)
-    # ── P2-4: 保存模型元数据（DIM + 模型名） ──
-    meta = {"dim": DIM, "model": "doubao-embedding-vision-250615"}
+    # ── P2-4: 保存模型元数据（DIM + 模型名 + 密钥指纹） ──
+    api_key = _get_api_key()
+    fingerprint = hashlib.sha256(api_key.encode()).hexdigest()[:8]
+    meta = {"dim": DIM, "model": "doubao-embedding-vision-250615", "key_fingerprint": fingerprint}
     with open(MODEL_META_PATH, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
@@ -193,6 +197,15 @@ def load_index() -> faiss.Index:
                 f"[encoder] 模型维度不匹配！当前 DIM={DIM}，索引中 DIM={meta.get('dim')}。"
                 f"请删除 {INDEX_PATH} 和 {MODEL_META_PATH} 后重建索引。"
             )
+        stored_fp = meta.get("key_fingerprint")
+        if stored_fp:
+            current_fp = hashlib.sha256(_get_api_key().encode()).hexdigest()[:8]
+            if stored_fp != current_fp:
+                raise ValueError(
+                    f"[encoder] key_fingerprint 不匹配！索引由密钥 {stored_fp} 生成，"
+                    f"当前密钥指纹为 {current_fp}。"
+                    f"请删除 {INDEX_PATH}、{ID_MAP_PATH} 和 {MODEL_META_PATH} 後重建索引。"
+                )
     if os.path.exists(INDEX_PATH):
         return faiss.read_index(INDEX_PATH)
     return create_index()
