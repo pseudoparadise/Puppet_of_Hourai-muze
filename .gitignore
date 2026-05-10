@@ -50,3 +50,4 @@ rolling_summary.md
 /review.py
 /test_memory.py
 /va_estimator.py
+config.json 
