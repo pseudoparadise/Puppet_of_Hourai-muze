@@ -1,0 +1,39 @@
+# ── Python cache ──
+__pycache__/
+*.pyc
+*.pyo
+
+# ── 敏感文件（API Key、私人对话、状态数据） ──
+config.json
+config.yaml
+chat_logs.json
+state.json
+trigger.log
+trigger_error.log
+
+# ── 向量数据库与索引 ──
+cards.db
+vectors.faiss
+id_map.json
+model_meta.json
+
+# ── 待审核卡片与锚定集（私人记忆） ──
+pending_cards.json
+anchor_set.json
+
+# ── 日记与滚动总结（私人内容） ──
+diary/*.md
+rolling_summary.md
+
+# ── 快照与诊断文件 ──
+状态快照_*.txt
+查看状态.bat
+
+# ── 系统垃圾 ──
+%SystemDrive%/
+
+# ── IDE ──
+.vscode/
+.idea/
+*.swp
+*.swo

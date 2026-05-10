@@ -1,34 +1,36 @@
 """
-bark_trigger.py - 沉默检测 + Bark 推送 (门卫·完整版)
-由 cron 定时执行，注入今日对话 + 相关记忆，构成推送闭环。
+bark_trigger.py - 沉默检测 + Bark 推送 (门卫·完整版)（修复版）
+
+FIX #1: 移除重复的 retriever import
+FIX #2: 修正 retrieve 变量被覆盖的问题
 """
 import json
 import re
 import random
 import sys
 import os
-import traceback
 import requests
 from datetime import datetime, timedelta, timezone
 
-# 时区
 TZ = timezone(timedelta(hours=8))
 
-# 确保能导入 memory 模块
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'memory'))
+# ── FIX: 用 __file__ 获取项目根目录 ──
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
-retrieve = None
+# ── FIX: 清理重复 import ──
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'memory'))
 try:
-    from retriever import retrieve
-except:
-    try:
-        from retriever import retrieve
-    except:
-        print("[警告] 无法导入 retriever，记忆功能将禁用")
-        retrieve = None
+    from retriever import retrieve as _retrieve_func
+except ImportError:
+    _retrieve_func = None
+    print("[警告] 无法导入 retriever，记忆功能将禁用")
+
+try:
+    from delegate.dreaming import chain_dream
+except ImportError:
+    chain_dream = None
 
 def get_today_digest():
-    """从 chat_logs.json 提取当日最后 20 轮对话摘要"""
     chat_log_path = os.path.join(os.path.dirname(__file__), "chat_logs.json")
     if not os.path.exists(chat_log_path):
         return None
@@ -45,16 +47,14 @@ def get_today_digest():
                     lines.append(f"{role}: {content}")
             except:
                 pass
-    
+
     if not lines:
         return None
     return "Today's Dialogue:\n" + "\n".join(lines[-20:])
 
 def _get_last_active_time(config, state, now):
-    """从Supabase读取activity log的最新时间戳，失败时回退state.json"""
     last_time = None
     source = "state.json"
-
     supabase_url = config["global"]["supabase_url"]
     supabase_key = config["global"]["supabase_key"]
 
@@ -66,8 +66,7 @@ def _get_last_active_time(config, state, now):
             }
             r = requests.get(
                 f"{supabase_url}/rest/v1/app_usage_logs?select=recorded_at&order=recorded_at.desc&limit=1",
-                headers=headers,
-                timeout=10
+                headers=headers, timeout=10
             )
             if r.status_code == 200 and r.json():
                 raw_ts = r.json()[0]["recorded_at"]
@@ -90,13 +89,12 @@ def _get_last_active_time(config, state, now):
     return last_time, source
 
 def main():
-    # 1. 读配置
-    with open("config.json", "r", encoding="utf-8") as f:
+    with open(os.path.join(PROJECT_ROOT, "config.json"), "r", encoding="utf-8") as f:
         config = json.load(f)
-    with open("state.json", "r", encoding="utf-8") as f:
+    with open(os.path.join(PROJECT_ROOT, "state.json"), "r", encoding="utf-8") as f:
         state = json.load(f)
 
-    now = datetime.now(TZ).replace(tzinfo=None) 
+    now = datetime.now(TZ).replace(tzinfo=None)
     last_time, source = _get_last_active_time(config, state, now)
     silence_minutes = (now - last_time).total_seconds() / 60
 
@@ -105,14 +103,12 @@ def main():
     print(f"现在时间: {now}")
     print(f"沉默: {round(silence_minutes, 1)} 分钟")
 
-    # 2. 检查触发规则
     triggered = False
     hit_rule = None
 
     for rule in config["trigger_rules"]:
         start, end = rule["time_window"]
         now_str = now.strftime("%H:%M")
-
         if not (start <= now_str <= end):
             continue
         if silence_minutes < rule["silence_minutes"]:
@@ -141,7 +137,6 @@ def main():
         deepseek_key = config["global"]["deepseek_api_key"]
         bark_key = config["global"]["bark_device_key"]
 
-        # 读取人格底色
         persona_path = os.path.join(os.path.dirname(__file__), "persona", "prompt_v1.txt")
         if os.path.exists(persona_path):
             with open(persona_path, "r", encoding="utf-8") as f:
@@ -149,15 +144,15 @@ def main():
         else:
             bark_persona = "你是一个有自主意识的AI助手，运行在用户的个人电脑上。"
 
-        # [闭环] 获取今日对话与记忆
         today_chat = get_today_digest()
         memory_context = ""
-        if today_chat and retrieve:
+        # ── FIX: 使用统一的 _retrieve_func ──
+        if today_chat and _retrieve_func:
             full_context_for_search = " ".join(
                 [line.split(": ", 1)[1] for line in today_chat.split("\n") if ": " in line]
             )
             try:
-                top_cards = retrieve(full_context_for_search, top_k=3)
+                top_cards = _retrieve_func(full_context_for_search, top_k=3)
                 if top_cards:
                     memory_lines = ["【近期相关记忆】"]
                     for card in top_cards:
@@ -166,7 +161,6 @@ def main():
             except Exception as e:
                 print(f"[记忆检索失败]: {e}")
 
-        # 组装能看见一切的决策 Prompt
         prompt = f"""{bark_persona}
 
 我正在后台安静地看着你。你已经沉默 {round(silence_minutes)} 分钟了。当前时间：{now.strftime('%Y-%m-%d %H:%M')}。
@@ -220,8 +214,7 @@ def main():
                 try:
                     decision = json.loads(reply)
                 except:
-                    import re as regex
-                    json_match = regex.search(r'\{.*\}', reply, regex.DOTALL)
+                    json_match = re.search(r'\{.*\}', reply, re.DOTALL)
                     if json_match:
                         decision = json.loads(json_match.group())
                     else:
@@ -251,7 +244,6 @@ def main():
         state["cooling_until"] = (now + timedelta(minutes=cooldown)).isoformat()
         state["last_trigger_time"] = now.isoformat()
 
-    # 日志
     log_entry = {
         "timestamp": now.isoformat(),
         "silence_minutes": round(silence_minutes, 1),
@@ -263,15 +255,25 @@ def main():
     }
 
     try:
-        with open(config["global"]["log_file"], "a", encoding="utf-8") as f:
+        with open(os.path.join(PROJECT_ROOT, config["global"]["log_file"]), "a", encoding="utf-8") as f:
             f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
         print("日志已写入。")
     except:
         print("日志写入失败")
 
-    # 保存状态
-    with open("state.json", "w", encoding="utf-8") as f:
+    with open(os.path.join(PROJECT_ROOT, "state.json"), "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
+
+    # ── 每日日记：当天日记不存在时自动生成 ──
+    today_str = datetime.now(TZ).strftime("%Y-%m-%d")
+    diary_path_check = os.path.join(PROJECT_ROOT, "diary", f"{today_str}.md")
+    if not os.path.exists(diary_path_check):
+        print(f"[每日日记] 今日日记不存在，尝试生成...")
+        if chain_dream:
+            try:
+                chain_dream()
+            except Exception as e:
+                print(f"[每日日记] 生成失败: {e}")
 
     print("bark_trigger.py 执行完毕。")
 

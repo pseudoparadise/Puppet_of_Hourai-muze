@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS cards (
     category TEXT NOT NULL DEFAULT 'interaction'
         CHECK(category IN (
             'milestone','commitments','turning_points','deep_talks',
-            'interaction','preferences','real_world'
+            'interaction','preferences','real_world',
+            'daily_life','emotional','habits','erotic'
         )),
     review_status TEXT NOT NULL DEFAULT 'pending'
         CHECK(review_status IN ('pending','final')),

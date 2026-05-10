@@ -1,7 +1,7 @@
 """
-va_estimator.py - 情绪 VA 估测器
-调 DeepSeek 对用户消息做效价-唤醒度结构化输出。
-返回 {"valence": 1-10, "arousal": 1-10, "description": "简短情绪描述"}
+va_estimator.py - 情绪 VA 估测器（修复版）
+
+FIX: suggested_temperature 使用归一化后的 arousal (0-1) 而非原始值 (1-10)
 """
 import json
 import os
@@ -17,18 +17,13 @@ def _load_api_key():
 
 SYSTEM_PROMPT = """你是情绪分析助手。分析用户消息的情绪状态，输出 JSON：
 {
-  "valence": 1-10,    // 1=极度负面, 5=中性, 10=极度正面
-  "arousal": 1-10,    // 1=极度平静, 5=中等, 10=极度激动
+  "valence": 1-10,
+  "arousal": 1-10,
   "description": "简短中文情绪描述"
 }
 只输出 JSON，不要其他内容。"""
 
 def estimate(text: str, max_retries: int = 2) -> dict:
-    """
-    估计用户消息的 VA 值。
-    返回 {"valence": float, "arousal": float, "description": str}
-    失败时返回中性默认值。
-    """
     api_key = _load_api_key()
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -50,15 +45,37 @@ def estimate(text: str, max_retries: int = 2) -> dict:
             resp = requests.post(API_URL, headers=headers, json=payload, timeout=15)
             if resp.status_code == 200:
                 raw = resp.json()["choices"][0]["message"]["content"]
-                result = json.loads(raw)
-                # 校验字段
-                v = float(result.get("valence", 5))
-                a = float(result.get("arousal", 5))
+                # ── FIX: 处理截断JSON ──
+                try:
+                    result = json.loads(raw)
+                except json.JSONDecodeError:
+                    import re
+                    match = re.search(r'\{.*\}', raw, re.DOTALL)
+                    if match:
+                        result = json.loads(match.group())
+                    else:
+                        raise
+
+                v_raw = float(result.get("valence", 5))
+                a_raw = float(result.get("arousal", 5))
                 desc = result.get("description", "中性")
+
+                # 归一化到 0-1
+                v = max(0.0, min(1.0, v_raw / 10.0))
+                a = max(0.0, min(1.0, a_raw / 10.0))
+
+                # ── FIX: 用归一化后的 a (0-1) 判断温度 ──
+                if a > 0.7:
+                    temp = "hot"
+                elif a > 0.3:
+                    temp = "warm"
+                else:
+                    temp = "cool"
+
                 return {
-                    "valence": max(0.0, min(1.0, v / 10.0)),
-                    "arousal": max(0.0, min(1.0, a / 10.0)),
-                    "suggested_temperature": "hot" if a > 7 else ("warm" if a > 3 else "cool"),
+                    "valence": v,
+                    "arousal": a,
+                    "suggested_temperature": temp,
                     "description": desc
                 }
             else:

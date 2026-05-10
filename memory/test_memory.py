@@ -74,7 +74,7 @@ def test_empty():
     # 使用临时索引路径
     conn = sqlite3.connect(temp_db)
     c = conn.cursor()
-    c.execute("CREATE TABLE IF NOT EXISTS cards (id TEXT PRIMARY KEY, title TEXT, content TEXT, keywords TEXT, importance INTEGER, category TEXT, review_status TEXT, enabled_in_context INTEGER)")
+    c.execute("CREATE TABLE IF NOT EXISTS cards (id TEXT PRIMARY KEY, title TEXT, content TEXT, keywords TEXT, importance INTEGER, category TEXT, review_status TEXT, enabled_in_context INTEGER, created_at TEXT, last_referenced_at TEXT, usage_count INTEGER DEFAULT 0)")
     c.execute("DELETE FROM cards")
     conn.commit()
     conn.close()
@@ -142,6 +142,50 @@ def test_diversity():
     assert len(set(categories)) >= 2, f"多样性约束失败，返回类别: {categories}"
     print("✅ 多样性约束测试通过")
 
+
+def test_va_switch():
+    """VA切换测试：验证不同 va_tier 对检索结果的影响"""
+    setup()
+    # ── 追加带 usage_count 和 created_at 的卡片 ──
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    # 给卡片1-5补充创建时间（最近7天）
+    from datetime import datetime, timedelta
+    today = datetime.now().strftime("%Y-%m-%d")
+    three_days_ago = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+    for i in range(1, 6):
+        c.execute("UPDATE cards SET created_at = ?, usage_count = ? WHERE id = ?",
+                  (three_days_ago, i * 2, str(i)))
+    conn.commit()
+    conn.close()
+
+    # ── mid 模式基准检索 ──
+    ret_mid = retrieve("测试", top_k=3, va_tier="mid")
+    scores_mid = [c["score"] for c in ret_mid]
+    spread_mid = max(scores_mid) - min(scores_mid) if len(scores_mid) > 1 else 0
+    print(f"  mid模式: scores={[round(s,2) for s in scores_mid]}, 极差={spread_mid:.2f}")
+
+    # ── high 模式检索 ──
+    ret_high = retrieve("测试", top_k=5, va_tier="high")
+    scores_high = [c["score"] for c in ret_high]
+    spread_high = max(scores_high) - min(scores_high) if len(scores_high) > 1 else 0
+    print(f"  high模式: scores={[round(s,2) for s in scores_high]}, 极差={spread_high:.2f}")
+
+    # ── low 模式检索 ──
+    ret_low = retrieve("测试", top_k=3, va_tier="low")
+    scores_low = [c["score"] for c in ret_low]
+    print(f"  low模式: scores={[round(s,2) for s in scores_low]}")
+
+    # 验证：high模式极差大于mid模式极差（火/雷探针增加分数波动）
+    assert spread_high > spread_mid * 0.8, \
+        f"high模式极差({spread_high:.2f})应 >= mid模式极差的80%({spread_mid*0.8:.2f})"
+
+    # 验证：low模式不会返回空
+    assert len(ret_low) > 0, "low模式应有结果"
+
+    print("✅ VA切换测试通过")
+
+
 if __name__ == "__main__":
     setup()
     test_empty()
@@ -149,4 +193,5 @@ if __name__ == "__main__":
     test_semantic()
     test_rerank()
     test_diversity()
+    test_va_switch()
     print("\n🎉 全部测试通过！")

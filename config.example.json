@@ -1,0 +1,26 @@
+{
+    "trigger_rules": [
+        {
+            "name": "测试规则",
+            "time_window": ["00:00", "23:59"],
+            "silence_minutes": 10,
+            "probability": 0.7,
+            "cooldown_minutes": 5,
+            "actions_pool": [
+                "发Bark推送问候",
+                "继续沉睡",
+                "委托写日记",
+                "委托检索记忆"
+            ]
+        }
+    ],
+    "global": {
+        "bark_device_key": "你的BarkKey填这里",
+        "supabase_url": "",
+        "supabase_key": "你的SupabaseKey填这里",
+        "deepseek_api_key": "你的DeepSeekKey填这里",
+        "state_file": "state.json",
+        "log_file": "trigger.log"
+    },
+    "_comment": "复制此文件为 config.json，填入真实 API Key"
+}
