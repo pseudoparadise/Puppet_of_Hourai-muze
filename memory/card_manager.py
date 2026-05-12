@@ -183,7 +183,7 @@ class CardManager:
         ttk.Button(btn_frame, text="刷新卡片库", command=self.load_final).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="删除选中卡片", command=self.delete_final_card).pack(side=tk.LEFT, padx=5)
 
-        columns = ("id", "title", "category", "importance", "days_remaining", "enabled", "content")
+        columns = ("id", "title", "category", "importance", "days_remaining", "enabled", "resolved", "content")
         self.final_tree = ttk.Treeview(self.final_frame, columns=columns, show="headings", height=15)
         self.final_tree.heading("id", text="卡片ID")
         self.final_tree.heading("title", text="标题")
@@ -191,6 +191,7 @@ class CardManager:
         self.final_tree.heading("importance", text="重要度")
         self.final_tree.heading("days_remaining", text="剩余天数")
         self.final_tree.heading("enabled", text="活跃")
+        self.final_tree.heading("resolved", text="已解决")
         self.final_tree.heading("content", text="内容")
         self.final_tree.column("id", width=140)
         self.final_tree.column("title", width=100)
@@ -198,34 +199,57 @@ class CardManager:
         self.final_tree.column("importance", width=60)
         self.final_tree.column("days_remaining", width=70)
         self.final_tree.column("enabled", width=50)
+        self.final_tree.column("resolved", width=50)
         self.final_tree.column("content", width=180)
         self.final_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         self.load_final()
 
     def load_final(self):
-        from memory_manager import get_card_status
         for item in self.final_tree.get_children():
             self.final_tree.delete(item)
 
-        cards = get_card_status()
-        for card in cards:
-            days = card["days_remaining"]
-            if days == -1:
-                days_str = "永久"
-            elif days == 0:
-                days_str = "已过期"
-            else:
-                days_str = f"{days}天"
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            c = conn.cursor()
+            c.execute("""
+                SELECT id, title, category, importance,
+                       created_at, last_referenced_at, enabled_in_context, resolved
+                FROM cards WHERE review_status='final'
+                ORDER BY created_at DESC
+            """)
+            rows = c.fetchall()
+            from datetime import datetime, timezone as _tz
+            now = datetime.now(_tz.utc).replace(tzinfo=None)  # naive UTC
+            for row in rows:
+                is_permanent = (row["category"] in ('milestone','commitments','deep_talks') or row["importance"] >= 8)
+                if is_permanent:
+                    days_str = "永久"
+                else:
+                    created = datetime.fromisoformat(row["created_at"]) if row["created_at"] else now
+                    last = datetime.fromisoformat(row["last_referenced_at"]) if row["last_referenced_at"] else None
+                    # 统一转为 UTC naive 再比较
+                    if created.tzinfo is not None:
+                        created = created.astimezone(_tz.utc).replace(tzinfo=None)
+                    if last is not None and last.tzinfo is not None:
+                        last = last.astimezone(_tz.utc).replace(tzinfo=None)
+                    ref = max(created, last) if last else created
+                    elapsed = (now - ref).days
+                    remaining = max(0, 30 - elapsed)
+                    days_str = f"{remaining}天" if remaining > 0 else "已过期"
 
-            self.final_tree.insert("", tk.END, values=(
-                card["id"],
-                card["title"],
-                card["category"],
-                card["importance"],
-                days_str,
-                "是" if card["enabled"] else "否",
-                ""
-            ))
+                self.final_tree.insert("", tk.END, values=(
+                    row["id"],
+                    row["title"],
+                    row["category"],
+                    row["importance"],
+                    days_str,
+                    "是" if row["enabled_in_context"] else "否",
+                    "是" if row["resolved"] else "否",
+                    ""
+                ))
+        finally:
+            conn.close()
 
     def delete_final_card(self):
         selected = self.final_tree.selection()

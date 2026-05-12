@@ -10,7 +10,7 @@ import os
 import re
 import tempfile
 import shutil
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -19,8 +19,6 @@ from delegate_tools import delegate
 PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
 PENDING_CARDS_PATH = os.path.join(os.path.dirname(__file__), "..", "memory", "pending_cards.json")
 ROLLING_SUMMARY_PATH = os.path.join(os.path.dirname(__file__), "..", "memory", "rolling_summary.md")
-
-TZ = timezone(timedelta(hours=8))
 
 def _load_prompt(name):
     path = os.path.join(PROMPTS_DIR, name)
@@ -32,7 +30,7 @@ def _get_today_digest():
     if not os.path.exists(chat_log_path):
         return None
 
-    today_str = datetime.now(TZ).strftime("%Y-%m-%d")
+    today_str = datetime.now().strftime("%Y-%m-%d")
     lines = []
     with open(chat_log_path, "r", encoding="utf-8") as f:
         for line in f:
@@ -47,7 +45,7 @@ def _get_today_digest():
     return "\n".join(lines[-50:])
 
 def _update_rolling_summary(new_summary: str):
-    today_str = datetime.now(TZ).strftime("%Y-%m-%d")
+    today_str = datetime.now().strftime("%Y-%m-%d")
     new_entry = f"\n## {today_str}\n{new_summary}\n"
 
     if os.path.exists(ROLLING_SUMMARY_PATH):
@@ -92,14 +90,14 @@ def chain_dream():
 
     diary_dir = os.path.join(os.path.dirname(__file__), "..", "diary")
     os.makedirs(diary_dir, exist_ok=True)
-    diary_path = os.path.join(diary_dir, f"{datetime.now(TZ).strftime('%Y-%m-%d')}.md")
+    diary_path = os.path.join(diary_dir, f"{datetime.now().strftime('%Y-%m-%d')}.md")
 
     digest = _get_today_digest()
     if not digest:
         print("[dreaming] 今日无对话，生成占位日记。")
-        diary = f"今日（{datetime.now(TZ).strftime('%Y-%m-%d')}）用户没有与DSphantom对话。安静的一天。"
+        diary = f"今日（{datetime.now().strftime('%Y-%m-%d')}）用户没有与DSphantom对话。安静的一天。"
         with open(diary_path, "w", encoding="utf-8") as f:
-            f.write(f"# {datetime.now(TZ).strftime('%Y-%m-%d')}\n\n{diary}")
+            f.write(f"# {datetime.now().strftime('%Y-%m-%d')}\n\n{diary}")
         print(f"[dreaming] 日记已落盘: {diary_path}")
         result["step1"] = diary
 
@@ -118,7 +116,7 @@ def chain_dream():
     result["step1"] = diary
 
     with open(diary_path, "w", encoding="utf-8") as f:
-        f.write(f"# {datetime.now(TZ).strftime('%Y-%m-%d')}\n\n{diary}")
+        f.write(f"# {datetime.now().strftime('%Y-%m-%d')}\n\n{diary}")
     print(f"[dreaming] 日记已落盘: {diary_path}")
 
     summary_prompt = _load_prompt("dreaming_summary.txt")
@@ -147,14 +145,14 @@ def chain_dream():
 
     if card_json.get("action") == "create":
         card_draft = {
-            "id": card_json.get("id", f"{datetime.now(TZ).strftime('%Y%m%d')}_auto"),
+            "id": card_json.get("id", f"{datetime.now().strftime('%Y%m%d')}_auto"),
             "title": card_json.get("title", ""),
             "content": card_json.get("content", ""),
             "keywords": card_json.get("keywords", ""),
             "importance": card_json.get("importance", 5),
             "category": card_json.get("category", "interaction"),
             "proposed_by": "dreaming",
-            "proposed_at": datetime.now(TZ).isoformat(),
+            "proposed_at": datetime.now().isoformat(),
             "review_status": "pending"
         }
         _append_pending_card(card_draft)

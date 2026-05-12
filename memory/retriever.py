@@ -41,6 +41,11 @@ SCORING_WEIGHTS["_usage_stats"] = {
     "recency_refs": 0,
 }
 
+# ── P1-4: 深度卡片分类列表（模块级常量，供 _score_card 和 _build_candidate_pool 共享） ──
+DEEP_CATEGORIES = {'milestone', 'commitments', 'deep_talks', 'turning_points', 'real_world'}
+# ── P1-3: 日活卡片分类列表 ──
+DAILY_CATEGORIES = {'daily_life', 'interaction', 'emotional', 'preferences', 'habits'}
+
 def get_va_tier(arousal: float) -> str:
     """VA 唤醒度三层分档：低(0~0.3)→冰水 / 中(0.3~0.7)→雷火岩风 / 高(0.7~1)→超载"""
     if arousal < 0.30:
@@ -49,6 +54,69 @@ def get_va_tier(arousal: float) -> str:
         return "mid"
     else:
         return "high"
+
+
+# ── EL-2: 虫洞跳跃 — 候选池构建（根据VA情绪和锚定集圈定语义搜索范围） ──
+def _build_candidate_pool(all_cards: list, anchor_ids: set, va_tier: str,
+                          va_description: str = None, candidate_limit: int = 50) -> list:
+    """
+    构建语义搜索候选池，复杂度从 O(N) 降为 O(K)。
+    优先级：锚定集 > VA分档筛选 > 水之共鸣描述匹配
+    候选池为空时退化为全表。
+    """
+    pool = []
+    seen_ids = set()
+
+    # 优先级 1：锚定集卡片
+    for card in all_cards:
+        if card['id'] in anchor_ids:
+            pool.append(card)
+            seen_ids.add(card['id'])
+
+    # 优先级 2：VA 分档筛选
+    now = datetime.now()
+    for card in all_cards:
+        if card['id'] in seen_ids:
+            continue
+        include = False
+        if va_tier == 'high':
+            # 高唤醒：优先近7天新卡 + 日活高频卡（usage≥3）
+            if card.get('created_at'):
+                try:
+                    created = datetime.fromisoformat(card['created_at'])
+                    if (now - created).days <= 7:
+                        include = True
+                except:
+                    pass
+            if not include and card.get('category') in DAILY_CATEGORIES and card.get('usage_count', 0) >= 3:
+                include = True
+        elif va_tier == 'low':
+            # 低唤醒：优先深层卡片
+            if card.get('category') in DEEP_CATEGORIES:
+                include = True
+        else:
+            # 中唤醒：全表扫描（默认平衡模式，不做过滤）
+            include = True
+        if include:
+            pool.append(card)
+            seen_ids.add(card['id'])
+
+    # 优先级 3：水之共鸣 — VA 描述关键词匹配
+    if va_description:
+        desc_lower = va_description.lower()
+        for card in all_cards:
+            if card['id'] in seen_ids:
+                continue
+            kws = card.get('keywords', '')
+            if kws and any(kw.strip().lower() in desc_lower for kw in kws.split(',')):
+                pool.append(card)
+                seen_ids.add(card['id'])
+
+    # 空池退化：包含全表
+    if not pool:
+        pool = list(all_cards)
+
+    return pool[:candidate_limit]
 
 
 def _score_card(card: dict, hit_count: int, distance: float, weights: dict = None, anchor_ids: set = None, va_tier: str = "mid") -> float:
@@ -61,16 +129,14 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
     distance: FAISS L2 距离（越小越相似）
     weights: 权重 dict，默认使用 SCORING_WEIGHTS
     """
+    # ── ST-2: resolved 卡片沉底（分數×0.05），不改 importance 真實值 ──
+    resolved_penalty = 0.05 if card.get('resolved') == 1 else 1.0
+
     w = weights or SCORING_WEIGHTS
     dist_sigmoid = 2.0 / (1.0 + np.exp(distance)) if distance < 10 else 0.0
     keyword_score = hit_count * w["w_keyword"]
     semantic_score = dist_sigmoid * w["w_semantic"]
     importance_score = card.get("importance", 5) * w["w_importance"]
-
-    # ── P1-4: 深度卡片分类列表 ──
-    DEEP_CATEGORIES = {'milestone', 'commitments', 'deep_talks', 'turning_points', 'real_world'}
-    # ── P1-3: 日活卡片分类列表 ──
-    DAILY_CATEGORIES = {'daily_life', 'interaction', 'emotional', 'preferences', 'habits'}
 
     # 岩之定锚：importance >= 8 的卡片获得额外锚定加成
     anchor_bonus = 0
@@ -169,6 +235,12 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
     if va_tier in ("low", "mid") and w.get('w_water', 0) > 0 and growth_bonus > 0:
         growth_bonus += w['w_water'] * 0.3
 
+    # ── ST-3: VA 同符号微加权（卡片级情绪标签增强水之共鸣） ──
+    card_valence = card.get('valence', 0)
+    if va_valence is not None and card_valence != 0:
+        if (va_valence > 0 and card_valence > 0) or (va_valence < 0 and card_valence < 0):
+            water_smooth += 0.02
+
     # ── P2-4: 圣遗物计数器 ──
     w["_usage_stats"]["total_searches"] = w["_usage_stats"].get("total_searches", 0) + 1
 
@@ -176,7 +248,7 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
         keyword_score + semantic_score + importance_score +
         anchor_bonus + diffusion_bonus + recent_bonus - decay_penalty +
         fire_burst + water_smooth + growth_bonus
-    )
+    ) * resolved_penalty
 
 
 def retrieve(query: str, db_path: str = None, top_k: int = 3, weights: dict = None,
@@ -243,6 +315,10 @@ def retrieve(query: str, db_path: str = None, top_k: int = 3, weights: dict = No
             card["score"] = _score_card(card, hit_count, 1.0, effective_weights, anchor_ids, va_tier)
             keyword_hits.append(card)
 
+    # ── EL-4: 虫洞跳跃 — 构建候选池，语义搜索仅限候选池内 ──
+    candidate_pool = _build_candidate_pool(all_cards, anchor_ids, va_tier, va_description)
+    candidate_ids = {c["id"] for c in candidate_pool}
+
     semantic_hits = []
     if len(keyword_hits) < top_k:
         try:
@@ -253,6 +329,9 @@ def retrieve(query: str, db_path: str = None, top_k: int = 3, weights: dict = No
                 keyword_ids = {c["id"] for c in keyword_hits}
                 for cid, dist in candidates:
                     if cid in keyword_ids:
+                        continue
+                    # ── EL-4: 虫洞跳跃 — 仅处理候选池内卡片 ──
+                    if cid not in candidate_ids:
                         continue
                     c.execute(
                         "SELECT id, keywords, importance, category, content, title, created_at, last_referenced_at, usage_count "

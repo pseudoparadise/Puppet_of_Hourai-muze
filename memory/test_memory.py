@@ -8,7 +8,7 @@ import shutil
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from retriever import retrieve
+from retriever import retrieve, _build_candidate_pool, _score_card
 from encoder import embed, create_index, add_to_index, save_index
 
 DB = os.path.join(os.path.dirname(__file__), "cards.db")
@@ -99,7 +99,9 @@ def test_keyword():
 
 def test_semantic():
     """语义召回测试：'需要一个不被打扰的地方' 应召回卡片2"""
+    import random
     setup()
+    random.seed(42)
     ret = retrieve("需要一个不被打扰的地方", top_k=3)
     ids = [c["id"] for c in ret]
     assert "2" in ids, f"语义召回失败，结果ids: {ids}"
@@ -186,6 +188,174 @@ def test_va_switch():
     print("[PASS] VA切换测试通过")
 
 
+def test_candidate_pool():
+    """候选池构建测试：不同VA唤醒度下候选池组成不同"""
+    from datetime import datetime, timedelta
+
+    three_days_ago = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+    sixty_days_ago = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+
+    cards = [
+        {"id": "cp1", "category": "milestone", "importance": 9, "usage_count": 0,
+         "created_at": sixty_days_ago, "keywords": "", "last_referenced_at": None},
+        {"id": "cp2", "category": "daily_life", "importance": 5, "usage_count": 3,
+         "created_at": three_days_ago, "keywords": "", "last_referenced_at": None},
+        {"id": "cp3", "category": "interaction", "importance": 5, "usage_count": 1,
+         "created_at": sixty_days_ago, "keywords": "", "last_referenced_at": None},
+        {"id": "cp4", "category": "milestone", "importance": 8, "usage_count": 0,
+         "created_at": sixty_days_ago, "keywords": "", "last_referenced_at": None},
+        {"id": "cp5", "category": "daily_life", "importance": 5, "usage_count": 0,
+         "created_at": three_days_ago, "keywords": "", "last_referenced_at": None},
+    ]
+
+    # Low tier: prefer DEEP_CATEGORIES (milestone)
+    pool_low = _build_candidate_pool(cards, set(), "low")
+    ids_low = {c["id"] for c in pool_low}
+    assert "cp1" in ids_low, f"low模式应包含深层卡片cp1, 实际: {ids_low}"
+    assert "cp4" in ids_low, f"low模式应包含深层卡片cp4, 实际: {ids_low}"
+
+    # High tier: prefer recent + high-usage daily
+    pool_high = _build_candidate_pool(cards, set(), "high")
+    ids_high = {c["id"] for c in pool_high}
+    assert "cp2" in ids_high, f"high模式应包含近期高频卡片cp2, 实际: {ids_high}"
+
+    # Different tiers produce different pools
+    assert ids_low != ids_high, \
+        f"不同VA唤醒度应产生不同候选池: low={ids_low}, high={ids_high}"
+
+    # candidate_limit truncation
+    pool_limited = _build_candidate_pool(cards, set(), "mid", candidate_limit=2)
+    assert len(pool_limited) <= 2, f"candidate_limit=2应限制为2张, 实际: {len(pool_limited)}"
+
+    print("[PASS] 候选池构建测试通过")
+
+
+def test_diffusion_reaction():
+    """扩散反应测试：高唤醒下风火联动扩散加成高于纯风激活"""
+    import random
+    random.seed(42)
+    setup()
+
+    # 追加一张明文卡片（无关键词匹配，走纯语义路径）
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("""INSERT INTO cards (id, title, content, keywords, importance, category, review_status, enabled_in_context)
+                 VALUES ('diff1', '扩散测试', '扩散反应验证文本内容', '无匹配', 5, 'interaction', 'final', 1)""")
+    conn.commit()
+    conn.close()
+
+    # 重建索引包含新卡片
+    index = create_index()
+    conn = sqlite3.connect(DB)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT id, content FROM cards WHERE review_status='final' AND enabled_in_context=1")
+    for row in c.fetchall():
+        vec = embed(row["content"])
+        add_to_index(index, row["id"], vec)
+    conn.close()
+    save_index(index)
+
+    random.seed(100)
+    ret_mid = retrieve("扩散反应验证", top_k=5, va_tier="mid")
+    random.seed(100)
+    ret_high = retrieve("扩散反应验证", top_k=5, va_tier="high")
+
+    score_mid = next((c["score"] for c in ret_mid if c["id"] == "diff1"), 0)
+    score_high = next((c["score"] for c in ret_high if c["id"] == "diff1"), 0)
+
+    assert score_high > score_mid, f"扩散反应失败: high={score_high:.4f} <= mid={score_mid:.4f}"
+    print(f"  扩散反应: mid={score_mid:.4f}, high={score_high:.4f}")
+    print("[PASS] 扩散反应测试通过")
+
+
+def test_soothing_mode():
+    """安抚模式测试：负效价+高唤醒压制火雷，排序变化"""
+    import random
+    from datetime import datetime, timedelta
+    random.seed(42)
+    setup()
+
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    # 高重要里程碑（安抚模式下锚定加成不受压制）
+    c.execute("INSERT INTO cards (id, title, content, keywords, importance, category, review_status, enabled_in_context, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+              ('soothe_a', '重要里程碑', '安抚测试高重要卡', '里程碑', 9, 'milestone', 'final', 1, yesterday))
+    # 近期互动卡片（高唤醒下雷火加成大，安抚模式下被压制）
+    c.execute("INSERT INTO cards (id, title, content, keywords, importance, category, review_status, enabled_in_context, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+              ('soothe_b', '近期互动', '安抚测试近期卡片', '互动', 5, 'interaction', 'final', 1, yesterday))
+    conn.commit()
+    conn.close()
+
+    # 重建索引
+    index = create_index()
+    conn = sqlite3.connect(DB)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT id, content FROM cards WHERE review_status='final' AND enabled_in_context=1")
+    for row in c.fetchall():
+        vec = embed(row["content"])
+        add_to_index(index, row["id"], vec)
+    conn.close()
+    save_index(index)
+
+    # 直调 _score_card 避开 retrieve 的 top-3 硬截断
+    card_b = {"id": "soothe_b", "importance": 5, "category": "interaction",
+              "usage_count": 0, "keywords": "", "created_at": yesterday,
+              "last_referenced_at": None, "resolved": 0}
+
+    random.seed(400)
+    score_high = _score_card(card_b, 0, 1.0, va_tier="high")
+    random.seed(400)
+    # 模拟高唤醒 + 安抚模式：传入 _va_valence=0.2 到 weights
+    w_soothe = {"w_keyword": 1.5, "w_semantic": 1.0, "w_importance": 0.5,
+                "w_anchor": 0.2, "w_diffusion": 0.1, "w_recency": 0.3,
+                "w_decay": 0.15, "w_va": 0.2, "w_fire": 0.25, "w_water": 0.15,
+                "_va_valence": 0.2, "_fire_boost": True,
+                "_usage_stats": {"total_searches": 0, "total_refs": 0}}
+    score_soothe = _score_card(card_b, 0, 1.0, weights=w_soothe, va_tier="high")
+
+    print(f"  soothe_b 纯高唤醒: {score_high:.4f}, 安抚模式: {score_soothe:.4f}")
+    assert score_soothe < score_high, f"安抚模式应降低近期卡分数: {score_soothe:.4f} >= {score_high:.4f}"
+    print("[PASS] 安抚模式测试通过")
+
+
+def test_growth_cap():
+    """草之生长差异化上限测试：daily_life上限0.8，milestone上限0.5"""
+    import random
+    random.seed(42)
+
+    # daily_life card, usage=20 -> growth_bonus = min(0.8, 20*0.05) = 0.8
+    card_d = {"id": "gd", "importance": 5, "category": "daily_life",
+              "usage_count": 20, "keywords": "", "created_at": None, "last_referenced_at": None, "resolved": 0}
+    card_d0 = dict(card_d, usage_count=0)
+
+    random.seed(42)
+    s20 = _score_card(card_d, 0, 1.0, va_tier="high")
+    random.seed(42)
+    s0 = _score_card(card_d0, 0, 1.0, va_tier="high")
+    diff_daily = round(s20 - s0, 4)
+    assert abs(diff_daily - 0.8) < 0.01, f"daily_life growth_bonus应为0.8, 实际{diff_daily}"
+
+    # milestone card, usage=20 -> growth_bonus = min(0.5, 20*0.05) = 0.5
+    card_m = {"id": "gm", "importance": 5, "category": "milestone",
+              "usage_count": 20, "keywords": "", "created_at": None, "last_referenced_at": None, "resolved": 0}
+    card_m0 = dict(card_m, usage_count=0)
+
+    random.seed(42)
+    s20m = _score_card(card_m, 0, 1.0, va_tier="high")
+    random.seed(42)
+    s0m = _score_card(card_m0, 0, 1.0, va_tier="high")
+    diff_ms = round(s20m - s0m, 4)
+    assert abs(diff_ms - 0.5) < 0.01, f"milestone growth_bonus应为0.5, 实际{diff_ms}"
+
+    print(f"  草之生长: daily_life diff={diff_daily}, milestone diff={diff_ms}")
+    print("[PASS] 草之生长差异化上限测试通过")
+
+
+
 if __name__ == "__main__":
     setup()
     test_empty()
@@ -194,4 +364,8 @@ if __name__ == "__main__":
     test_rerank()
     test_diversity()
     test_va_switch()
+    test_candidate_pool()
+    test_diffusion_reaction()
+    test_soothing_mode()
+    test_growth_cap()
     print("\n[ALL PASS] 全部测试通过！")

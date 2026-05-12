@@ -26,8 +26,23 @@ def delegate(task_description, context=""):
         config = json.load(f)
     API_KEY = config["global"]["deepseek_api_key"]
     API_URL = "https://api.deepseek.com/v1/chat/completions"
+    MODEL = config["global"].get("model", "deepseek-v4-flash")
 
     user_content = f"任务：{task_description}\n上下文：{context}"
+
+    payload = {
+        "model": MODEL,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_content}
+        ],
+        "temperature": 0.7
+    }
+    if "pro" not in MODEL:
+        payload["top_p"] = 0.9
+        payload["frequency_penalty"] = 0.3
+        payload["presence_penalty"] = 0.3
+        payload["repetition_penalty"] = 1.05
 
     resp = requests.post(
         API_URL,
@@ -36,14 +51,7 @@ def delegate(task_description, context=""):
             "Content-Type": "application/json",
             "Opt-Out": "training"
         },
-        json={
-            "model": "deepseek-v4-flash",
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_content}
-            ],
-            "temperature": 0.7
-        },
+        json=payload,
         timeout=60
     )
 

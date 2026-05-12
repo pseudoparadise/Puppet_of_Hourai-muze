@@ -52,3 +52,6 @@ rolling_summary.md
 /va_estimator.py
 config.json 
 config.json 
+persona/prompt_v1.txt 
+persona/prompt_v1_base.txt 
+delegate/prompts/dreaming_diary.txt 

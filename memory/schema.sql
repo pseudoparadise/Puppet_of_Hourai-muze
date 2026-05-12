@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS cards (
     enabled_in_context INTEGER NOT NULL DEFAULT 1,
     last_referenced_at TIMESTAMP,
     usage_count INTEGER NOT NULL DEFAULT 0,
+    resolved INTEGER NOT NULL DEFAULT 0,
+    valence REAL NOT NULL DEFAULT 0.0,
+    arousal REAL NOT NULL DEFAULT 0.5,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
