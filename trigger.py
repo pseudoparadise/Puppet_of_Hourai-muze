@@ -23,8 +23,8 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJECT_ROOT)
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "memory"))
 
-from retriever import retrieve, get_va_tier
-from memory_manager import renew_card
+from memory.retriever import retrieve, get_va_tier
+from memory.memory_manager import renew_card
 from emotion.va_estimator import estimate as va_estimate
 
 # ── 读配置 ──
@@ -202,12 +202,14 @@ AI回复：{ai_reply[:200]}
 {{"title": "提炼后的标题（15字以内）", "content": "提炼后的内容（50字以内）", "keywords": "逗号分隔的关键词（5个以内）"}}
 只返回JSON。"""
     else:
-        refine_prompt = f"""根据以下对话，生成一张承诺类记忆卡片的标题、内容和关键词。
-用户：{user_input}
-AI：{ai_reply[:200]}
+        refine_prompt = f"""你是用户的记忆管家。请从以下对话中提炼用户承诺要做的事、计划、或约定，生成记忆卡片。
+重要：用用户的视角写卡片。title写用户要做的事（如"整理Claudecode接入"不是"双核心脏接入承诺"），content描述用户承诺了什么、准备怎么执行。不要用AI的视角。
+
+用户输入：{user_input}
+AI回复：{ai_reply[:200]}
 
 请返回JSON：
-{{"title": "提炼后的标题（15字以内）", "content": "提炼后的内容（50字以内）", "keywords": "逗号分隔的关键词（5个以内）"}}
+{{"title": "用户视角的标题（15字以内，写用户要做的事）", "content": "用户视角的内容（50字以内，写用户承诺了什么）", "keywords": "逗号分隔的关键词（5个以内）"}}
 只返回JSON。"""
 
     # ── FIX: 毒点6 — 指数退避重试（最多3次） ──
@@ -329,7 +331,7 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 "proposed_by": "chat",
                 "proposed_at": _now().isoformat(),
                 "review_status": "pending",
-                "chord": va.get("chord", "") if 'va' in dir() else "",
+                "chord": "",
                 "valence": 0.0,
                 "arousal": 0.5
             }
@@ -428,7 +430,7 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 "proposed_by": "chat_auto",
                 "proposed_at": _now2().isoformat(),
                 "review_status": "pending",
-                "chord": va.get("chord", "") if 'va' in dir() else "",
+                "chord": "",
                 "valence": 0.0,
                 "arousal": 0.5
             }
@@ -619,7 +621,7 @@ def main():
                         "timestamp": ts,
                         "role": "chord",
                         "chord": parsed_chord,
-                        "expanded": expanded
+                        "expanded": desc
                     }, ensure_ascii=False) + "\n")
             except Exception:
                 pass
@@ -657,7 +659,7 @@ def main():
                     "proposed_by": "manual",
                     "proposed_at": _now3().isoformat(),
                     "review_status": "pending",
-                    "chord": va.get("chord", "") if 'va' in dir() else "",
+                    "chord": "",
                     "valence": 0.0,
                     "arousal": 0.5
                 }
@@ -946,7 +948,7 @@ def main():
                     "role": "user",
                     "content": user_input
                 }
-                ch = va.get("chord", "") if 'va' in dir() else ""
+                ch = ""
                 if ch:
                     user_entry["chord"] = ch
                 f.write(json.dumps(user_entry, ensure_ascii=False) + "\n")

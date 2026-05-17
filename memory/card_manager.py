@@ -58,8 +58,9 @@ class CardManager:
         self.pending_tree.column("title", width=120)
         self.pending_tree.column("category", width=80)
         self.pending_tree.column("importance", width=60)
-        self.pending_tree.column("content", width=300)
+        self.pending_tree.column("content", width=400)
         self.pending_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        self.pending_tree.bind("<Double-1>", lambda e: self.show_card_detail())
 
         action_frame = ttk.Frame(self.pending_frame)
         action_frame.pack(fill=tk.X, pady=5)
@@ -91,7 +92,7 @@ class CardManager:
                 card.get("title", "无标题"),
                 card.get("category", "?"),
                 card.get("importance", "?"),
-                card.get("content", "")[:50]
+                card.get("content", "")[:120]
             ), iid=card.get("id"))
 
         self.status_label.config(text=f"共 {len(pending)} 张待审核卡片。")
@@ -208,36 +209,53 @@ class CardManager:
             conn.close()
 
     def build_final_tab(self):
+        # 分类过滤栏
+        filter_frame = ttk.Frame(self.final_frame)
+        filter_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(filter_frame, text="分类筛选:").pack(side=tk.LEFT, padx=5)
+        self.final_cat_filter = ttk.Combobox(filter_frame, values=[
+            "全部","milestone","commitments","turning_points","deep_talks",
+            "interaction","preferences","real_world","daily_life","emotional","habits","erotic"
+        ], state="readonly", width=14)
+        self.final_cat_filter.set("全部")
+        self.final_cat_filter.pack(side=tk.LEFT, padx=5)
+        self.final_cat_filter.bind("<<ComboboxSelected>>", lambda e: self.load_final())
+
         btn_frame = ttk.Frame(self.final_frame)
         btn_frame.pack(fill=tk.X, pady=5)
-        ttk.Button(btn_frame, text="刷新卡片库", command=self.load_final).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="删除选中卡片", command=self.delete_final_card).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="刷新", command=self.load_final).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="删除", command=self.delete_final_card).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="标记已解决", command=self.resolve_card).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="查看详情", command=self.show_card_detail).pack(side=tk.LEFT, padx=5)
 
         columns = ("id", "title", "category", "importance", "days_remaining", "enabled", "resolved", "content")
-        self.final_tree = ttk.Treeview(self.final_frame, columns=columns, show="headings", height=15)
+        self.final_tree = ttk.Treeview(self.final_frame, columns=columns, show="headings", height=12)
         self.final_tree.heading("id", text="卡片ID")
         self.final_tree.heading("title", text="标题")
         self.final_tree.heading("category", text="分类")
         self.final_tree.heading("importance", text="重要度")
-        self.final_tree.heading("days_remaining", text="剩余天数")
+        self.final_tree.heading("days_remaining", text="剩余")
         self.final_tree.heading("enabled", text="活跃")
         self.final_tree.heading("resolved", text="已解决")
         self.final_tree.heading("content", text="内容")
-        self.final_tree.column("id", width=140)
-        self.final_tree.column("title", width=100)
-        self.final_tree.column("category", width=80)
-        self.final_tree.column("importance", width=60)
-        self.final_tree.column("days_remaining", width=70)
-        self.final_tree.column("enabled", width=50)
+        self.final_tree.column("id", width=130)
+        self.final_tree.column("title", width=110)
+        self.final_tree.column("category", width=70)
+        self.final_tree.column("importance", width=50)
+        self.final_tree.column("days_remaining", width=50)
+        self.final_tree.column("enabled", width=40)
         self.final_tree.column("resolved", width=50)
-        self.final_tree.column("content", width=180)
+        self.final_tree.column("content", width=320)
         self.final_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        self.final_tree.bind("<Double-1>", lambda e: self.show_card_detail())
         self.load_final()
 
     def load_final(self):
         for item in self.final_tree.get_children():
             self.final_tree.delete(item)
+
+        cat_filter = getattr(self, 'final_cat_filter', None)
+        cat_filter_val = cat_filter.get() if cat_filter else "全部"
 
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
@@ -245,21 +263,24 @@ class CardManager:
             c = conn.cursor()
             c.execute("""
                 SELECT id, title, category, importance,
-                       created_at, last_referenced_at, enabled_in_context, resolved
+                       created_at, last_referenced_at, enabled_in_context, resolved,
+                       COALESCE(content,'') as content
                 FROM cards WHERE review_status='final'
                 ORDER BY created_at DESC
             """)
             rows = c.fetchall()
             from datetime import datetime, timezone as _tz
-            now = datetime.now(_tz.utc).replace(tzinfo=None)  # naive UTC
+            now = datetime.now(_tz.utc).replace(tzinfo=None)
+            shown = 0
             for row in rows:
+                if cat_filter_val != "全部" and row["category"] != cat_filter_val:
+                    continue
                 is_permanent = (row["category"] in ('milestone','commitments','deep_talks') or row["importance"] >= 8)
                 if is_permanent:
                     days_str = "永久"
                 else:
                     created = datetime.fromisoformat(row["created_at"]) if row["created_at"] else now
                     last = datetime.fromisoformat(row["last_referenced_at"]) if row["last_referenced_at"] else None
-                    # 统一转为 UTC naive 再比较
                     if created.tzinfo is not None:
                         created = created.astimezone(_tz.utc).replace(tzinfo=None)
                     if last is not None and last.tzinfo is not None:
@@ -277,8 +298,9 @@ class CardManager:
                     days_str,
                     "是" if row["enabled_in_context"] else "否",
                     "是" if row["resolved"] else "否",
-                    ""
-                ))
+                    row["content"][:120]
+                ), iid=row["id"])
+                shown += 1
         finally:
             conn.close()
 
@@ -303,7 +325,43 @@ class CardManager:
         except Exception as e:
             messagebox.showerror("异常", f"删除异常: {e}")
 
-    # ── 毒点44修复：标记卡片已解决 ──
+    def show_card_detail(self):
+        """双击或按钮查看卡片完整内容"""
+        tree = None
+        for tab_tree in [self.final_tree, self.pending_tree, self.dormant_tree]:
+            sel = tab_tree.selection()
+            if sel:
+                tree = tab_tree
+                selected_iid = sel[0]
+                break
+        if not tree:
+            messagebox.showinfo("提示", "请先点选一张卡片。")
+            return
+
+        values = tree.item(selected_iid, "values")
+        cols = tree["columns"]
+        detail_lines = []
+        for i, col in enumerate(cols):
+            if i < len(values):
+                detail_lines.append(tree.heading(col)["text"] + ": " + str(values[i]))
+        detail = "\n".join(detail_lines)
+        
+        card_id = values[0] if values else None
+        if card_id:
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                c = conn.cursor()
+                c.execute("SELECT content, keywords FROM cards WHERE id=?", (card_id,))
+                row = c.fetchone()
+                conn.close()
+                if row:
+                    detail += "\n\n--- 完整内容 ---\n" + str(row[0])
+                    detail += "\n\n关键词: " + str(row[1] or "")
+            except:
+                pass
+        
+        messagebox.showinfo("卡片详情", detail)
+
     def resolve_card(self):
         selected = self.final_tree.selection()
         if not selected:
@@ -346,8 +404,9 @@ class CardManager:
         self.dormant_tree.column("title", width=100)
         self.dormant_tree.column("category", width=80)
         self.dormant_tree.column("importance", width=60)
-        self.dormant_tree.column("content", width=180)
+        self.dormant_tree.column("content", width=350)
         self.dormant_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        self.dormant_tree.bind("<Double-1>", lambda e: self.show_card_detail())
 
         action_frame = ttk.Frame(self.dormant_frame)
         action_frame.pack(fill=tk.X, pady=5)
@@ -368,7 +427,10 @@ class CardManager:
             c.execute("SELECT id, title, category, importance, content FROM cards WHERE review_status='final' AND enabled_in_context=0 ORDER BY id")
             rows = c.fetchall()
             for row in rows:
-                self.dormant_tree.insert("", tk.END, values=row, iid=row[0])
+                vals = list(row)
+                if len(vals) > 4:
+                    vals[4] = str(vals[4])[:150]
+                self.dormant_tree.insert("", tk.END, values=vals, iid=row[0])
             self.dormant_status.config(text=f"共 {len(rows)} 张休眠卡片。")
         except Exception as e:
             self.dormant_status.config(text=f"查询失败: {e}")

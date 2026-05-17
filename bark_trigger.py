@@ -17,19 +17,20 @@ from datetime import datetime, timedelta, timezone
 # ── FIX: 用 __file__ 获取项目根目录 ──
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
-# ── FIX: 清理重复 import ──
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'memory'))
+# 包路径：项目根 + memory 子包（兼容 retriever.py 内部 imports）
+sys.path.insert(0, PROJECT_ROOT)
+sys.path.insert(0, os.path.join(PROJECT_ROOT, 'memory'))
+
 try:
-    from retriever import retrieve as _retrieve_func
+    from memory.retriever import retrieve as _retrieve_func
 except ImportError:
     _retrieve_func = None
     print("[警告] 无法导入 retriever，记忆功能将禁用")
 
-from delegate_tools import RP_DECLARATION
+from delegate_tools import RP_DECLARATION, now_utc, fmt_time, parse_time, JAILBREAK_PREFIX
 
 def get_today_digest():
     """── FIX: 毒点11 — 统一使用 UTC 日期确定「今日」──"""
-    from delegate_tools import now_utc
     chat_log_path = os.path.join(os.path.dirname(__file__), "chat_logs.json")
     if not os.path.exists(chat_log_path):
         return None
@@ -62,7 +63,6 @@ def get_today_digest():
 
 def _get_last_active_time(config, state, now):
     """取 Supabase 和 state.json 中更近的时间，避免盲信单源导致误判沉默"""
-    from delegate_tools import parse_time
     supabase_time = None
     state_time = None
     source = "state.json"
@@ -131,7 +131,6 @@ def main():
     with open(os.path.join(PROJECT_ROOT, "state.json"), "r", encoding="utf-8") as f:
         state = json.load(f)
 
-    from delegate_tools import now_utc, fmt_time, parse_time
     now = now_utc()
     # ── 北京时间，用于显示和窗口判断（UTC+8）──
     beijing_tz = timezone(timedelta(hours=8))
@@ -202,7 +201,6 @@ def main():
             except Exception as e:
                 print(f"[记忆检索失败]: {e}")
 
-        from delegate_tools import JAILBREAK_PREFIX  # 毒点22修复
         prompt = f"""{JAILBREAK_PREFIX}{RP_DECLARATION}\n\n{bark_persona}
 
 我正在后台安静地看着你。你已经沉默 {round(silence_minutes)} 分钟了。当前时间：{now_local.strftime('%Y-%m-%d %H:%M')}。

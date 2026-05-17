@@ -9,7 +9,7 @@ NEW: 提取 _score_card() 独立打分函数，为未来重排算法优化留收
 """
 import sqlite3
 import os
-from encoder import embed, load_index, search_index, DIM
+from .encoder import embed, load_index, search_index, DIM
 import numpy as np
 import random
 from datetime import datetime
