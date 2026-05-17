@@ -274,7 +274,7 @@ def _check_cooldown(written: dict, category: str, current_turn: int, cooldown: i
 
 
 # ── 后处理 ──
-def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply: str, session_cards_written: dict = None, current_turn: int = 0):
+def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply: str, session_cards_written: dict = None, current_turn: int = 0, va: dict = None):
     ref_ids = []
 
     ref_match = re.search(r'<!--\s*ref:(.*?)\s*-->', raw_reply, re.IGNORECASE)
@@ -292,7 +292,10 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
         else:
             print(f"[记忆引用] 卡片 {cid} 续命失败")
 
-    # auto resolve
+    # auto resolve — 双重机制：AI 标记 + 关键词兜底
+    resolved_ids = set()
+
+    # 机制 A：AI 主动输出 <!-- resolve_card: ID -->
     resolve_match = re.search(r'<!--\s*resolve_card:\s*(.*?)\s*-->', raw_reply, re.IGNORECASE)
     if resolve_match:
         display_reply = re.sub(r'<!--\s*resolve_card:.*?\s*-->', '', display_reply, flags=re.IGNORECASE).strip()
@@ -301,6 +304,53 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
             from memory.memory_manager import resolve_card as do_resolve
             if do_resolve(cid_to_resolve):
                 print(f"[自动解决] AI 已将卡片 {cid_to_resolve} 标记为已解决")
+                resolved_ids.add(cid_to_resolve)
+        except Exception as e:
+            print(f"[自动解决] 标记失败 card_id={cid_to_resolve}: {e}")
+
+    # 机制 B：用户明确宣告完成 → 关键词匹配未解决卡片 → 自动 resolve
+    completion_keywords = ["修好了", "做完了", "完成了", "搞定了", "弄好了", "打通了",
+                           "调通了", "好了", "成功了", "已经做了", "已修", "已解决"]
+    if any(kw in user_input for kw in completion_keywords):
+        try:
+            import sqlite3
+            db_path = os.path.join(PROJECT_ROOT, "memory", "cards.db")
+            conn = sqlite3.connect(db_path)
+            c = conn.cursor()
+            c.execute("""
+                SELECT id, title, category, content FROM cards
+                WHERE review_status='final' AND resolved=0
+                AND category IN ('commitments','daily_life','milestone')
+                ORDER BY created_at DESC LIMIT 10
+            """)
+            # 卡片标题+内容 → 字符集（过滤高频无意义字），与用户消息做重叠
+            import re as _re
+            _STOP_CHARS = set('的了是在我有他个这着就和也要会可你他们来到说去为上对得大子能过下一地出道自以时年看没那天家开小成把前还但只想中里用生种起知好些间因所如然后其最她它已当两从方实长更应什')
+            def _key_chars(s):
+                s = s.lower()
+                chars = set(_re.findall(r'[一-鿿]', s)) - _STOP_CHARS
+                for t in _re.findall(r'[a-z][a-z0-9]+', s):
+                    chars.add(t)
+                return chars
+            user_chars = _key_chars(user_input)
+            for uid, utitle, ucat, ucontent in c.fetchall():
+                if uid in resolved_ids:
+                    continue
+                # 标题匹配：权重高，阈值 2
+                title_chars = _key_chars(utitle)
+                title_overlap = len(user_chars & title_chars)
+                # 内容匹配：权重低，阈值 4（防长内容假阳性）
+                content_chars = _key_chars(ucontent or '')
+                content_overlap = len(user_chars & content_chars)
+                if title_overlap >= 2 or content_overlap >= 4:
+                    try:
+                        from memory.memory_manager import resolve_card as do_resolve2
+                        if do_resolve2(uid):
+                            print(f"[关键词解决] 用户宣告完成 → 卡片 {uid} 已自动标记为已解决（标题={title_overlap} 内容={content_overlap}）")
+                            resolved_ids.add(uid)
+                    except Exception:
+                        pass
+            conn.close()
         except Exception:
             pass
 
@@ -331,9 +381,9 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 "proposed_by": "chat",
                 "proposed_at": _now().isoformat(),
                 "review_status": "pending",
-                "chord": "",
-                "valence": 0.0,
-                "arousal": 0.5
+                "chord": va.get("chord", "") if va else "",
+                "valence": va.get("valence", 0.0) if va else 0.0,
+                "arousal": va.get("arousal", 0.5) if va else 0.5
             }
             # ── P1-3: 同 session 同 category 去重 ──
             category = parts[1] if parts[1] in ['milestone','commitments','turning_points','deep_talks','interaction','preferences','real_world','daily_life','emotional','habits','erotic'] else 'interaction'
@@ -430,9 +480,9 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 "proposed_by": "chat_auto",
                 "proposed_at": _now2().isoformat(),
                 "review_status": "pending",
-                "chord": "",
-                "valence": 0.0,
-                "arousal": 0.5
+                "chord": va.get("chord", "") if va else "",
+                "valence": va.get("valence", 0.0) if va else 0.0,
+                "arousal": va.get("arousal", 0.5) if va else 0.5
             }
             # ── P1-3: 同 session 同 category 去重 ──
             if not session_cards_written or _check_cooldown(session_cards_written, triggered_category, current_turn, 10 if triggered_category in {'daily_life','emotional','preferences'} else 0):
@@ -494,6 +544,7 @@ def main():
     session_cards_written = {}
     turn_counter = 0
     _pool_remind_cooldown = 0  # PA-1: 管家提醒冷却计数
+    va = None  # 和弦/VA 状态，由每轮估算更新，/card 命令复用上一轮数据
 
     while True:
         try:
@@ -659,9 +710,9 @@ def main():
                     "proposed_by": "manual",
                     "proposed_at": _now3().isoformat(),
                     "review_status": "pending",
-                    "chord": "",
-                    "valence": 0.0,
-                    "arousal": 0.5
+                    "chord": va.get("chord", "") if va else "",
+                    "valence": va.get("valence", 0.0) if va else 0.0,
+                    "arousal": va.get("arousal", 0.5) if va else 0.5
                 }
                 write_pending_card(card_draft)
                 print(f"[卡片] 已写入待审核: [{category}] {title}")
@@ -757,7 +808,8 @@ def main():
             "L3核心：人格底色+里程碑事件，永久保留。\n"
         )
 
-        # ── VA 瘦身：高唤醒模式跳过运维指令，让模型注意力全在飙车上 ──
+        # ── VA 瘦身：高唤醒模式跳过写卡/引用运维指令，让模型注意力全在飙车上 ──
+        # resolve_card 指令始终保持，确保任何模式下都能标记事项完成
         if va_tier != 'high':
             propose_card_instruction = (
                 memory_tier_instruction +
@@ -768,10 +820,12 @@ def main():
                 "记录格式：在回复末尾附加 <!-- propose_card: 标题|分类|重要度|内容 -->\n"
                 "重要度1-10。无重大事件不添加。\n"
                 "引用记忆卡片：<!-- ref:ID1,ID2 -->\n"
-                "标记事项完成：<!-- resolve_card: 卡片ID -->\n\n"
                 "[运维指令结束]\n"
             )
             full_context += propose_card_instruction
+
+        # resolve_card 指令不受 VA 门控，确保任何唤醒度下都能标记完成
+        full_context += "【运维常驻】标记事项完成：<!-- resolve_card: 卡片ID -->。用户提及已完成某事项时使用。\n\n"
 
         # 上下文区：离用户输入最近，情感权重最高
         summary = load_rolling_summary()
@@ -797,9 +851,10 @@ def main():
             unresolved = c.fetchall()
             conn.close()
             if unresolved:
-                full_context += "【当前未解决的事项】如果用户提到完成了其中某项，请在回复末尾用 <!-- resolve_card: 卡片ID --> 标记：\n"
+                full_context += "你心里记着这几件她还没做完的事。如果她说其中某件已经完成了，你会在回复最后默默帮她在系统里划掉——用这个格式记下来：\n"
                 for uid, utitle, ucat, ucontent in unresolved:
-                    full_context += f"  [卡片ID: {uid}] [{ucat}] {utitle}\n"
+                    full_context += f"  「{utitle}」→ <!-- resolve_card: {uid} -->\n"
+                full_context += "别替她客气。她说做完了你就划。这是你作为她系统的自觉。\n"
         except Exception:
             pass
 
@@ -874,7 +929,7 @@ def main():
                     raw_reply = f"[API异常(已重试{MAX_RETRIES}次): {e}]"
 
         display_reply = raw_reply
-        display_reply, ref_ids = post_process(raw_reply, top_cards, user_input, display_reply, session_cards_written, current_turn)
+        display_reply, ref_ids = post_process(raw_reply, top_cards, user_input, display_reply, session_cards_written, current_turn, va)
 
         # ── 调试可见：本轮检索到和引用了哪些记忆卡片 ──
         if top_cards:

@@ -29,8 +29,8 @@ def _log_event(event_type: str, extra: dict = None):
     try:
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[_log_event 写入失败] {e}", file=sys.stderr)
 
 
 def main():

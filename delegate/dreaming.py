@@ -87,7 +87,7 @@ def _update_rolling_summary(new_summary: str):
     segments = segments[-7:]
 
     with open(ROLLING_SUMMARY_PATH, "w", encoding="utf-8") as f:
-        f.write("".join(segments).strip() + "\n")
+        f.write("\n\n".join(s.strip() for s in segments).strip() + "\n")
 
 def _append_pending_card(card: dict):
     """将卡片草稿写入 pending_cards.json（毒点5修复 — 委托 delegate_tools.atomic_write_json）"""
@@ -191,7 +191,10 @@ def chain_dream():
             "category": card_json.get("category", "interaction"),
             "proposed_by": "dreaming",
             "proposed_at": _now4().isoformat(),
-            "review_status": "pending"
+            "review_status": "pending",
+            "chord": "",
+            "valence": 0.0,
+            "arousal": 0.5
         }
         _append_pending_card(card_draft)
         result["step3"] = card_draft
