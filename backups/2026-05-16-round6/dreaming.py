@@ -79,9 +79,16 @@ def _update_rolling_summary(new_summary: str):
     if current.strip():
         segments.append(current.rstrip())
 
-    # 毒点5修复：删除所有同日期旧条目，再追加新条目
-    segments = [s for s in segments if not s.startswith(f"## {today_str}")]
-    segments.append(new_entry.strip())
+    # 查找并替换同日期的段落
+    found = False
+    for i, seg in enumerate(segments):
+        if seg.startswith(f"## {today_str}"):
+            segments[i] = new_entry.strip()
+            found = True
+            break
+
+    if not found:
+        segments.append(new_entry.strip())
 
     # 只保留最近 7 条
     segments = segments[-7:]
@@ -93,29 +100,11 @@ def _append_pending_card(card: dict):
     """将卡片草稿写入 pending_cards.json（毒点5修复 — 委托 delegate_tools.atomic_write_json）"""
     from delegate_tools import atomic_write_json
     if os.path.exists(PENDING_CARDS_PATH):
-        try:
-            with open(PENDING_CARDS_PATH, "r", encoding="utf-8") as f:
-                pending = json.load(f)
-        except json.JSONDecodeError as e:
-            import shutil
-            from datetime import datetime
-            backup = PENDING_CARDS_PATH + ".corrupted_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-            shutil.copy2(PENDING_CARDS_PATH, backup)
-            print(f"[dreaming] ⚠ pending_cards.json 损坏({e.lineno}:{e.colno})，已备份至 {os.path.basename(backup)}，重建空列表")
-            pending = []
+        with open(PENDING_CARDS_PATH, "r", encoding="utf-8") as f:
+            pending = json.load(f)
     else:
         pending = []
     pending.append(card)
-    # ── 交叉检查：语义去重 ──
-    try:
-        from memory.memory_manager import check_duplicates
-        dups = check_duplicates(card.get("content", ""))
-        if dups:
-            print(f"[dreaming] 去重拦截: {dups}")
-            return
-    except Exception:
-        pass
-
     try:
         atomic_write_json(PENDING_CARDS_PATH, pending)
     except Exception as e:
@@ -149,19 +138,6 @@ def chain_dream():
     print(f"[dreaming] Step2 总结: {summary[:100]}...")
     result["step2"] = summary
     _update_rolling_summary(summary)
-
-    # ── 交叉检查：今日已累积>=3张待审核则跳过立卡 ──
-    if os.path.exists(PENDING_CARDS_PATH):
-        try:
-            with open(PENDING_CARDS_PATH, "r", encoding="utf-8") as pf:
-                today_pending = [c for c in json.load(pf)
-                    if c.get("proposed_at","").startswith(digest_date)]
-            if len(today_pending) >= 3:
-                print(f"[dreaming] 今日已累积{len(today_pending)}张待审核，跳过立卡")
-                result["step3"] = {"action": "skip", "reason": "pending_queue_full"}
-                return result
-        except Exception:
-            pass
 
     card_prompt = _load_prompt("dreaming_card.txt")
     step3_context = f"今日总结：\n{summary}\n\n完整对话摘要：\n{digest}"

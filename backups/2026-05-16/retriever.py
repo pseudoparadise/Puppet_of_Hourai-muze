@@ -14,8 +14,10 @@ import numpy as np
 import random
 from datetime import datetime
 
-# ── 毒点23修复：拆分为不可变配置 + 独立状态 ──
-SCORING_CONFIG = {
+# ── NEW: 打分权重（集中管理，为未来重排优化留收口） ──
+# WARNING: _usage_stats is a mutable global state, safe only under single-process assumption.
+# Refactor to per-instance state if multi-process or multi-thread is needed.
+SCORING_WEIGHTS = {
     "w_keyword": 1.5,       # 关键词命中权重
     "w_semantic": 1.0,      # 语义相似度权重
     "w_importance": 0.5,    # 重要度权重
@@ -30,8 +32,8 @@ SCORING_CONFIG = {
     "min_categories": 2,    # 最小跨类别数
 }
 
-# 独立的状态计数器，不再污染权重配置（毒点23修复）
-USAGE_STATS = {
+# ── P2-4: 圣遗物自适应计数器（数据收集层，不改变当前打分逻辑） ──
+SCORING_WEIGHTS["_usage_stats"] = {
     "total_searches": 0,
     "total_refs": 0,
     "fire_refs": 0,
@@ -84,8 +86,7 @@ def _build_candidate_pool(all_cards: list, anchor_ids: set, va_tier: str,
                     created = datetime.fromisoformat(card['created_at'])
                     if (now - created).days <= 7:
                         include = True
-                except Exception:
-                    print(f"[_build_candidate_pool] 日期解析失败 card_id={card.get('id', '?')}, created_at={card.get('created_at', 'None')}")
+                except:
                     pass
             if not include and card.get('category') in DAILY_CATEGORIES and card.get('usage_count', 0) >= 3:
                 include = True
@@ -94,9 +95,8 @@ def _build_candidate_pool(all_cards: list, anchor_ids: set, va_tier: str,
             if card.get('category') in DEEP_CATEGORIES:
                 include = True
         else:
-            # ── 毒点24修复：中唤醒不进行全表追加，改为最后统一随机采样 ──
-            # 随机采样在 return 前处理，锚定卡片不受限制
-            pass
+            # 中唤醒：全表扫描（默认平衡模式，不做过滤）
+            include = True
         if include:
             pool.append(card)
             seen_ids.add(card['id'])
@@ -116,15 +116,7 @@ def _build_candidate_pool(all_cards: list, anchor_ids: set, va_tier: str,
     if not pool:
         pool = list(all_cards)
 
-    # ── 毒点24修复：中唤醒模式随机采样，避免新卡因插入顺序被排除 ──
-    if va_tier == 'mid' and len(pool) > candidate_limit:
-        import random as _random
-        anchors_in_pool = [c for c in pool if c['id'] in anchor_ids]
-        non_anchors = [c for c in pool if c['id'] not in anchor_ids]
-        sampled = anchors_in_pool + _random.sample(non_anchors, min(len(non_anchors), candidate_limit - len(anchors_in_pool)))
-        return sampled[:candidate_limit]
-    else:
-        return pool[:candidate_limit]
+    return pool[:candidate_limit]
 
 
 def _score_card(card: dict, hit_count: int, distance: float, weights: dict = None, anchor_ids: set = None, va_tier: str = "mid") -> float:
@@ -135,12 +127,12 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
     card: 卡片 dict，包含 importance, category 等字段
     hit_count: 关键词命中次数
     distance: FAISS L2 距离（越小越相似）
-    weights: 权重 dict，默认使用 SCORING_CONFIG
+    weights: 权重 dict，默认使用 SCORING_WEIGHTS
     """
     # ── ST-2: resolved 卡片沉底（分數×0.05），不改 importance 真實值 ──
     resolved_penalty = 0.05 if card.get('resolved') == 1 else 1.0
 
-    w = weights or SCORING_CONFIG
+    w = weights or SCORING_WEIGHTS
     dist_sigmoid = 2.0 / (1.0 + np.exp(distance)) if distance < 10 else 0.0
     keyword_score = hit_count * w["w_keyword"]
     semantic_score = dist_sigmoid * w["w_semantic"]
@@ -249,22 +241,8 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
         if (va_valence > 0 and card_valence > 0) or (va_valence < 0 and card_valence < 0):
             water_smooth += 0.02
 
-    # ── 阶段4.2：和弦 BPM/动态加权 ──
-    chord_bpm = w.get('_chord_bpm')
-    chord_dynamic = w.get('_chord_dynamic')
-    if chord_bpm is not None:
-        if chord_bpm <= 60:
-            water_smooth += w.get('w_water', 0.15) * 0.4
-        elif chord_bpm >= 130:
-            fire_burst += w.get('w_fire', 0.25) * 0.3
-    if chord_dynamic is not None:
-        if chord_dynamic in ('f', 'ff'):
-            fire_burst += w.get('w_fire', 0.25) * 0.2
-        elif chord_dynamic in ('pp', 'p'):
-            water_smooth += w.get('w_water', 0.15) * 0.3
-
     # ── P2-4: 圣遗物计数器 ──
-    USAGE_STATS["total_searches"] = USAGE_STATS.get("total_searches", 0) + 1
+    w["_usage_stats"]["total_searches"] = w["_usage_stats"].get("total_searches", 0) + 1
 
     return (
         keyword_score + semantic_score + importance_score +
@@ -273,16 +251,14 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
     ) * resolved_penalty
 
 
-def retrieve(query: str, top_k: int = 3, weights: dict = None,
-             va_tier: str = "mid", va_description: str = None, va_valence: float = None,
-             chord_bpm: int = None, chord_dynamic: str = None) -> list:
-    db_path = os.path.join(os.path.dirname(__file__), "cards.db")
+def retrieve(query: str, db_path: str = None, top_k: int = 3, weights: dict = None,
+             va_tier: str = "mid", va_description: str = None, va_valence: float = None) -> list:
+    if db_path is None:
+        db_path = os.path.join(os.path.dirname(__file__), "cards.db")
 
     # ── VA 唤醒度三层分档：调整检索策略 ──
-    w = weights or SCORING_CONFIG
-    # ── 毒点32修复：deepcopy 避免跨调用污染原始配置 ──
-    import copy
-    effective_weights = copy.deepcopy(w)
+    w = weights or SCORING_WEIGHTS
+    effective_weights = dict(w)
     effective_k = top_k
     diversity_enabled = w.get("diversity_enabled", True)
     semantic_k_mult = 3  # search_index k 倍数
@@ -291,10 +267,6 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
         effective_weights['_va_description'] = va_description
     if va_valence is not None:
         effective_weights['_va_valence'] = va_valence
-    if chord_bpm is not None:
-        effective_weights['_chord_bpm'] = chord_bpm
-    if chord_dynamic is not None:
-        effective_weights['_chord_dynamic'] = chord_dynamic
 
     if va_tier == "high":
         # 共鸣优先：搜更宽、语义权重 ↑、关键词权重 ↓、关闭多样性

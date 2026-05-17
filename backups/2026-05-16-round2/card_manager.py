@@ -13,7 +13,6 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 sys.path.insert(0, os.path.dirname(__file__))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 # ── FIX: 导入 load_index / save_index 而不仅是 create_index ──
 from encoder import embed, load_index, add_to_index, save_index, remove_from_index
 
@@ -144,45 +143,26 @@ class CardManager:
     def _load_pending_list(self):
         if not os.path.exists(PENDING_PATH):
             return []
-        try:
-            with open(PENDING_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except json.JSONDecodeError as e:
-            import shutil
-            from datetime import datetime
-            backup = PENDING_PATH + ".corrupted_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-            shutil.copy2(PENDING_PATH, backup)
-            print(f"[card_manager] 警告: pending_cards.json 损坏({e.lineno}:{e.colno})，已备份至 {os.path.basename(backup)}，重建空列表")
-            return []
+        with open(PENDING_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
 
     def _save_pending_list(self, pending_list):
-        # ── 毒点33修复：原子写入，避免 GUI 与后台并发截断 ──
-        from delegate_tools import atomic_write_json
-        atomic_write_json(PENDING_PATH, pending_list)
+        with open(PENDING_PATH, "w", encoding="utf-8") as f:
+            json.dump(pending_list, f, ensure_ascii=False, indent=2)
 
     def _insert_into_db(self, card):
         conn = sqlite3.connect(DB_PATH)
         try:
-            # ── 阶段1.2：确保 chord 列存在，NULL → ''（修正2） ──
+            # ── FIX: embed 调用加异常保护 ──
             try:
-                conn.execute("ALTER TABLE cards ADD COLUMN chord TEXT NOT NULL DEFAULT ''")
-            except sqlite3.OperationalError:
-                pass  # 列已存在
-
-            # ── FIX: embed 调用加异常保护（毒点26修复：commit 移到最后） ──
-            try:
-                embed_content = card["content"]
-                ch = card.get("chord") or ""
-                if ch:
-                    embed_content += f"\n[情绪纹理: {ch}]"
-                vec = embed(embed_content)
+                vec = embed(card["content"])
             except Exception as e:
-                raise RuntimeError(f"向量生成失败。请查看终端 [encoder] 日志了解详情。最后一次错误: {e}")
+                raise RuntimeError(f"向量生成失败（可能是豆包API连接问题，已自动重试3次仍失败）: {e}")
 
             vec_bytes = vec.tobytes()
             conn.execute("""
-                INSERT OR REPLACE INTO cards (id, title, content, keywords, embedding, importance, category, review_status, chord)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'final', ?)
+                INSERT OR REPLACE INTO cards (id, title, content, keywords, embedding, importance, category, review_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'final')
             """, (
                 card["id"],
                 card["title"],
@@ -190,20 +170,14 @@ class CardManager:
                 card.get("keywords", ""),
                 vec_bytes,
                 card.get("importance", 5),
-                card.get("category", "interaction"),
-                card.get("chord") or ""
+                card.get("category", "interaction")
             ))
+            conn.commit()
 
             # ── FIX: 不再 create_index() 覆盖！改为 load→add→save ──
             index = load_index()
             add_to_index(index, card["id"], vec)
             save_index(index)
-
-            # ── 毒点26修复：所有操作成功后最后 commit ──
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
         finally:
             conn.close()
 
@@ -212,7 +186,6 @@ class CardManager:
         btn_frame.pack(fill=tk.X, pady=5)
         ttk.Button(btn_frame, text="刷新卡片库", command=self.load_final).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="删除选中卡片", command=self.delete_final_card).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="标记已解决", command=self.resolve_card).pack(side=tk.LEFT, padx=5)
 
         columns = ("id", "title", "category", "importance", "days_remaining", "enabled", "resolved", "content")
         self.final_tree = ttk.Treeview(self.final_frame, columns=columns, show="headings", height=15)
@@ -302,32 +275,6 @@ class CardManager:
                 messagebox.showerror("失败", f"删除卡片 {card_id} 失败。")
         except Exception as e:
             messagebox.showerror("异常", f"删除异常: {e}")
-
-    # ── 毒点44修复：标记卡片已解决 ──
-    def resolve_card(self):
-        selected = self.final_tree.selection()
-        if not selected:
-            messagebox.showwarning("未选中", "请先在卡片库里点选一张卡片。")
-            return
-
-        card_id = self.final_tree.item(selected[0], "values")[0]
-        if not messagebox.askyesno("确认", f"确定将卡片 {card_id} 标记为已解决吗？"):
-            return
-
-        try:
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            c.execute("UPDATE cards SET resolved = 1 WHERE id = ?", (card_id,))
-            if c.rowcount == 0:
-                messagebox.showerror("失败", f"未找到卡片 {card_id}。")
-                conn.close()
-                return
-            conn.commit()
-            conn.close()
-            messagebox.showinfo("成功", f"卡片 {card_id} 已标记为已解决。")
-            self.load_final()
-        except Exception as e:
-            messagebox.showerror("异常", f"操作异常: {e}")
 
     # ── FINAL-6: 已休眠卡片标签页 ──
     def build_dormant_tab(self):

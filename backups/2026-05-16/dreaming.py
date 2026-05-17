@@ -26,11 +26,11 @@ def _load_prompt(name):
         return f.read().strip()
 
 def _get_today_digest():
-    """── FIX: 毒点11 — 统一使用 UTC 日期确定「今日」──"""
-    from delegate_tools import now_utc
+    """返回 (摘要文本, 对话日期)。用日志最后一条时间戳确定「对话日」，
+    避免午夜0点 datetime.now() 跨天后找不到前一晚的对话。"""
     chat_log_path = os.path.join(os.path.dirname(__file__), "..", "chat_logs.json")
     if not os.path.exists(chat_log_path):
-        return None, now_utc().strftime("%Y-%m-%d")
+        return None, datetime.now().strftime("%Y-%m-%d")
 
     entries = []
     with open(chat_log_path, "r", encoding="utf-8") as f:
@@ -42,10 +42,10 @@ def _get_today_digest():
                 pass
 
     if not entries:
-        return None, now_utc().strftime("%Y-%m-%d")
+        return None, datetime.now().strftime("%Y-%m-%d")
 
-    # 毒点11修复：与 bark_trigger 统一使用 UTC 日期
-    today_str = now_utc().strftime("%Y-%m-%d")
+    # ── FIX: 用日历日定文件名，与 bark_trigger 检查一致；日志时间戳仅用于筛选 ──
+    today_str = datetime.now().strftime("%Y-%m-%d")
 
     lines = []
     for entry in entries:
@@ -57,8 +57,7 @@ def _get_today_digest():
     return "\n".join(lines[-50:]), today_str
 
 def _update_rolling_summary(new_summary: str):
-    from delegate_tools import now_utc
-    today_str = now_utc().strftime("%Y-%m-%d")
+    today_str = datetime.now().strftime("%Y-%m-%d")
     new_entry = f"\n## {today_str}\n{new_summary}\n"
 
     if os.path.exists(ROLLING_SUMMARY_PATH):
@@ -67,59 +66,36 @@ def _update_rolling_summary(new_summary: str):
     else:
         old = ""
 
-    # ── FIX: 逐段解析，以 "## " 为分段标记，同日期替换而非追加（毒点4修复） ──
-    segments = []
-    current = ""
-    for line in old.split("\n"):
-        if line.startswith("## ") and current.strip():
-            segments.append(current.rstrip())
-            current = line + "\n"
-        else:
-            current += line + "\n"
-    if current.strip():
-        segments.append(current.rstrip())
-
-    # 毒点5修复：删除所有同日期旧条目，再追加新条目
-    segments = [s for s in segments if not s.startswith(f"## {today_str}")]
-    segments.append(new_entry.strip())
-
-    # 只保留最近 7 条
+    pattern = r"(## \d{4}-\d{2}-\d{2}.*?)(?=## \d{4}-\d{2}-\d{2}|\Z)"
+    segments = re.findall(pattern, old, re.DOTALL)
+    segments.append(new_entry)
     segments = segments[-7:]
 
     with open(ROLLING_SUMMARY_PATH, "w", encoding="utf-8") as f:
         f.write("".join(segments).strip() + "\n")
 
 def _append_pending_card(card: dict):
-    """将卡片草稿写入 pending_cards.json（毒点5修复 — 委托 delegate_tools.atomic_write_json）"""
-    from delegate_tools import atomic_write_json
+    """将卡片草稿写入 pending_cards.json（FIX: 原子写入，不依赖 fcntl）"""
     if os.path.exists(PENDING_CARDS_PATH):
-        try:
-            with open(PENDING_CARDS_PATH, "r", encoding="utf-8") as f:
-                pending = json.load(f)
-        except json.JSONDecodeError as e:
-            import shutil
-            from datetime import datetime
-            backup = PENDING_CARDS_PATH + ".corrupted_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-            shutil.copy2(PENDING_CARDS_PATH, backup)
-            print(f"[dreaming] ⚠ pending_cards.json 损坏({e.lineno}:{e.colno})，已备份至 {os.path.basename(backup)}，重建空列表")
-            pending = []
+        with open(PENDING_CARDS_PATH, "r", encoding="utf-8") as f:
+            pending = json.load(f)
     else:
         pending = []
     pending.append(card)
-    # ── 交叉检查：语义去重 ──
-    try:
-        from memory.memory_manager import check_duplicates
-        dups = check_duplicates(card.get("content", ""))
-        if dups:
-            print(f"[dreaming] 去重拦截: {dups}")
-            return
-    except Exception:
-        pass
 
+    # ── FIX: 原子写入替代 fcntl ──
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        suffix=".json", prefix="pending_",
+        dir=os.path.dirname(PENDING_CARDS_PATH)
+    )
     try:
-        atomic_write_json(PENDING_CARDS_PATH, pending)
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            json.dump(pending, f, ensure_ascii=False, indent=2)
+        shutil.move(tmp_path, PENDING_CARDS_PATH)
     except Exception as e:
         print(f"[dreaming] 卡片写入失败: {e}")
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 def chain_dream():
     result = {"step1": None, "step2": None, "step3": None}
@@ -139,8 +115,8 @@ def chain_dream():
     print(f"[dreaming] Step1 日记: {diary[:100]}...")
     result["step1"] = diary
 
-    from delegate_tools import atomic_write_text
-    atomic_write_text(diary_path, f"# {digest_date}\n\n{diary}")
+    with open(diary_path, "w", encoding="utf-8") as f:
+        f.write(f"# {digest_date}\n\n{diary}")
     print(f"[dreaming] 日记已落盘: {diary_path}")
 
     summary_prompt = _load_prompt("dreaming_summary.txt")
@@ -149,19 +125,6 @@ def chain_dream():
     print(f"[dreaming] Step2 总结: {summary[:100]}...")
     result["step2"] = summary
     _update_rolling_summary(summary)
-
-    # ── 交叉检查：今日已累积>=3张待审核则跳过立卡 ──
-    if os.path.exists(PENDING_CARDS_PATH):
-        try:
-            with open(PENDING_CARDS_PATH, "r", encoding="utf-8") as pf:
-                today_pending = [c for c in json.load(pf)
-                    if c.get("proposed_at","").startswith(digest_date)]
-            if len(today_pending) >= 3:
-                print(f"[dreaming] 今日已累积{len(today_pending)}张待审核，跳过立卡")
-                result["step3"] = {"action": "skip", "reason": "pending_queue_full"}
-                return result
-        except Exception:
-            pass
 
     card_prompt = _load_prompt("dreaming_card.txt")
     step3_context = f"今日总结：\n{summary}\n\n完整对话摘要：\n{digest}"
@@ -181,16 +144,15 @@ def chain_dream():
             card_json = {"action": "skip"}
 
     if card_json.get("action") == "create":
-        from delegate_tools import now_utc as _now4
         card_draft = {
-            "id": card_json.get("id", f"{_now4().strftime('%Y%m%d')}_auto"),
+            "id": card_json.get("id", f"{datetime.now().strftime('%Y%m%d')}_auto"),
             "title": card_json.get("title", ""),
             "content": card_json.get("content", ""),
             "keywords": card_json.get("keywords", ""),
             "importance": card_json.get("importance", 5),
             "category": card_json.get("category", "interaction"),
             "proposed_by": "dreaming",
-            "proposed_at": _now4().isoformat(),
+            "proposed_at": datetime.now().isoformat(),
             "review_status": "pending"
         }
         _append_pending_card(card_draft)

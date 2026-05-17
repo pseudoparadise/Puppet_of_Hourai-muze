@@ -2,6 +2,7 @@
 review.py - 记忆卡片审核闸门（修复版）
 
 FIX: approve_card 不再 create_index() 覆盖全部索引，改为 load→add→save
+FIX: load_pending 加固 — JSON 损坏时备份并重建，避免崩溃
 """
 import json
 import os
@@ -19,8 +20,16 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "cards.db")
 def load_pending():
     if not os.path.exists(PENDING_PATH):
         return []
-    with open(PENDING_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(PENDING_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        import shutil
+        from datetime import datetime
+        backup = PENDING_PATH + ".corrupted_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+        shutil.copy2(PENDING_PATH, backup)
+        print(f"[review] 警告: pending_cards.json 损坏({e.lineno}:{e.colno})，已备份至 {os.path.basename(backup)}，重建空列表")
+        return []
 
 def save_pending(pending_list):
     with open(PENDING_PATH, "w", encoding="utf-8") as f:

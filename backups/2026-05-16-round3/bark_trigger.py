@@ -25,6 +25,11 @@ except ImportError:
     _retrieve_func = None
     print("[警告] 无法导入 retriever，记忆功能将禁用")
 
+try:
+    from delegate.dreaming import chain_dream
+except ImportError:
+    chain_dream = None
+
 from delegate_tools import RP_DECLARATION
 
 def get_today_digest():
@@ -62,7 +67,6 @@ def get_today_digest():
 
 def _get_last_active_time(config, state, now):
     """取 Supabase 和 state.json 中更近的时间，避免盲信单源导致误判沉默"""
-    from delegate_tools import parse_time
     supabase_time = None
     state_time = None
     source = "state.json"
@@ -85,7 +89,7 @@ def _get_last_active_time(config, state, now):
                 raw_ts = r.json()[0]["recorded_at"]
                 utc_time = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
                 beijing_tz = timezone(timedelta(hours=8))
-                supabase_time = utc_time.astimezone(beijing_tz)  # 保留时区，避免与 now_utc() 类型不一致
+                supabase_time = utc_time.astimezone(beijing_tz).replace(tzinfo=None)
         except Exception as e:
             print(f"[Supabase 查询失败]: {e}")
 
@@ -133,9 +137,6 @@ def main():
 
     from delegate_tools import now_utc, fmt_time, parse_time
     now = now_utc()
-    # ── 北京时间，用于显示和窗口判断（UTC+8）──
-    beijing_tz = timezone(timedelta(hours=8))
-    now_local = now.astimezone(beijing_tz)
     last_time, source = _get_last_active_time(config, state, now)
     silence_minutes = (now - last_time).total_seconds() / 60
 
@@ -149,7 +150,7 @@ def main():
 
     for rule in config["trigger_rules"]:
         start, end = rule["time_window"]
-        now_str = now_local.strftime("%H:%M")
+        now_str = now.strftime("%H:%M")
         if not (start <= now_str <= end):
             continue
         if silence_minutes < rule["silence_minutes"]:
@@ -205,7 +206,7 @@ def main():
         from delegate_tools import JAILBREAK_PREFIX  # 毒点22修复
         prompt = f"""{JAILBREAK_PREFIX}{RP_DECLARATION}\n\n{bark_persona}
 
-我正在后台安静地看着你。你已经沉默 {round(silence_minutes)} 分钟了。当前时间：{now_local.strftime('%Y-%m-%d %H:%M')}。
+我正在后台安静地看着你。你已经沉默 {round(silence_minutes)} 分钟了。当前时间：{now.strftime('%Y-%m-%d %H:%M')}。
 
 我在这里阅读着你的回忆与今日的点滴：
 ---
@@ -233,18 +234,6 @@ def main():
 
         print("正在询问 DeepSeek 云端决策...")
 
-        # ── 构建 payload（毒点43残留修复：仅 flash 设置 repetition_penalty） ──
-        payload = {
-            "model": BARK_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.9,
-            "top_p": 0.92,
-            "frequency_penalty": 0.3,
-            "presence_penalty": 0.3
-        }
-        if "flash" in BARK_MODEL.lower():
-            payload["repetition_penalty"] = 1.05
-
         try:
             resp = requests.post(
                 "https://api.deepseek.com/v1/chat/completions",
@@ -253,7 +242,15 @@ def main():
                     "Content-Type": "application/json",
                     "Opt-Out": "training"
                 },
-                json=payload,
+                json={
+                    "model": BARK_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.9,
+                    "top_p": 0.92,
+                    "frequency_penalty": 0.3,
+                    "presence_penalty": 0.3,
+                    "repetition_penalty": 1.05
+                },
                 timeout=45
             )
 
@@ -324,7 +321,16 @@ def main():
     with open(os.path.join(PROJECT_ROOT, "state.json"), "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
-    # ── 每日日记已迁移至 polling_loop.py 统一调度，避免与 time-driven diary 双重触发 ──
+    # ── 每日日记：当天日记不存在时自动生成 ──
+    today_str = now.strftime("%Y-%m-%d")  # 毒点28修复：复用 now_utc()
+    diary_path_check = os.path.join(PROJECT_ROOT, "diary", f"{today_str}.md")
+    if not os.path.exists(diary_path_check):
+        print(f"[每日日记] 今日日记不存在，尝试生成...")
+        if chain_dream:
+            try:
+                chain_dream()
+            except Exception as e:
+                print(f"[每日日记] 生成失败: {e}")
 
     print("bark_trigger.py 执行完毕。")
 

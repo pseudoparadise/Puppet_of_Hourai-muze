@@ -249,20 +249,6 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
         if (va_valence > 0 and card_valence > 0) or (va_valence < 0 and card_valence < 0):
             water_smooth += 0.02
 
-    # ── 阶段4.2：和弦 BPM/动态加权 ──
-    chord_bpm = w.get('_chord_bpm')
-    chord_dynamic = w.get('_chord_dynamic')
-    if chord_bpm is not None:
-        if chord_bpm <= 60:
-            water_smooth += w.get('w_water', 0.15) * 0.4
-        elif chord_bpm >= 130:
-            fire_burst += w.get('w_fire', 0.25) * 0.3
-    if chord_dynamic is not None:
-        if chord_dynamic in ('f', 'ff'):
-            fire_burst += w.get('w_fire', 0.25) * 0.2
-        elif chord_dynamic in ('pp', 'p'):
-            water_smooth += w.get('w_water', 0.15) * 0.3
-
     # ── P2-4: 圣遗物计数器 ──
     USAGE_STATS["total_searches"] = USAGE_STATS.get("total_searches", 0) + 1
 
@@ -274,8 +260,7 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
 
 
 def retrieve(query: str, top_k: int = 3, weights: dict = None,
-             va_tier: str = "mid", va_description: str = None, va_valence: float = None,
-             chord_bpm: int = None, chord_dynamic: str = None) -> list:
+             va_tier: str = "mid", va_description: str = None, va_valence: float = None) -> list:
     db_path = os.path.join(os.path.dirname(__file__), "cards.db")
 
     # ── VA 唤醒度三层分档：调整检索策略 ──
@@ -291,10 +276,6 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
         effective_weights['_va_description'] = va_description
     if va_valence is not None:
         effective_weights['_va_valence'] = va_valence
-    if chord_bpm is not None:
-        effective_weights['_chord_bpm'] = chord_bpm
-    if chord_dynamic is not None:
-        effective_weights['_chord_dynamic'] = chord_dynamic
 
     if va_tier == "high":
         # 共鸣优先：搜更宽、语义权重 ↑、关键词权重 ↓、关闭多样性

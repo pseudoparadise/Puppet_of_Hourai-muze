@@ -138,7 +138,13 @@ def config_snapshot() -> str:
             parts.append("── config.json（纯文本脱敏）──")
             parts.append(text_mask(raw))
 
-    # 毒点37修复：删除重复读取 config.json，volcengine 已在上面脱敏展示
+    # volcengine 配置（已从 config.yaml 迁移至 config.json — 毒点20修复）
+    cfg_yaml = os.path.join(ROOT, "config.json")
+    if os.path.exists(cfg_yaml):
+        with open(cfg_yaml, "r", encoding="utf-8") as f:
+            raw = f.read()
+        parts.append("\n── volcengine 配置（已脱敏，来自 config.json）──")
+        parts.append(text_mask(raw))
 
     return "\n".join(parts)
 

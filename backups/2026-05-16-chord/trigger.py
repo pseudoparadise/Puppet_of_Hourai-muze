@@ -69,85 +69,17 @@ ROLLING_PATH = os.path.join(PROJECT_ROOT, "memory", "rolling_summary.md")
 # ── 状态文件（与 bark_trigger 共享时间同步） ──
 STATE_PATH = os.path.join(PROJECT_ROOT, "state.json")
 
-# ═══════════════════════════════════════════════════════════════
-#  和弦情绪标记系统（修正3+4）
-# ═══════════════════════════════════════════════════════════════
-# 映射基于乐理主观经验，可随时调整
-CHORD_EMOTION = {
-    "C": "明亮坚定，C大调主和弦，稳定温暖",
-    "Cmaj7": "梦幻漂浮，大七度带来慵懒的爵士感",
-    "Dm": "柔和忧郁，D小调的自然感伤",
-    "Dm7": "内敛深情，小七度增加一丝温柔",
-    "Em": "宁静感伤，E小调的克制与深思",
-    "Em7": "柔软思念，小七度的暧昧悬停",
-    "F": "温暖宽广，F大调下属和弦的怀抱感",
-    "Fmaj7": "温柔摇曳，大七度像春日午后的微风",
-    "G": "明亮推进，G大调属和弦的期待与张力",
-    "G7": "焦灼渴望，属七和弦的迫切未完成感",
-    "Am": "黯然神伤，A小调主和弦的纯净悲伤",
-    "Am7": "慵懒忧伤，小七度让悲伤变得松弛",
-    "Bm7": "深邃迷离，B小调七和弦的复杂情绪",
-    "E": "强烈明亮，E大调的高亢冲击力",
-    "D7": "乡村律动，属七和弦的摇摆推动感",
-    "B7": "尖锐张力，B属七和弦的戏剧性冲突",
-}
-
-# BPM 速度描述
-BPM_DESC = [(30, "极慢"), (40, "很慢"), (60, "慢"), (80, "中速"), (110, "快"), (140, "很快"), (170, "极快")]
-DYN_DESC = {"pp": "很轻", "p": "轻", "mp": "中轻", "mf": "中强", "f": "强", "ff": "很强"}
-
-def _bpm_text(bpm: int) -> str:
-    for threshold, label in BPM_DESC:
-        if bpm < threshold:
-            return label
-    return "极快"
-
-def _dyn_text(dyn: str) -> str:
-    return DYN_DESC.get(dyn, dyn)
-
-def _describe_chord(chord_str: str) -> str:
-    """和弦名→情绪描述。支持和弦进行（多和弦串联如 Em7Fmaj7）"""
-    import re
-    individuals = re.findall(r'[A-G][a-z0-9]*', chord_str)
-    if len(individuals) >= 2:
-        descs = [CHORD_EMOTION.get(c, f"自定义({c})") for c in individuals]
-        return f"{'→'.join(individuals)}: {'→'.join(descs)}"
-    return CHORD_EMOTION.get(chord_str, f"自定义({chord_str})")
-
-def _parse_chord(raw: str) -> tuple:
-    """
-    修正3：解析 /chord 参数。
-    格式: 和弦名.BPM.动态标记
-    返回: (chord_name, bpm, dynamic) 或 (None, None, error_msg)
-    """
-    import re
-    m = re.match(r'^([^.]+)\.(\d+)bpm\.(pp|p|mp|mf|f|ff)$', raw.strip())
-    if not m:
-        return None, None, f"格式错误: {raw}（期望 和弦名.BPM.动态 如 Em7.80bpm.mf）"
-    chord_name = m.group(1)
-    bpm_str = m.group(2)
-    dynamic = m.group(3)
-    try:
-        bpm = int(bpm_str)
-        if bpm < 30 or bpm > 200:
-            return None, None, f"BPM 超出范围: {bpm}（30-200）"
-    except ValueError:
-        return None, None, f"BPM 非法: {bpm_str}"
-    return chord_name, bpm, dynamic
-
-def _sync_last_active(chord: str = None):
-    """更新 state.json。修正1：合并 chord 写入，避免双写竞争。"""
+def _sync_last_active():
+    """更新 state.json 的 last_user_message_time，让轮询知道用户还在活动"""
     from delegate_tools import now_utc, fmt_time
-    from delegate_tools import atomic_write_json
     try:
         state = {}
         if os.path.exists(STATE_PATH):
             with open(STATE_PATH, "r", encoding="utf-8") as f:
                 state = json.load(f)
         state["last_user_message_time"] = fmt_time(now_utc())
-        if chord is not None:
-            state["last_chord"] = chord
-        atomic_write_json(STATE_PATH, state)
+        with open(STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"[状态同步异常]: {e}")
 
@@ -173,15 +105,8 @@ def write_pending_card(card_draft: dict):
     pending_path = os.path.join(PROJECT_ROOT, "memory", "pending_cards.json")
     pending = []
     if os.path.exists(pending_path):
-        try:
-            with open(pending_path, "r", encoding="utf-8") as f:
-                pending = json.load(f)
-        except json.JSONDecodeError as e:
-            import shutil
-            backup = pending_path + ".corrupted_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-            shutil.copy2(pending_path, backup)
-            print(f"[卡片提议] ⚠ pending_cards.json 损坏({e.lineno}:{e.colno})，已备份至 {os.path.basename(backup)}，重建空列表")
-            pending = []
+        with open(pending_path, "r", encoding="utf-8") as f:
+            pending = json.load(f)
     pending.append(card_draft)
     try:
         atomic_write_json(pending_path, pending)
@@ -236,10 +161,7 @@ AI：{ai_reply[:200]}
                 except json.JSONDecodeError:
                     match = re.search(r'\{.*\}', raw, re.DOTALL)
                     if match:
-                        try:
-                            return json.loads(match.group())
-                        except json.JSONDecodeError:
-                            pass
+                        return json.loads(match.group())
                 return None
             elif resp.status_code >= 500:
                 if attempt < max_retries:
@@ -290,18 +212,6 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
         else:
             print(f"[记忆引用] 卡片 {cid} 续命失败")
 
-    # auto resolve
-    resolve_match = re.search(r'<!--\s*resolve_card:\s*(.*?)\s*-->', raw_reply, re.IGNORECASE)
-    if resolve_match:
-        display_reply = re.sub(r'<!--\s*resolve_card:.*?\s*-->', '', display_reply, flags=re.IGNORECASE).strip()
-        cid_to_resolve = resolve_match.group(1).strip()
-        try:
-            from memory.memory_manager import resolve_card as do_resolve
-            if do_resolve(cid_to_resolve):
-                print(f"[自动解决] AI 已将卡片 {cid_to_resolve} 标记为已解决")
-        except Exception:
-            pass
-
     propose_match = re.search(r'<!--\s*propose_card:\s*(.*?)\s*-->', raw_reply, re.IGNORECASE)
     if propose_match:
         display_reply = re.sub(r'<!--\s*propose_card:.*?\s*-->', '', display_reply, flags=re.IGNORECASE).strip()
@@ -329,7 +239,6 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 "proposed_by": "chat",
                 "proposed_at": _now().isoformat(),
                 "review_status": "pending",
-                "chord": va.get("chord", "") if 'va' in dir() else "",
                 "valence": 0.0,
                 "arousal": 0.5
             }
@@ -428,7 +337,6 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 "proposed_by": "chat_auto",
                 "proposed_at": _now2().isoformat(),
                 "review_status": "pending",
-                "chord": va.get("chord", "") if 'va' in dir() else "",
                 "valence": 0.0,
                 "arousal": 0.5
             }
@@ -596,35 +504,6 @@ def main():
             print()
             continue
 
-        # ── /chord 命令：和弦情绪标记 ──
-        if user_input.strip().lower().startswith("/chord"):
-            raw = user_input.strip()[6:].strip()
-            if not raw:
-                print("[和弦] 用法: /chord 和弦.BPM.动态  例如 /chord Em7.80bpm.mf\n")
-                continue
-            chord_name, bpm, dynamic = _parse_chord(raw)
-            if chord_name is None:
-                print(f"[和弦] {dynamic}\n")
-                continue
-            parsed_chord = f"{chord_name}.{bpm}bpm.{dynamic}"
-            desc = _describe_chord(chord_name)
-            print(f"[和弦] {parsed_chord} → {desc}")
-            print(f"        BPM={bpm}({_bpm_text(bpm)}) 动态={dynamic}({_dyn_text(dynamic)})\n")
-            _sync_last_active(chord=parsed_chord)
-            try:
-                from delegate_tools import now_utc, fmt_time
-                ts = fmt_time(now_utc())
-                with open(chat_log_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps({
-                        "timestamp": ts,
-                        "role": "chord",
-                        "chord": parsed_chord,
-                        "expanded": expanded
-                    }, ensure_ascii=False) + "\n")
-            except Exception:
-                pass
-            continue
-
         # ── /card 命令：手动蒸馏上一轮对话为记忆卡片 ──
         if user_input.strip().lower().startswith("/card"):
             if not recent:
@@ -657,7 +536,6 @@ def main():
                     "proposed_by": "manual",
                     "proposed_at": _now3().isoformat(),
                     "review_status": "pending",
-                    "chord": va.get("chord", "") if 'va' in dir() else "",
                     "valence": 0.0,
                     "arousal": 0.5
                 }
@@ -690,27 +568,6 @@ def main():
         except Exception:
             va, va_tier = {"description": ""}, "mid"
 
-        # ── 阶段2.3：消费 state.json 中残留的 chord ──
-        # chord 消费非原子：pop后崩溃丢失本次标注，但不泄漏到下轮
-        chord_raw = None
-        try:
-            from delegate_tools import atomic_write_json
-            if os.path.exists(STATE_PATH):
-                with open(STATE_PATH, "r", encoding="utf-8") as f:
-                    st = json.load(f)
-                chord_raw = st.pop("last_chord", None)
-                if chord_raw is not None:
-                    atomic_write_json(STATE_PATH, st)
-                    parts = chord_raw.rsplit(".", 2)
-                    if len(parts) == 3:
-                        va["chord"] = chord_raw
-                        va["chord_name"] = parts[0]
-                        va["chord_bpm"] = int(parts[1].replace("bpm", ""))
-                        va["chord_dynamic"] = parts[2]
-                        va["chord_expanded"] = _describe_chord(parts[0])
-        except Exception:
-            pass
-
         max_turns = _get_max_turns(va_tier)
 
         # ── P3-1: 上下文压缩（高唤醒不压缩，保留完整飙车上下文） ──
@@ -732,8 +589,7 @@ def main():
         va_description = va.get('description', '') if va else ''
         try:
             top_cards = retrieve(context_query, top_k=3, va_tier=va_tier, va_description=va_description,
-                            va_valence=va.get('valence') if va else None, weights=CUSTOM_WEIGHTS,
-                            chord_bpm=va.get('chord_bpm'), chord_dynamic=va.get('chord_dynamic'))
+                            va_valence=va.get('valence') if va else None, weights=CUSTOM_WEIGHTS)
             if top_cards:
                 memory_lines = ["【本轮相关记忆】"]
                 for card in top_cards:
@@ -765,8 +621,7 @@ def main():
                 "7.亲密请求→erotic | 8.笑点梗→interaction | 9.里程碑→milestone\n"
                 "记录格式：在回复末尾附加 <!-- propose_card: 标题|分类|重要度|内容 -->\n"
                 "重要度1-10。无重大事件不添加。\n"
-                "引用记忆卡片：<!-- ref:ID1,ID2 -->\n"
-                "标记事项完成：<!-- resolve_card: 卡片ID -->\n\n"
+                "引用记忆卡片：<!-- ref:ID1,ID2 -->\n\n"
                 "[运维指令结束]\n"
             )
             full_context += propose_card_instruction
@@ -781,61 +636,16 @@ def main():
 
         if va:
             full_context += f"【用户情绪】效价={va['valence']:.2f}, 唤醒度={va['arousal']:.2f}, 温度={va['suggested_temperature']}, 描述={va['description']}\n"
-        # unresolved cards
-        try:
-            db_path = os.path.join(PROJECT_ROOT, "memory", "cards.db")
-            conn = sqlite3.connect(db_path)
-            c = conn.cursor()
-            c.execute("""
-                SELECT id, title, category, content FROM cards
-                WHERE review_status='final' AND resolved=0
-                AND category IN ('commitments','daily_life','milestone')
-                ORDER BY created_at DESC LIMIT 5
-            """)
-            unresolved = c.fetchall()
-            conn.close()
-            if unresolved:
-                full_context += "【当前未解决的事项】如果用户提到完成了其中某项，请在回复末尾用 <!-- resolve_card: 卡片ID --> 标记：\n"
-                for uid, utitle, ucat, ucontent in unresolved:
-                    full_context += f"  [卡片ID: {uid}] [{ucat}] {utitle}\n"
-        except Exception:
-            pass
-
         full_context += f"【当前系统时间】{datetime.now().strftime('%Y-%m-%d %H:%M')}（北京时间）\n"
-
-        # ── 阶段2.4：和弦情绪上下文 ──
-        if va.get("chord_expanded"):
-            full_context += f"【上一轮情绪纹理】{va['chord_expanded']}（{va['chord']}）\n"
-            full_context += f"【情绪动态】BPM={va['chord_bpm']}, 力度={va['chord_dynamic']}\n"
-            dyn = va['chord_dynamic']
-            if dyn in ('pp','p'):
-                full_context += "【风格提示】轻柔、克制、留白。用短句和停顿。\n"
-            elif dyn in ('f','ff'):
-                full_context += "【风格提示】饱满、直接、情感充沛。可以热烈一些。\n"
 
         cot = ""
         MAX_RETRIES = 2
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                # ── 阶段2.5：温度基于 VA + 和弦动态/BPM 微调 ──
-                base_temp = 1.1 if va_tier == "high" else 0.8
-                dynamic_mod = 0
-                bpm_mod = 0
-                if va.get("chord_dynamic"):
-                    dyn = va["chord_dynamic"]
-                    dynamic_mod = {"pp": -0.15, "p": -0.10, "mp": -0.05, "mf": 0.05, "f": 0.10, "ff": 0.15}.get(dyn, 0)
-                if va.get("chord_bpm"):
-                    bp = va["chord_bpm"]
-                    if bp <= 50: bpm_mod = -0.10
-                    elif bp <= 70: bpm_mod = -0.05
-                    elif bp >= 170: bpm_mod = 0.10
-                    elif bp >= 140: bpm_mod = 0.05
-                temperature = max(0.6, min(1.5, base_temp + dynamic_mod + bpm_mod))
-
                 payload = {
                     "model": CHAT_MODEL,
                     "messages": _build_messages(full_context, recent, user_input, max_turns),
-                    "temperature": temperature
+                    "temperature": 1.1 if va_tier == "high" else 0.8
                 }
                 if "pro" in CHAT_MODEL:
                     payload["thinking"] = {"type": "enabled"}
@@ -941,15 +751,11 @@ def main():
                         pass
 
             with open(chat_log_path, "a", encoding="utf-8") as f:
-                user_entry = {
+                f.write(json.dumps({
                     "timestamp": ts,
                     "role": "user",
                     "content": user_input
-                }
-                ch = va.get("chord", "") if 'va' in dir() else ""
-                if ch:
-                    user_entry["chord"] = ch
-                f.write(json.dumps(user_entry, ensure_ascii=False) + "\n")
+                }, ensure_ascii=False) + "\n")
                 f.write(json.dumps({
                     "timestamp": ts,
                     "role": "ghost",

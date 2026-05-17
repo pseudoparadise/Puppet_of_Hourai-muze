@@ -92,26 +92,8 @@ CHORD_EMOTION = {
     "B7": "尖锐张力，B属七和弦的戏剧性冲突",
 }
 
-# BPM 速度描述
-BPM_DESC = [(30, "极慢"), (40, "很慢"), (60, "慢"), (80, "中速"), (110, "快"), (140, "很快"), (170, "极快")]
-DYN_DESC = {"pp": "很轻", "p": "轻", "mp": "中轻", "mf": "中强", "f": "强", "ff": "很强"}
-
-def _bpm_text(bpm: int) -> str:
-    for threshold, label in BPM_DESC:
-        if bpm < threshold:
-            return label
-    return "极快"
-
-def _dyn_text(dyn: str) -> str:
-    return DYN_DESC.get(dyn, dyn)
-
-def _describe_chord(chord_str: str) -> str:
-    """和弦名→情绪描述。支持和弦进行（多和弦串联如 Em7Fmaj7）"""
-    import re
-    individuals = re.findall(r'[A-G][a-z0-9]*', chord_str)
-    if len(individuals) >= 2:
-        descs = [CHORD_EMOTION.get(c, f"自定义({c})") for c in individuals]
-        return f"{'→'.join(individuals)}: {'→'.join(descs)}"
+def _expand_chord(chord_str: str) -> str:
+    """修正4：和弦名→中文情绪描述，包含未知和弦兜底。"""
     return CHORD_EMOTION.get(chord_str, f"自定义({chord_str})")
 
 def _parse_chord(raw: str) -> tuple:
@@ -173,15 +155,8 @@ def write_pending_card(card_draft: dict):
     pending_path = os.path.join(PROJECT_ROOT, "memory", "pending_cards.json")
     pending = []
     if os.path.exists(pending_path):
-        try:
-            with open(pending_path, "r", encoding="utf-8") as f:
-                pending = json.load(f)
-        except json.JSONDecodeError as e:
-            import shutil
-            backup = pending_path + ".corrupted_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-            shutil.copy2(pending_path, backup)
-            print(f"[卡片提议] ⚠ pending_cards.json 损坏({e.lineno}:{e.colno})，已备份至 {os.path.basename(backup)}，重建空列表")
-            pending = []
+        with open(pending_path, "r", encoding="utf-8") as f:
+            pending = json.load(f)
     pending.append(card_draft)
     try:
         atomic_write_json(pending_path, pending)
@@ -236,10 +211,7 @@ AI：{ai_reply[:200]}
                 except json.JSONDecodeError:
                     match = re.search(r'\{.*\}', raw, re.DOTALL)
                     if match:
-                        try:
-                            return json.loads(match.group())
-                        except json.JSONDecodeError:
-                            pass
+                        return json.loads(match.group())
                 return None
             elif resp.status_code >= 500:
                 if attempt < max_retries:
@@ -289,18 +261,6 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
             print(f"[记忆引用] 卡片 {cid} 已续命")
         else:
             print(f"[记忆引用] 卡片 {cid} 续命失败")
-
-    # auto resolve
-    resolve_match = re.search(r'<!--\s*resolve_card:\s*(.*?)\s*-->', raw_reply, re.IGNORECASE)
-    if resolve_match:
-        display_reply = re.sub(r'<!--\s*resolve_card:.*?\s*-->', '', display_reply, flags=re.IGNORECASE).strip()
-        cid_to_resolve = resolve_match.group(1).strip()
-        try:
-            from memory.memory_manager import resolve_card as do_resolve
-            if do_resolve(cid_to_resolve):
-                print(f"[自动解决] AI 已将卡片 {cid_to_resolve} 标记为已解决")
-        except Exception:
-            pass
 
     propose_match = re.search(r'<!--\s*propose_card:\s*(.*?)\s*-->', raw_reply, re.IGNORECASE)
     if propose_match:
@@ -607,9 +567,8 @@ def main():
                 print(f"[和弦] {dynamic}\n")
                 continue
             parsed_chord = f"{chord_name}.{bpm}bpm.{dynamic}"
-            desc = _describe_chord(chord_name)
-            print(f"[和弦] {parsed_chord} → {desc}")
-            print(f"        BPM={bpm}({_bpm_text(bpm)}) 动态={dynamic}({_dyn_text(dynamic)})\n")
+            expanded = _expand_chord(chord_name)
+            print(f"[和弦] {parsed_chord} → {expanded}\n")
             _sync_last_active(chord=parsed_chord)
             try:
                 from delegate_tools import now_utc, fmt_time
@@ -707,7 +666,7 @@ def main():
                         va["chord_name"] = parts[0]
                         va["chord_bpm"] = int(parts[1].replace("bpm", ""))
                         va["chord_dynamic"] = parts[2]
-                        va["chord_expanded"] = _describe_chord(parts[0])
+                        va["chord_expanded"] = _expand_chord(parts[0])
         except Exception:
             pass
 
@@ -765,8 +724,7 @@ def main():
                 "7.亲密请求→erotic | 8.笑点梗→interaction | 9.里程碑→milestone\n"
                 "记录格式：在回复末尾附加 <!-- propose_card: 标题|分类|重要度|内容 -->\n"
                 "重要度1-10。无重大事件不添加。\n"
-                "引用记忆卡片：<!-- ref:ID1,ID2 -->\n"
-                "标记事项完成：<!-- resolve_card: 卡片ID -->\n\n"
+                "引用记忆卡片：<!-- ref:ID1,ID2 -->\n\n"
                 "[运维指令结束]\n"
             )
             full_context += propose_card_instruction
@@ -781,26 +739,6 @@ def main():
 
         if va:
             full_context += f"【用户情绪】效价={va['valence']:.2f}, 唤醒度={va['arousal']:.2f}, 温度={va['suggested_temperature']}, 描述={va['description']}\n"
-        # unresolved cards
-        try:
-            db_path = os.path.join(PROJECT_ROOT, "memory", "cards.db")
-            conn = sqlite3.connect(db_path)
-            c = conn.cursor()
-            c.execute("""
-                SELECT id, title, category, content FROM cards
-                WHERE review_status='final' AND resolved=0
-                AND category IN ('commitments','daily_life','milestone')
-                ORDER BY created_at DESC LIMIT 5
-            """)
-            unresolved = c.fetchall()
-            conn.close()
-            if unresolved:
-                full_context += "【当前未解决的事项】如果用户提到完成了其中某项，请在回复末尾用 <!-- resolve_card: 卡片ID --> 标记：\n"
-                for uid, utitle, ucat, ucontent in unresolved:
-                    full_context += f"  [卡片ID: {uid}] [{ucat}] {utitle}\n"
-        except Exception:
-            pass
-
         full_context += f"【当前系统时间】{datetime.now().strftime('%Y-%m-%d %H:%M')}（北京时间）\n"
 
         # ── 阶段2.4：和弦情绪上下文 ──

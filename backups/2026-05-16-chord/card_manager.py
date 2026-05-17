@@ -13,7 +13,6 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 sys.path.insert(0, os.path.dirname(__file__))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 # ── FIX: 导入 load_index / save_index 而不仅是 create_index ──
 from encoder import embed, load_index, add_to_index, save_index, remove_from_index
 
@@ -144,16 +143,8 @@ class CardManager:
     def _load_pending_list(self):
         if not os.path.exists(PENDING_PATH):
             return []
-        try:
-            with open(PENDING_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except json.JSONDecodeError as e:
-            import shutil
-            from datetime import datetime
-            backup = PENDING_PATH + ".corrupted_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-            shutil.copy2(PENDING_PATH, backup)
-            print(f"[card_manager] 警告: pending_cards.json 损坏({e.lineno}:{e.colno})，已备份至 {os.path.basename(backup)}，重建空列表")
-            return []
+        with open(PENDING_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
 
     def _save_pending_list(self, pending_list):
         # ── 毒点33修复：原子写入，避免 GUI 与后台并发截断 ──
@@ -163,26 +154,16 @@ class CardManager:
     def _insert_into_db(self, card):
         conn = sqlite3.connect(DB_PATH)
         try:
-            # ── 阶段1.2：确保 chord 列存在，NULL → ''（修正2） ──
-            try:
-                conn.execute("ALTER TABLE cards ADD COLUMN chord TEXT NOT NULL DEFAULT ''")
-            except sqlite3.OperationalError:
-                pass  # 列已存在
-
             # ── FIX: embed 调用加异常保护（毒点26修复：commit 移到最后） ──
             try:
-                embed_content = card["content"]
-                ch = card.get("chord") or ""
-                if ch:
-                    embed_content += f"\n[情绪纹理: {ch}]"
-                vec = embed(embed_content)
+                vec = embed(card["content"])
             except Exception as e:
                 raise RuntimeError(f"向量生成失败。请查看终端 [encoder] 日志了解详情。最后一次错误: {e}")
 
             vec_bytes = vec.tobytes()
             conn.execute("""
-                INSERT OR REPLACE INTO cards (id, title, content, keywords, embedding, importance, category, review_status, chord)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'final', ?)
+                INSERT OR REPLACE INTO cards (id, title, content, keywords, embedding, importance, category, review_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'final')
             """, (
                 card["id"],
                 card["title"],
@@ -190,8 +171,7 @@ class CardManager:
                 card.get("keywords", ""),
                 vec_bytes,
                 card.get("importance", 5),
-                card.get("category", "interaction"),
-                card.get("chord") or ""
+                card.get("category", "interaction")
             ))
 
             # ── FIX: 不再 create_index() 覆盖！改为 load→add→save ──

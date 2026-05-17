@@ -14,6 +14,7 @@ import os
 import json
 import time
 import requests
+import yaml
 import hashlib
 
 DIM = 2048
@@ -207,14 +208,7 @@ def load_index() -> faiss.Index:
                     f"请删除 {INDEX_PATH}、{ID_MAP_PATH} 和 {MODEL_META_PATH} 後重建索引。"
                 )
     if os.path.exists(INDEX_PATH):
-        index = faiss.read_index(INDEX_PATH)
-        # ── 毒点38修复：校验索引维度 ──
-        if index.d != DIM:
-            raise ValueError(
-                f"[encoder] FAISS 索引维度不匹配！索引 d={index.d}，代码 DIM={DIM}。"
-                f"请删除 {INDEX_PATH} 后重建索引。"
-            )
-        return index
+        return faiss.read_index(INDEX_PATH)
     return create_index()
 
 # ── NEW: 从索引中移除指定字符串ID ──

@@ -59,8 +59,8 @@ def renew_card(card_id: str) -> bool:
                     })
                     anchor_data["count"] = len(anchor_data["cards"])
                     anchor_data["updated_at"] = datetime.now(timezone.utc).isoformat()
-                    from delegate_tools import atomic_write_json
-                    atomic_write_json(anchor_path, anchor_data)
+                    with open(anchor_path, "w", encoding="utf-8") as f:
+                        json.dump(anchor_data, f, ensure_ascii=False, indent=2)
         except Exception:
             pass  # 锚定追加失败不阻塞续命
         return True
@@ -257,52 +257,27 @@ def get_card_status() -> list:
 
 def delete_card(card_id: str) -> bool:
     """从数据库和 FAISS 索引中彻底删除一张卡片。FIX: 使用 encoder.remove_from_index"""
-    # ── 毒点27修复：先删 FAISS 索引，成功后再删 DB，避免幽灵结果 ──
-    try:
-        from encoder import remove_from_index
-        remove_from_index(card_id)
-        print(f"[memory_manager] 已从索引中移除 {card_id}")
-    except Exception as e:
-        print(f"[memory_manager] 索引移除失败，放弃删除: {e}")
-        return False
-
     conn = sqlite3.connect(DB_PATH)
     try:
         c = conn.cursor()
         c.execute("DELETE FROM cards WHERE id = ?", (card_id,))
         if c.rowcount == 0:
             print(f"[memory_manager] 删除失败：数据库中不存在 {card_id}")
-            # 索引已移除但 DB 无记录 → 尝试回加索引
-            try:
-                from encoder import load_index, save_index
-                idx = load_index()
-                save_index(idx)
-            except:
-                pass
             return False
         conn.commit()
+
+        # ── FIX: 使用 encoder 的 remove_from_index，自动处理 ID 映射 ──
+        try:
+            from encoder import remove_from_index
+            remove_from_index(card_id)
+            print(f"[memory_manager] 已从索引中移除 {card_id}")
+        except Exception as e:
+            print(f"[memory_manager] 索引移除异常（数据库已删除）: {e}")
+
         print(f"[memory_manager] 卡片 {card_id} 已彻底删除")
         return True
     except Exception as e:
         print(f"[memory_manager] 删除失败: {e}")
-        return False
-    finally:
-        conn.close()
-
-
-def resolve_card(card_id: str) -> bool:
-    """标记卡片为已解决（resolved=1）。用于对话中自动检测「我做完了」等信号。"""
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        c = conn.cursor()
-        c.execute("UPDATE cards SET resolved = 1 WHERE id = ? AND review_status='final'", (card_id,))
-        if c.rowcount == 0:
-            return False
-        conn.commit()
-        print(f"[memory_manager] 卡片 {card_id} 已标记为已解决")
-        return True
-    except Exception as e:
-        print(f"[memory_manager] 标记已解决失败 card_id={card_id}: {e}")
         return False
     finally:
         conn.close()
@@ -334,14 +309,14 @@ def update_anchor_set():
                 "importance": row[3],
                 "usage_count": row[4]
             })
-
+        
         anchor_path = os.path.join(os.path.dirname(__file__), "anchor_set.json")
-        from delegate_tools import atomic_write_json
-        atomic_write_json(anchor_path, {
+        with open(anchor_path, "w", encoding="utf-8") as f:
+            json.dump({
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "count": len(anchors),
                 "cards": anchors
-        })
+            }, f, ensure_ascii=False, indent=2)
         
         print(f"[memory_manager] 锚定集合已更新：{len(anchors)} 张卡片")
         return anchors

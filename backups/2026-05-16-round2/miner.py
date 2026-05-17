@@ -6,7 +6,6 @@ import os
 import re
 import sys
 from datetime import datetime
-from delegate_tools import now_utc
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
@@ -74,7 +73,7 @@ def update_persona(diary_text: str) -> bool:
         print("[miner] 无日记内容，跳过写入。")
         return False
 
-    today = now_utc().strftime("%Y-%m-%d")
+    today = datetime.now().strftime("%Y-%m-%d")
     new_entry = f"\n\n## [{today}]\n{diary_text}"
 
     # 备份
@@ -109,7 +108,7 @@ def update_persona(diary_text: str) -> bool:
     else:
         state = {}
 
-    state["last_analyzed_timestamp"] = now_utc().isoformat()
+    state["last_analyzed_timestamp"] = datetime.now().isoformat()
     state["last_analysis_date"] = today
     state["total_analyses"] = state.get("total_analyses", 0) + 1
 
@@ -121,7 +120,7 @@ def update_persona(diary_text: str) -> bool:
 
 
 def main():
-    print(f"[miner] 压缩日记开始 — {now_utc().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"[miner] 压缩日记开始 — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     logs = load_recent_logs()
     if not logs:

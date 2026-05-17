@@ -173,15 +173,8 @@ def write_pending_card(card_draft: dict):
     pending_path = os.path.join(PROJECT_ROOT, "memory", "pending_cards.json")
     pending = []
     if os.path.exists(pending_path):
-        try:
-            with open(pending_path, "r", encoding="utf-8") as f:
-                pending = json.load(f)
-        except json.JSONDecodeError as e:
-            import shutil
-            backup = pending_path + ".corrupted_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-            shutil.copy2(pending_path, backup)
-            print(f"[卡片提议] ⚠ pending_cards.json 损坏({e.lineno}:{e.colno})，已备份至 {os.path.basename(backup)}，重建空列表")
-            pending = []
+        with open(pending_path, "r", encoding="utf-8") as f:
+            pending = json.load(f)
     pending.append(card_draft)
     try:
         atomic_write_json(pending_path, pending)
@@ -236,10 +229,7 @@ AI：{ai_reply[:200]}
                 except json.JSONDecodeError:
                     match = re.search(r'\{.*\}', raw, re.DOTALL)
                     if match:
-                        try:
-                            return json.loads(match.group())
-                        except json.JSONDecodeError:
-                            pass
+                        return json.loads(match.group())
                 return None
             elif resp.status_code >= 500:
                 if attempt < max_retries:
@@ -289,18 +279,6 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
             print(f"[记忆引用] 卡片 {cid} 已续命")
         else:
             print(f"[记忆引用] 卡片 {cid} 续命失败")
-
-    # auto resolve
-    resolve_match = re.search(r'<!--\s*resolve_card:\s*(.*?)\s*-->', raw_reply, re.IGNORECASE)
-    if resolve_match:
-        display_reply = re.sub(r'<!--\s*resolve_card:.*?\s*-->', '', display_reply, flags=re.IGNORECASE).strip()
-        cid_to_resolve = resolve_match.group(1).strip()
-        try:
-            from memory.memory_manager import resolve_card as do_resolve
-            if do_resolve(cid_to_resolve):
-                print(f"[自动解决] AI 已将卡片 {cid_to_resolve} 标记为已解决")
-        except Exception:
-            pass
 
     propose_match = re.search(r'<!--\s*propose_card:\s*(.*?)\s*-->', raw_reply, re.IGNORECASE)
     if propose_match:
@@ -765,8 +743,7 @@ def main():
                 "7.亲密请求→erotic | 8.笑点梗→interaction | 9.里程碑→milestone\n"
                 "记录格式：在回复末尾附加 <!-- propose_card: 标题|分类|重要度|内容 -->\n"
                 "重要度1-10。无重大事件不添加。\n"
-                "引用记忆卡片：<!-- ref:ID1,ID2 -->\n"
-                "标记事项完成：<!-- resolve_card: 卡片ID -->\n\n"
+                "引用记忆卡片：<!-- ref:ID1,ID2 -->\n\n"
                 "[运维指令结束]\n"
             )
             full_context += propose_card_instruction
@@ -781,26 +758,6 @@ def main():
 
         if va:
             full_context += f"【用户情绪】效价={va['valence']:.2f}, 唤醒度={va['arousal']:.2f}, 温度={va['suggested_temperature']}, 描述={va['description']}\n"
-        # unresolved cards
-        try:
-            db_path = os.path.join(PROJECT_ROOT, "memory", "cards.db")
-            conn = sqlite3.connect(db_path)
-            c = conn.cursor()
-            c.execute("""
-                SELECT id, title, category, content FROM cards
-                WHERE review_status='final' AND resolved=0
-                AND category IN ('commitments','daily_life','milestone')
-                ORDER BY created_at DESC LIMIT 5
-            """)
-            unresolved = c.fetchall()
-            conn.close()
-            if unresolved:
-                full_context += "【当前未解决的事项】如果用户提到完成了其中某项，请在回复末尾用 <!-- resolve_card: 卡片ID --> 标记：\n"
-                for uid, utitle, ucat, ucontent in unresolved:
-                    full_context += f"  [卡片ID: {uid}] [{ucat}] {utitle}\n"
-        except Exception:
-            pass
-
         full_context += f"【当前系统时间】{datetime.now().strftime('%Y-%m-%d %H:%M')}（北京时间）\n"
 
         # ── 阶段2.4：和弦情绪上下文 ──
