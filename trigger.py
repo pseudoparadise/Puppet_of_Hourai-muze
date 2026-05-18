@@ -318,9 +318,9 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
             conn = sqlite3.connect(db_path)
             c = conn.cursor()
             c.execute("""
-                SELECT id, title, category, content FROM cards
+                SELECT id, title, category, content, importance FROM cards
                 WHERE review_status='final' AND resolved=0
-                AND category IN ('commitments','daily_life','milestone')
+                AND category IN ('commitments','daily_life')
                 ORDER BY created_at DESC LIMIT 10
             """)
             # 卡片标题+内容 → 字符集（过滤高频无意义字），与用户消息做重叠
@@ -333,8 +333,11 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                     chars.add(t)
                 return chars
             user_chars = _key_chars(user_input)
-            for uid, utitle, ucat, ucontent in c.fetchall():
+            for uid, utitle, ucat, ucontent, uimportance in c.fetchall():
                 if uid in resolved_ids:
+                    continue
+                # 安全阀：importance >= 8 的基石卡不自动 resolve
+                if uimportance >= 8:
                     continue
                 # 标题匹配：权重高，阈值 2
                 title_chars = _key_chars(utitle)
@@ -342,7 +345,7 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 # 内容匹配：权重低，阈值 4（防长内容假阳性）
                 content_chars = _key_chars(ucontent or '')
                 content_overlap = len(user_chars & content_chars)
-                if title_overlap >= 2 or content_overlap >= 4:
+                if title_overlap >= 1 or content_overlap >= 2:
                     try:
                         from memory.memory_manager import resolve_card as do_resolve2
                         if do_resolve2(uid):
@@ -786,7 +789,8 @@ def main():
         try:
             top_cards = retrieve(context_query, top_k=3, va_tier=va_tier, va_description=va_description,
                             va_valence=va.get('valence') if va else None, weights=CUSTOM_WEIGHTS,
-                            chord_bpm=va.get('chord_bpm'), chord_dynamic=va.get('chord_dynamic'))
+                            chord_bpm=va.get('chord_bpm'), chord_dynamic=va.get('chord_dynamic'),
+                            chord_name=va.get('chord_name'))
             if top_cards:
                 memory_lines = ["【本轮相关记忆】"]
                 for card in top_cards:
@@ -845,7 +849,7 @@ def main():
             c.execute("""
                 SELECT id, title, category, content FROM cards
                 WHERE review_status='final' AND resolved=0
-                AND category IN ('commitments','daily_life','milestone')
+                AND category IN ('commitments','daily_life')
                 ORDER BY created_at DESC LIMIT 5
             """)
             unresolved = c.fetchall()

@@ -44,6 +44,66 @@ DEEP_CATEGORIES = {'milestone', 'commitments', 'deep_talks', 'turning_points', '
 # ── P1-3: 日活卡片分类列表 ──
 DAILY_CATEGORIES = {'daily_life', 'interaction', 'emotional', 'preferences', 'habits'}
 
+# ── 和弦情绪四组：和弦名 → group ──
+CHORD_GROUP = {
+    # bright: 明亮坚定、推进、冲击
+    'C': 'bright', 'Cmaj7': 'bright', 'G': 'bright', 'E': 'bright',
+    # warm: 温暖宽广、摇曳
+    'F': 'warm', 'Fmaj7': 'warm',
+    # melancholy: 黯然、思念、忧郁
+    'Am': 'melancholy', 'Am7': 'melancholy', 'Em': 'melancholy',
+    'Em7': 'melancholy', 'Dm': 'melancholy', 'Dm7': 'melancholy',
+    # tense: 焦灼、张力、冲突
+    'G7': 'tense', 'D7': 'tense', 'B7': 'tense', 'Bm7': 'tense',
+}
+
+def _parse_chord_str(chord_str: str) -> dict:
+    """从和弦字符串解析 group / bpm / dynamic。进行取首个和弦。"""
+    import re as _re
+    if not chord_str:
+        return {}
+    parts = chord_str.rsplit('.', 2)
+    if len(parts) < 3:
+        return {}
+    name_raw, bpm_part, dynamic = parts[0], parts[1], parts[2]
+    # 进行：取首个和弦名
+    first = _re.findall(r'[A-G][a-z0-9]*', name_raw)
+    group = CHORD_GROUP.get(first[0], None) if first else None
+    try:
+        bpm = int(bpm_part.replace('bpm', ''))
+    except ValueError:
+        bpm = None
+    # bpm 档位
+    bpm_tier = 'slow' if bpm and bpm <= 60 else ('fast' if bpm and bpm >= 130 else ('mid' if bpm else None))
+    # dynamic 档位
+    dyn_tier = 'soft' if dynamic in ('pp', 'p', 'mp') else ('strong' if dynamic in ('mf', 'f', 'ff') else None)
+    return {'group': group, 'bpm': bpm, 'bpm_tier': bpm_tier, 'dynamic': dynamic, 'dyn_tier': dyn_tier}
+
+def _chord_similarity(card: dict, query_chord: dict) -> float:
+    """和弦收割层：比较卡片和弦和查询和弦，返回附加分。
+    探针负责广撒网，和弦负责精收割——同组/同档优先。
+
+    query_chord: {'group','bpm_tier','dyn_tier'} 或空 dict
+    """
+    if not query_chord:
+        return 0.0
+    card_chord_str = card.get('chord', '') or ''
+    card_ch = _parse_chord_str(card_chord_str)
+    if not card_ch:
+        return 0.0  # 老卡无和弦，不参与和弦排序
+
+    bonus = 0.0
+    # 同组：情绪基调一致 → 最大加权
+    if query_chord.get('group') and card_ch.get('group') == query_chord['group']:
+        bonus += 0.20
+    # 同 BPM 档：节奏感一致
+    if query_chord.get('bpm_tier') and card_ch.get('bpm_tier') == query_chord['bpm_tier']:
+        bonus += 0.10
+    # 同力度档：能量级一致
+    if query_chord.get('dyn_tier') and card_ch.get('dyn_tier') == query_chord['dyn_tier']:
+        bonus += 0.08
+    return bonus
+
 def get_va_tier(arousal: float) -> str:
     """VA 唤醒度三层分档：低(0~0.3)→冰水 / 中(0.3~0.7)→雷火岩风 / 高(0.7~1)→超载"""
     if arousal < 0.30:
@@ -263,19 +323,25 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
         elif chord_dynamic in ('pp', 'p'):
             water_smooth += w.get('w_water', 0.15) * 0.3
 
+    # ── 和弦收割层：探针广撒网，和弦精收割 ──
+    chord_harvest = 0.0
+    query_chord = w.get('_query_chord')
+    if query_chord:
+        chord_harvest = _chord_similarity(card, query_chord)
+
     # ── P2-4: 圣遗物计数器 ──
     USAGE_STATS["total_searches"] = USAGE_STATS.get("total_searches", 0) + 1
 
     return (
         keyword_score + semantic_score + importance_score +
         anchor_bonus + diffusion_bonus + recent_bonus - decay_penalty +
-        fire_burst + water_smooth + growth_bonus
+        fire_burst + water_smooth + growth_bonus + chord_harvest
     ) * resolved_penalty
 
 
 def retrieve(query: str, top_k: int = 3, weights: dict = None,
              va_tier: str = "mid", va_description: str = None, va_valence: float = None,
-             chord_bpm: int = None, chord_dynamic: str = None) -> list:
+             chord_bpm: int = None, chord_dynamic: str = None, chord_name: str = None) -> list:
     db_path = os.path.join(os.path.dirname(__file__), "cards.db")
 
     # ── VA 唤醒度三层分档：调整检索策略 ──
@@ -295,6 +361,22 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
         effective_weights['_chord_bpm'] = chord_bpm
     if chord_dynamic is not None:
         effective_weights['_chord_dynamic'] = chord_dynamic
+    # 构建查询和弦 dict，供 _chord_similarity 收割用
+    if chord_bpm is not None and chord_dynamic is not None:
+        bpm_tier = 'slow' if chord_bpm <= 60 else ('fast' if chord_bpm >= 130 else 'mid')
+        dyn_tier = 'soft' if chord_dynamic in ('pp', 'p', 'mp') else ('strong' if chord_dynamic in ('mf', 'f', 'ff') else None)
+        # chord_name → group（进行取首个和弦）
+        group = None
+        if chord_name:
+            import re as _re
+            first = _re.findall(r'[A-G][a-z0-9]*', chord_name)
+            if first:
+                group = CHORD_GROUP.get(first[0])
+        effective_weights['_query_chord'] = {
+            'group': group,
+            'bpm_tier': bpm_tier,
+            'dyn_tier': dyn_tier,
+        }
 
     if va_tier == "high":
         # 共鸣优先：搜更宽、语义权重 ↑、关键词权重 ↓、关闭多样性

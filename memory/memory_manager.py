@@ -233,8 +233,8 @@ def get_card_status() -> list:
             if is_permanent:
                 days_remaining = -1
             else:
-                created = datetime.fromisoformat(created_at) if created_at else None
-                last = datetime.fromisoformat(last_ref) if last_ref else None
+                created = datetime.fromisoformat(created_at).replace(tzinfo=timezone.utc) if created_at else None
+                last = datetime.fromisoformat(last_ref).replace(tzinfo=timezone.utc) if last_ref else None
                 ref_point = created or last or now
                 if created and last:
                     ref_point = max(created, last)
