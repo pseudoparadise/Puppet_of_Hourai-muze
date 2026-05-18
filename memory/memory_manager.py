@@ -226,12 +226,35 @@ def suggest_merges():
     finally:
         conn.close()
 
+def resolve_expired_cards():
+    """扫描 target_date 已过的卡片，自动标记为已解决。"""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        now_utc = datetime.now(timezone.utc)
+        today_str = now_utc.strftime('%Y-%m-%d')
+        c = conn.cursor()
+        c.execute(
+            "SELECT id, title, target_date FROM cards WHERE review_status='final' AND resolved=0 AND target_date IS NOT NULL AND target_date != '' AND target_date < ?",
+            (today_str,)
+        )
+        expired = c.fetchall()
+        for cid, title, td in expired:
+            c.execute("UPDATE cards SET resolved=1 WHERE id=?", (cid,))
+            print(f"[过期解决] 目标日期 {td} 已过 → {cid}「{title}」已自动标记为已解决")
+        if expired:
+            conn.commit()
+    except Exception as e:
+        print(f"[过期解决] 扫描异常: {e}")
+    finally:
+        conn.close()
+
 def run_audit():
     print("[memory_manager] 开始执行完整审计...")
     update_active_status()
     update_anchor_set()
     suggest_importance_calibration()
     suggest_merges()
+    resolve_expired_cards()
     print("[memory_manager] 审计完成。")
 
 def get_card_status() -> list:

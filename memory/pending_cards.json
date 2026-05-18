@@ -1,1 +1,30 @@
-[]
+[
+  {
+    "id": "extreme_test_a_20260518",
+    "title": "极端测试A：厌恶吃苦瓜（不可解决）",
+    "content": "我特别讨厌苦瓜的苦味，但家长总是逼我吃。这是一种无法被说服的厌恶——不是挑食，是基因层面的抗拒。任何关于苦瓜的好话都改变不了这个事实。",
+    "keywords": "极端测试,苦瓜,厌恶,不可解决,喜好,家长,逼迫",
+    "importance": 8,
+    "category": "preferences",
+    "proposed_by": "test",
+    "proposed_at": "2026-05-18T14:04:45.239670+00:00",
+    "review_status": "pending",
+    "chord": "Am7.50bpm.pp",
+    "valence": 0.22,
+    "arousal": 0.28
+  },
+  {
+    "id": "extreme_test_b_20260518",
+    "title": "极端测试B：喜欢抹茶配牛奶（可解决）",
+    "content": "我最近超级喜欢抹茶配牛奶的搭配，瑞幸出餐很快就能喝到。这是一种可变的喜好——可能下个月就腻了，但现在它是我的快乐源泉。",
+    "keywords": "极端测试,抹茶,牛奶,瑞幸,喜好,可变,快乐",
+    "importance": 6,
+    "category": "preferences",
+    "proposed_by": "test",
+    "proposed_at": "2026-05-18T14:04:45.239670+00:00",
+    "review_status": "pending",
+    "chord": "G7.110bpm.f",
+    "valence": 0.68,
+    "arousal": 0.72
+  }
+]

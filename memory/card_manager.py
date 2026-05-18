@@ -168,7 +168,12 @@ class CardManager:
             try:
                 conn.execute("ALTER TABLE cards ADD COLUMN chord TEXT NOT NULL DEFAULT ''")
             except sqlite3.OperationalError:
-                pass  # 列已存在
+                pass
+            # ── target_date 列迁移 ──
+            try:
+                conn.execute("ALTER TABLE cards ADD COLUMN target_date TEXT")
+            except sqlite3.OperationalError:
+                pass
 
             # ── FIX: embed 调用加异常保护（毒点26修复：commit 移到最后） ──
             try:
@@ -182,8 +187,8 @@ class CardManager:
 
             vec_bytes = vec.tobytes()
             conn.execute("""
-                INSERT OR REPLACE INTO cards (id, title, content, keywords, embedding, importance, category, review_status, chord, valence, arousal)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'final', ?, ?, ?)
+                INSERT OR REPLACE INTO cards (id, title, content, keywords, embedding, importance, category, review_status, chord, valence, arousal, target_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'final', ?, ?, ?, ?)
             """, (
                 card["id"],
                 card["title"],
@@ -194,7 +199,8 @@ class CardManager:
                 card.get("category", "interaction"),
                 card.get("chord") or "",
                 card.get("valence", 0.0),
-                card.get("arousal", 0.5)
+                card.get("arousal", 0.5),
+                card.get("target_date")
             ))
 
             # ── FIX: 不再 create_index() 覆盖！改为 load→add→save ──

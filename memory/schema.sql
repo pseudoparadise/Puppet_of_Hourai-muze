@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS cards (
     valence REAL NOT NULL DEFAULT 0.0,
     arousal REAL NOT NULL DEFAULT 0.5,
     chord TEXT NOT NULL DEFAULT '',
+    target_date TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

@@ -268,10 +268,43 @@ def _check_cooldown(written: dict, category: str, current_turn: int, cooldown: i
     返回 True 表示可以写入，False 表示在冷却中或已去重。"""
     if category not in written:
         return True
-    if cooldown < 0:  # ── FIX: 毒点2 — cooldown=0 表示无冷却，允许触发 ──
-        return False  # 无冷却则直接去重
+    if cooldown < 0:  # 永久去重：同 session 仅允许一次
+        return False
+    if cooldown == 0:  # 无冷却：每次均可触发，仅同 session 去重
+        return True
     return (current_turn - written[category]) > cooldown
 
+
+def _parse_target_date(text: str):
+    """从中文文本解析目标日期。返回 'YYYY-MM-DD' 或 None。"""
+    import re as _re
+    from datetime import datetime, timedelta
+    today = datetime.now()
+    # 下个月N号/日
+    m = _re.search(r'下个?月(\d{1,2})[号日]', text)
+    if m:
+        d = int(m.group(1))
+        next_month = today.month % 12 + 1
+        year = today.year if next_month > today.month else today.year + 1
+        try:
+            return datetime(year, next_month, d).strftime('%Y-%m-%d')
+        except ValueError:
+            return None
+    # N月N号/日
+    m = _re.search(r'(\d{1,2})月(\d{1,2})[号日]', text)
+    if m:
+        mo, d = int(m.group(1)), int(m.group(2))
+        year = today.year if mo >= today.month else today.year + 1
+        try:
+            return datetime(year, mo, d).strftime('%Y-%m-%d')
+        except ValueError:
+            return None
+    # 明天/后天/大后天
+    rel = {'明天': 1, '后天': 2, '大后天': 3}
+    for kw, delta in rel.items():
+        if kw in text:
+            return (today + timedelta(days=delta)).strftime('%Y-%m-%d')
+    return None
 
 # ── 后处理 ──
 def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply: str, session_cards_written: dict = None, current_turn: int = 0, va: dict = None):
@@ -291,6 +324,13 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
             print(f"[记忆引用] 卡片 {cid} 已续命")
         else:
             print(f"[记忆引用] 卡片 {cid} 续命失败")
+
+    # ── 提取 AI 计算的目标日期标记 <!-- target_date: YYYY-MM-DD --> ──
+    target_date_from_ai = None
+    td_match = re.search(r'<!--\s*target_date:\s*(\d{4}-\d{2}-\d{2})\s*-->', raw_reply, re.IGNORECASE)
+    if td_match:
+        target_date_from_ai = td_match.group(1)
+        display_reply = re.sub(r'<!--\s*target_date:.*?\s*-->', '', display_reply, flags=re.IGNORECASE).strip()
 
     # auto resolve — 双重机制：AI 标记 + 关键词兜底
     resolved_ids = set()
@@ -386,7 +426,8 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 "review_status": "pending",
                 "chord": va.get("chord", "") if va else "",
                 "valence": va.get("valence", 0.0) if va else 0.0,
-                "arousal": va.get("arousal", 0.5) if va else 0.5
+                "arousal": va.get("arousal", 0.5) if va else 0.5,
+                "target_date": target_date_from_ai or _parse_target_date(user_input)
             }
             # ── P1-3: 同 session 同 category 去重 ──
             category = parts[1] if parts[1] in ['milestone','commitments','turning_points','deep_talks','interaction','preferences','real_world','daily_life','emotional','habits','erotic'] else 'interaction'
@@ -396,75 +437,63 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                     session_cards_written[category] = current_turn
 
     if not propose_match:
-        # ── 多类型关键词规则触发写卡 ──
-        triggered_category = None
-        triggered_importance = 5
+        # ── 多类型关键词规则触发写卡（可同时命中多类，每类生成一张） ──
+        triggered = []  # (category, importance)
 
-        # 【1】日常状态类：根据用户疲惫/不适表达的日常状态
+        # 【1】日常状态类
         daily_words = ["累", "困", "饿", "渴", "头疼", "不舒服", "在上班", "在上课", "在赶路", "在洗澡",
                        "心情不好", "有点烦", "有点难过", "有点焦虑"]
         if any(kw in user_input for kw in daily_words):
-            triggered_category = "daily_life"
-            triggered_importance = 6
+            triggered.append(("daily_life", 6))
 
-        # 【2】喜好与厌恶类：根据用户偏好/厌恶表达的喜好标记
-        if not triggered_category:
-            like_words = ["喜欢", "不喜欢", "爱吃", "不爱吃", "讨厌吃", "想", "不想", "要", "不要",
-                          "好想", "好想要", "好喜欢", "好讨厌"]
-            if any(kw in user_input for kw in like_words):
-                triggered_category = "preferences"
-                triggered_importance = 6
+        # 【2】喜好与厌恶类
+        like_words = ["喜欢", "不喜欢", "爱吃", "不爱吃", "讨厌吃", "想", "不想", "要", "不要",
+                      "好想", "好想要", "好喜欢", "好讨厌"]
+        if any(kw in user_input for kw in like_words):
+            triggered.append(("preferences", 6))
 
-        # 【3】时间与计划类：根据用户时间/计划表达的计划标记
-        if not triggered_category:
-            plan_words = ["今天", "明天", "周末", "下周", "以后", "要去", "准备去", "打算",
-                          "想去", "想去看", "想去做"]
-            if any(kw in user_input for kw in plan_words):
-                triggered_category = "commitments"
-                triggered_importance = 6
+        # 【3】时间与计划类
+        plan_words = ["今天", "明天", "周末", "下周", "以后", "要去", "准备去", "打算",
+                      "想去", "想去看", "想去做"]
+        if any(kw in user_input for kw in plan_words):
+            triggered.append(("commitments", 6))
 
-        # 【4】情绪表达类：根据用户撒娇/吐槽/孤单表达的情绪标记
-        if not triggered_category:
-            emotion_words = ["好想你", "好想抱抱", "无聊", "孤单", "寂寞", "想你",
-                             "撒娇", "吐槽", "发牢骚", "碎碎念"]
-            if any(kw in user_input for kw in emotion_words):
-                triggered_category = "emotional"
-                triggered_importance = 5
+        # 【4】情绪表达类
+        emotion_words = ["好想你", "好想抱抱", "无聊", "孤单", "寂寞", "想你",
+                         "撒娇", "吐槽", "发牢骚", "碎碎念"]
+        if any(kw in user_input for kw in emotion_words):
+            triggered.append(("emotional", 5))
 
-        # 【5】自我暴露类：根据用户深层自我暴露表达的心理标记
-        if not triggered_category:
-            exposure_words = ["我这个人", "我以前", "我小时候", "我从来", "我害怕",
-                              "我在意", "我讨厌", "我不喜欢别人", "我特别讨厌"]
-            if any(kw in user_input for kw in exposure_words):
-                triggered_category = "deep_talks"
-                triggered_importance = 7
+        # 【5】自我暴露类
+        exposure_words = ["我这个人", "我以前", "我小时候", "我从来", "我害怕",
+                          "我在意", "我讨厌", "我不喜欢别人", "我特别讨厌"]
+        if any(kw in user_input for kw in exposure_words):
+            triggered.append(("deep_talks", 7))
 
-        # 【6】约定承诺类：根据用户做出承诺/约定表达的约定标记（原逻辑保留）
-        if not triggered_category:
-            user_proposing = any(kw in user_input for kw in ["约定", "答应", "承诺", "保证", "一定"])
-            ai_accepting = any(kw in display_reply for kw in ["约定", "说好了", "答应", "记住了", "我会", "好"])
-            if user_proposing and ai_accepting:
-                triggered_category = "commitments"
-                triggered_importance = 7
+        # 【6】约定承诺类（需双方确认）
+        user_proposing = any(kw in user_input for kw in ["约定", "答应", "承诺", "保证", "一定"])
+        ai_accepting = any(kw in display_reply for kw in ["约定", "说好了", "答应", "记住了", "我会", "好"])
+        if user_proposing and ai_accepting:
+            # 如果已有 commitments 触发（来自计划类），避免重复
+            if ("commitments", 6) in triggered:
+                triggered.remove(("commitments", 6))
+            triggered.append(("commitments", 7))
 
-        # 【8】笑点与梗类：根据用户幽默/暗号表达的互动标记
-        if not triggered_category:
-            humor_words = ["笑到打鸣", "笑死", "笑出声", "笑岔气", "笑吐了", "笑飞了",
-                           "笑不活", "梗", "打鸣", "笑点", "疯梗", "暗号",
-                           "笑裂开", "笑喷", "笑到头掉", "笑拉了"]
-            if any(kw in user_input for kw in humor_words):
-                triggered_category = "interaction"
-                triggered_importance = 5
+        # 【7】erotic 类
+        erotic_words = ["想要", "好想要", "想要你", "操", "草", "想做", "想被",
+                        "抱着", "想要被", "进入", "含着"]
+        if any(kw in user_input for kw in erotic_words):
+            triggered.append(("erotic", 6))
 
-        # 【7】erotic 请求类：根据用户身体亲密/性相关表达（用户已成年且知情同意）的亲密标记
-        if not triggered_category:
-            erotic_words = ["想要", "好想要", "想要你", "操", "草", "想做", "想被",
-                            "抱着", "想要被", "进入", "含着"]
-            if any(kw in user_input for kw in erotic_words):
-                triggered_category = "erotic"
-                triggered_importance = 6
+        # 【8】笑点与梗类
+        humor_words = ["笑到打鸣", "笑死", "笑出声", "笑岔气", "笑吐了", "笑飞了",
+                       "笑不活", "梗", "打鸣", "笑点", "疯梗", "暗号",
+                       "笑裂开", "笑喷", "笑到头掉", "笑拉了"]
+        if any(kw in user_input for kw in humor_words):
+            triggered.append(("interaction", 5))
 
-        if triggered_category:
+        # 逐类生成卡片
+        for triggered_category, triggered_importance in triggered:
             refined = refine_card_content(user_input, display_reply)
             if refined:
                 title = refined.get("title", user_input[:30])
@@ -485,13 +514,39 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 "review_status": "pending",
                 "chord": va.get("chord", "") if va else "",
                 "valence": va.get("valence", 0.0) if va else 0.0,
-                "arousal": va.get("arousal", 0.5) if va else 0.5
+                "arousal": va.get("arousal", 0.5) if va else 0.5,
+                "target_date": target_date_from_ai or _parse_target_date(user_input)
             }
             # ── P1-3: 同 session 同 category 去重 ──
-            if not session_cards_written or _check_cooldown(session_cards_written, triggered_category, current_turn, 10 if triggered_category in {'daily_life','emotional','preferences'} else 0):
+            cooldown = 10 if triggered_category in {'daily_life','emotional','preferences'} else 0
+            if not session_cards_written or _check_cooldown(session_cards_written, triggered_category, current_turn, cooldown):
                 write_pending_card(card_draft)
                 if session_cards_written is not None:
                     session_cards_written[triggered_category] = current_turn
+
+            # 偏好冲突检测：新 preferences → 找旧 preferences 关键词重叠 → resolve
+            if triggered_category == 'preferences':
+                try:
+                    import sqlite3 as _sql3
+                    _pdb = os.path.join(PROJECT_ROOT, "memory", "cards.db")
+                    _pconn = _sql3.connect(_pdb)
+                    _pc = _pconn.cursor()
+                    _pc.execute(
+                        "SELECT id, title, keywords FROM cards WHERE review_status='final' AND resolved=0 AND category='preferences'"
+                    )
+                    _new_kws = set(kw.strip().lower() for kw in (refined.get('keywords', '') if refined else '').split(',') if kw.strip())
+                    for _pid, _ptitle, _pkws in _pc.fetchall():
+                        if _pid == card_draft['id']:
+                            continue
+                        _old_kws = set(kw.strip().lower() for kw in (_pkws or '').split(',') if kw.strip())
+                        _overlap = _new_kws & _old_kws
+                        if len(_overlap) >= 1:
+                            from memory.memory_manager import resolve_card as _resolve_old
+                            if _resolve_old(_pid):
+                                print(f"[偏好冲突] 新偏好「{title}」→ 旧偏好「{_ptitle}」已自动划掉")
+                    _pconn.close()
+                except Exception:
+                    pass
 
     return display_reply, ref_ids
 
@@ -751,7 +806,8 @@ def main():
                     "review_status": "pending",
                     "chord": va.get("chord", "") if va else "",
                     "valence": va.get("valence", 0.0) if va else 0.0,
-                    "arousal": va.get("arousal", 0.5) if va else 0.5
+                    "arousal": va.get("arousal", 0.5) if va else 0.5,
+                    "target_date": _parse_target_date(user_input)
                 }
                 write_pending_card(card_draft)
                 print(f"[卡片] 已写入待审核: [{category}] {title}")
@@ -871,6 +927,7 @@ def main():
             full_context += propose_card_instruction
 
         # resolve_card 指令不受 VA 门控，确保任何唤醒度下都能标记完成
+        full_context += "【运维常驻】如果用户提到有时间期限的事（半年后、下下星期、3天后、明年…），你必须心算出具体日期，在回复末尾输出：<!-- target_date: YYYY-MM-DD -->。例如「半年后过生日」→ <!-- target_date: 2026-11-18 -->。\n"
         full_context += "【运维常驻】标记事项完成：<!-- resolve_card: 卡片ID -->。用户提及已完成某事项时使用。\n\n"
 
         # 上下文区：离用户输入最近，情感权重最高
