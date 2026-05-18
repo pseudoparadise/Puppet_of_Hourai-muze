@@ -119,7 +119,7 @@ def delegate(task_description, context=""):
     with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
         config = json.load(f)
     API_KEY = config["global"]["deepseek_api_key"]
-    API_URL = "https://api.deepseek.com/v1/chat/completions"
+    API_URL = config["global"].get("api_url", "https://api.deepseek.com/v1/chat/completions")
     MODEL = config["global"].get("model", "deepseek-v4-flash")
 
     user_content = f"任务：{task_description}\n上下文：{context}"

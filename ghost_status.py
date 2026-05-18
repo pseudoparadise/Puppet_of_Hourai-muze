@@ -262,15 +262,12 @@ def _emit_file(filepath: str, rel_path: str, parts: list):
 
     # 对 config.json / config.yaml 做脱敏
     fname = os.path.basename(filepath)
-    if fname == "config.json":  # 毒点20修复：config.yaml 已合并
-        if fname == "config.json":
-            try:
-                data = json.loads(raw)
-                safe = mask_sensitive(data)
-                content = json.dumps(safe, ensure_ascii=False, indent=2)
-            except:
-                content = text_mask(raw)
-        else:
+    if fname == "config.json":
+        try:
+            data = json.loads(raw)
+            safe = mask_sensitive(data)
+            content = json.dumps(safe, ensure_ascii=False, indent=2)
+        except:
             content = text_mask(raw)
     else:
         content = raw

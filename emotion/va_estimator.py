@@ -7,13 +7,13 @@ import json
 import os
 import requests
 
-API_URL = "https://api.deepseek.com/v1/chat/completions"
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__))))
 
-def _load_api_key():
+def _load_config():
     config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
     with open(config_path, "r", encoding="utf-8") as f:
-        config = json.load(f)
-    return config["global"]["deepseek_api_key"]
+        return json.load(f)["global"]
 
 SYSTEM_PROMPT = """你是情绪分析助手。分析用户消息的情绪状态，输出 JSON：
 {
@@ -24,14 +24,17 @@ SYSTEM_PROMPT = """你是情绪分析助手。分析用户消息的情绪状态�
 只输出 JSON，不要其他内容。"""
 
 def estimate(text: str, max_retries: int = 2) -> dict:
-    api_key = _load_api_key()
+    cfg = _load_config()
+    api_key = cfg["deepseek_api_key"]
+    api_url = cfg.get("api_url", "https://api.deepseek.com/v1/chat/completions")
+    model = cfg.get("model", "deepseek-v4-flash")
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "Opt-Out": "training"
     }
     payload = {
-        "model": "deepseek-v4-flash",
+        "model": model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": text}
@@ -42,7 +45,7 @@ def estimate(text: str, max_retries: int = 2) -> dict:
 
     for attempt in range(max_retries + 1):
         try:
-            resp = requests.post(API_URL, headers=headers, json=payload, timeout=15)
+            resp = requests.post(api_url, headers=headers, json=payload, timeout=15)
             if resp.status_code == 200:
                 raw = resp.json()["choices"][0]["message"]["content"]
                 # ── FIX: 处理截断JSON ──

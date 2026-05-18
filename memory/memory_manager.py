@@ -70,6 +70,25 @@ def renew_card(card_id: str) -> bool:
     finally:
         conn.close()
 
+def touch_cards(card_ids: list):
+    """检索命中自动计数：usage_count+1 并更新 last_referenced_at。轻量批量更新。"""
+    if not card_ids:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        now_utc = datetime.now(timezone.utc)
+        c = conn.cursor()
+        for cid in card_ids:
+            c.execute(
+                "UPDATE cards SET usage_count = usage_count + 1, last_referenced_at = ? WHERE id = ? AND review_status='final'",
+                (now_utc.isoformat(), cid)
+            )
+        conn.commit()
+    except Exception as e:
+        print(f"[memory_manager] touch_cards 失败: {e}")
+    finally:
+        conn.close()
+
 def update_active_status():
     """定期调用，更新卡片活跃状态"""
     conn = sqlite3.connect(DB_PATH)
@@ -81,7 +100,7 @@ def update_active_status():
             UPDATE cards SET enabled_in_context = 1
             WHERE review_status = 'final'
             AND (
-                category IN ('milestone', 'commitments', 'deep_talks')
+                category IN ('milestone', 'commitments', 'deep_talks', 'preferences')
                 OR importance >= 8
                 OR (julianday(?) - julianday(COALESCE(last_referenced_at, created_at) || '+00:00')) <= 30
             )
@@ -120,36 +139,38 @@ def check_duplicates(new_content: str, threshold: float = 0.85) -> list:
         return []
 
 def suggest_importance_calibration():
+    """自动校准 importance：高频低权→提升，虚高零引→审视降级。audit 定期调用。"""
     conn = sqlite3.connect(DB_PATH)
     try:
         c = conn.cursor()
         c.execute("SELECT id, title, importance, usage_count FROM cards WHERE review_status='final'")
         rows = c.fetchall()
-        suggestions = []
+        bumped = []
+        demoted = []
         for row in rows:
             card_id, title, importance, usage_count = row
             if usage_count >= 10 and importance < 7:
-                suggestions.append({
-                    "card_id": card_id, "title": title,
-                    "current_importance": importance, "usage_count": usage_count,
-                    "suggestion": "建议提升 importance",
-                    "reason": f"被引用了 {usage_count} 次，但 importance 仅 {importance}"
-                })
+                new_imp = 7
+                c.execute("UPDATE cards SET importance = ? WHERE id = ?", (new_imp, card_id))
+                bumped.append((card_id, title, importance, new_imp))
             elif importance >= 8 and usage_count == 0:
-                suggestions.append({
-                    "card_id": card_id, "title": title,
-                    "current_importance": importance, "usage_count": usage_count,
-                    "suggestion": "建议审视 importance 是否虚高",
-                    "reason": f"importance={importance} 但从未被引用"
-                })
-        if suggestions:
-            print(f"[memory_manager] 发现 {len(suggestions)} 条重要性校准建议：")
-            for s in suggestions:
-                print(f"  {s['card_id']}: {s['suggestion']} ({s['reason']})")
-        return suggestions
+                new_imp = 6
+                c.execute("UPDATE cards SET importance = ? WHERE id = ?", (new_imp, card_id))
+                demoted.append((card_id, title, importance, new_imp))
+        if bumped or demoted:
+            conn.commit()
+        if bumped:
+            print(f"[importance校准] 提升 {len(bumped)} 张（高频低权→7）：")
+            for cid, title, old, new in bumped:
+                print(f"  {cid}: {old}→{new}")
+        if demoted:
+            print(f"[importance校准] 审视降级 {len(demoted)} 张（虚高零引→6）：")
+            for cid, title, old, new in demoted:
+                print(f"  {cid}: {old}→{new}")
+        if not bumped and not demoted:
+            print("[importance校准] 无需调整")
     except Exception as e:
-        print(f"[memory_manager] importance 校准建议异常: {e}")
-        return []
+        print(f"[memory_manager] importance 校准异常: {e}")
     finally:
         conn.close()
 
@@ -219,7 +240,7 @@ def get_card_status() -> list:
         c = conn.cursor()
         c.execute("""
             SELECT id, title, category, importance,
-                   created_at, last_referenced_at, enabled_in_context
+                   created_at, last_referenced_at, enabled_in_context, resolved
             FROM cards WHERE review_status='final'
             ORDER BY created_at DESC
         """)
@@ -227,7 +248,7 @@ def get_card_status() -> list:
         now = datetime.now(timezone.utc)
         result = []
         for row in rows:
-            card_id, title, category, importance, created_at, last_ref, enabled = row
+            card_id, title, category, importance, created_at, last_ref, enabled, resolved = row
             is_permanent = (category in ('milestone', 'commitments', 'deep_talks') or importance >= 8)
 
             if is_permanent:
@@ -246,7 +267,8 @@ def get_card_status() -> list:
                 "category": category, "importance": importance,
                 "is_permanent": is_permanent,
                 "days_remaining": days_remaining,
-                "enabled": bool(enabled)
+                "enabled": bool(enabled),
+                "resolved": bool(resolved)
             })
         return result
     except Exception as e:
@@ -320,7 +342,7 @@ def update_anchor_set():
             WHERE review_status = 'final'
               AND usage_count >= 5
               AND importance >= 7
-              AND (julianday(?) - julianday(created_at || '+00:00')) >= 30
+              AND (julianday(?) - julianday(created_at || '+00:00')) >= 10
             ORDER BY usage_count DESC
         """, (now_utc.isoformat(),))
         rows = c.fetchall()

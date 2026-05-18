@@ -33,7 +33,7 @@ with open(config_path, "r", encoding="utf-8") as f:
     config = json.load(f)
 
 API_KEY = config["global"]["deepseek_api_key"]
-API_URL = "https://api.deepseek.com/v1/chat/completions"
+API_URL = config["global"].get("api_url", "https://api.deepseek.com/v1/chat/completions")
 CHAT_MODEL = config["global"].get("model", "deepseek-v4-flash")
 
 # ── P2-2: 从 config.json 读取自定义检索权重（可选） ──
@@ -351,11 +351,11 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                         if do_resolve2(uid):
                             print(f"[关键词解决] 用户宣告完成 → 卡片 {uid} 已自动标记为已解决（标题={title_overlap} 内容={content_overlap}）")
                             resolved_ids.add(uid)
-                    except Exception:
-                        pass
+                    except Exception as e2:
+                        print(f"[关键词解决] 单卡 resolve 失败 {uid}: {e2}")
             conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[关键词解决] 扫描异常: {e}")
 
     propose_match = re.search(r'<!--\s*propose_card:\s*(.*?)\s*-->', raw_reply, re.IGNORECASE)
     if propose_match:
@@ -617,20 +617,56 @@ def main():
                 print()
             continue
 
+        # ── /review 命令：列出待审核卡片（审批请用 card_manager GUI） ──
+        if user_input.strip().lower().startswith("/review"):
+            pending_path = os.path.join(PROJECT_ROOT, "memory", "pending_cards.json")
+            pending_list = []
+            if os.path.exists(pending_path):
+                try:
+                    with open(pending_path, "r", encoding="utf-8") as pf:
+                        pending_list = json.load(pf)
+                except:
+                    pass
+            if not pending_list:
+                print("[审核] 没有待审核卡片。\n")
+            else:
+                print(f"[审核] {len(pending_list)} 张待审核：")
+                for i, c in enumerate(pending_list):
+                    ch = c.get('chord', '')
+                    ch_str = f' chord={ch}' if ch else ''
+                    print(f"  [{i}] {c.get('id','?')} | [{c.get('category','?')}] {c.get('title','?')}{ch_str}")
+                print("  审批请打开 card_manager GUI\n")
+            continue
+
         # ── /status 命令：实时 VA 状态监控 ──
         if user_input.strip().lower() == "/status":
             va_tier_current = "未检测"
             try:
                 va_check = va_estimate(user_input)
                 va_tier_current = get_va_tier(va_check['arousal']).upper()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[VA估算] /status 异常: {e}")
             anchor = _extract_memory_anchor(recent, 8)
             max_turns_current = _get_max_turns(va_tier_current.lower() if va_tier_current != "未检测" else "mid")
             model_label = "Pro (思考可见)" if "pro" in CHAT_MODEL else "Flash (高速)"
             print(f"[状态] 模型: {model_label} | VA: {va_tier_current} | 历史轮数: {len(recent)} | 最大保留: {max_turns_current} | 锚点: {'已激活' if anchor else '无'}")
             if anchor:
                 print(f"  锚点内容: {anchor}")
+            # 卡片健康
+            try:
+                from memory.memory_manager import get_card_status
+                card_status = get_card_status()
+                active = [c for c in card_status if c['enabled']]
+                dormant = [c for c in card_status if not c['enabled']]
+                resolved = [c for c in card_status if c.get('resolved')]
+                perm = [c for c in card_status if c['is_permanent']]
+                expiring = [c for c in card_status if c['days_remaining'] >= 0 and c['days_remaining'] <= 3 and not c['is_permanent']]
+                print(f"[卡片健康] 活跃:{len(active)} 休眠:{len(dormant)} 永久:{len(perm)} 即过期:{len(expiring)}")
+                if expiring:
+                    for c in expiring:
+                        print(f"  ⚠ {c['days_remaining']}天后过期: [{c['category']}] {c['title'][:30]}")
+            except Exception as e:
+                print(f"[卡片健康] 查询失败: {e}")
             print()
             continue
 
@@ -677,8 +713,8 @@ def main():
                         "chord": parsed_chord,
                         "expanded": desc
                     }, ensure_ascii=False) + "\n")
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[和弦日志] 写入异常: {e}")
             continue
 
         # ── /card 命令：手动蒸馏上一轮对话为记忆卡片 ──
@@ -733,8 +769,8 @@ def main():
             log_path = os.path.join(PROJECT_ROOT, config["global"].get("log_file", "trigger.log"))
             with open(log_path, "a", encoding="utf-8") as lf:
                 lf.write(json.dumps({"timestamp": fmt_time(now_utc()), "event": "user_message", "bark_sent": False, "message_preview": user_input[:80]}, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[用户消息日志] 写入异常: {e}")
 
         turn_counter += 1
         current_turn = turn_counter
@@ -764,8 +800,8 @@ def main():
                         va["chord_bpm"] = int(parts[1].replace("bpm", ""))
                         va["chord_dynamic"] = parts[2]
                         va["chord_expanded"] = _describe_chord(parts[0])
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[和弦消费] state.json 读取异常: {e}")
 
         max_turns = _get_max_turns(va_tier)
 
@@ -796,6 +832,12 @@ def main():
                 for card in top_cards:
                     memory_lines.append(f"[card:{card['id']}] {card['content']}")
                 memory_block = "\n".join(memory_lines) + "\n"
+                # 检索命中自动计数
+                try:
+                    from memory.memory_manager import touch_cards
+                    touch_cards([c['id'] for c in top_cards])
+                except Exception:
+                    pass
         except Exception as e:
             print(f"[记忆检索异常，跳过]: {e}")
 
@@ -859,8 +901,8 @@ def main():
                 for uid, utitle, ucat, ucontent in unresolved:
                     full_context += f"  「{utitle}」→ <!-- resolve_card: {uid} -->\n"
                 full_context += "别替她客气。她说做完了你就划。这是你作为她系统的自觉。\n"
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[未解决事项查询] 异常: {e}")
 
         full_context += f"【当前系统时间】{datetime.now().strftime('%Y-%m-%d %H:%M')}（北京时间）\n"
 
