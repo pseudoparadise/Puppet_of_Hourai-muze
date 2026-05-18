@@ -11,6 +11,7 @@ import json
 import re
 import os
 import sys
+import sqlite3
 import requests
 import tempfile
 import shutil
@@ -340,20 +341,34 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
     if resolve_match:
         display_reply = re.sub(r'<!--\s*resolve_card:.*?\s*-->', '', display_reply, flags=re.IGNORECASE).strip()
         cid_to_resolve = resolve_match.group(1).strip()
+        # 安全阀：不 resolve imp≥8 的基石卡 + 检查卡片是否存在且可 resolve
         try:
-            from memory.memory_manager import resolve_card as do_resolve
-            if do_resolve(cid_to_resolve):
-                print(f"[自动解决] AI 已将卡片 {cid_to_resolve} 标记为已解决")
-                resolved_ids.add(cid_to_resolve)
+            db_check = sqlite3.connect(os.path.join(PROJECT_ROOT, "memory", "cards.db"))
+            cc = db_check.cursor()
+            cc.execute("SELECT importance FROM cards WHERE id=? AND review_status='final' AND resolved=0", (cid_to_resolve,))
+            row = cc.fetchone()
+            db_check.close()
+            if row and row[0] >= 8:
+                print(f"[自动解决] 拦截：{cid_to_resolve} 为基石卡 (imp={row[0]})，不自动 resolve")
+            elif row:
+                from memory.memory_manager import resolve_card as do_resolve
+                if do_resolve(cid_to_resolve):
+                    print(f"[自动解决] AI 已将卡片 {cid_to_resolve} 标记为已解决")
+                    resolved_ids.add(cid_to_resolve)
+            else:
+                print(f"[自动解决] 跳过：{cid_to_resolve} 不存在或已 resolve")
         except Exception as e:
-            print(f"[自动解决] 标记失败 card_id={cid_to_resolve}: {e}")
+            print(f"[自动解决] 检查失败 card_id={cid_to_resolve}: {e}")
 
     # 机制 B：用户明确宣告完成 → 关键词匹配未解决卡片 → 自动 resolve
-    completion_keywords = ["修好了", "做完了", "完成了", "搞定了", "弄好了", "打通了",
-                           "调通了", "好了", "成功了", "已经做了", "已修", "已解决"]
+    # 值枚举：每个都是明确完成义，不会被日常语气词误匹配
+    completion_keywords = [
+        "修好了", "做完了", "完成了", "搞定了", "弄好了",
+        "打通了", "调通了", "拿到了", "收到了", "喝到了",
+        "吃完了", "已经做了", "已经修了", "已经解决了",
+    ]
     if any(kw in user_input for kw in completion_keywords):
         try:
-            import sqlite3
             db_path = os.path.join(PROJECT_ROOT, "memory", "cards.db")
             conn = sqlite3.connect(db_path)
             c = conn.cursor()
@@ -392,10 +407,10 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                             print(f"[关键词解决] 用户宣告完成 → 卡片 {uid} 已自动标记为已解决（标题={title_overlap} 内容={content_overlap}）")
                             resolved_ids.add(uid)
                     except Exception as e2:
-                        print(f"[关键词解决] 单卡 resolve 失败 {uid}: {e2}")
+                        print(f"[关键词解决] 单卡跳过 {uid}: {e2}")
             conn.close()
         except Exception as e:
-            print(f"[关键词解决] 扫描异常: {e}")
+            print(f"[关键词解决] 扫描跳过: {e}")
 
     propose_match = re.search(r'<!--\s*propose_card:\s*(.*?)\s*-->', raw_reply, re.IGNORECASE)
     if propose_match:
@@ -465,8 +480,9 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
             triggered.append(("emotional", 5))
 
         # 【5】自我暴露类
-        exposure_words = ["我这个人", "我以前", "我小时候", "我从来", "我害怕",
-                          "我在意", "我讨厌", "我不喜欢别人", "我特别讨厌"]
+        exposure_words = ["我这个人", "我以前", "我小时候", "小时候", "我从来", "我害怕",
+                          "我在意", "我讨厌", "我不喜欢别人", "我特别讨厌",
+                          "得过且过", "没人陪我", "没人陪", "没有蛋糕", "很难过"]
         if any(kw in user_input for kw in exposure_words):
             triggered.append(("deep_talks", 7))
 
@@ -527,9 +543,8 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
             # 偏好冲突检测：新 preferences → 找旧 preferences 关键词重叠 → resolve
             if triggered_category == 'preferences':
                 try:
-                    import sqlite3 as _sql3
                     _pdb = os.path.join(PROJECT_ROOT, "memory", "cards.db")
-                    _pconn = _sql3.connect(_pdb)
+                    _pconn = sqlite3.connect(_pdb)
                     _pc = _pconn.cursor()
                     _pc.execute(
                         "SELECT id, title, keywords FROM cards WHERE review_status='final' AND resolved=0 AND category='preferences'"
@@ -693,6 +708,26 @@ def main():
                 print("  审批请打开 card_manager GUI\n")
             continue
 
+        # ── /todos 命令：待办清单 ──
+        if user_input.strip().lower() in ("/todos", "/todo", "/待办"):
+            try:
+                from memory.memory_manager import get_todo_list
+                todos = get_todo_list()
+                if not todos:
+                    print("[待办] 没有待办事项。\n")
+                else:
+                    print(f"[待办] {len(todos)} 项：")
+                    quad_icons = {"重要且紧急": "🔴", "重要不紧急": "🟡", "不重要但紧急": "🟠", "不重要不紧急": "⚪"}
+                    for t in todos:
+                        icon = quad_icons.get(t['quadrant'], '?')
+                        td = f" 📅{t['target_date']}" if t['target_date'] else ""
+                        ch = f" {t['chord']}" if t['chord'] else ""
+                        print(f"  {icon} [{t['quadrant']}] {t['title']}{td}{ch}")
+                    print()
+            except Exception as e:
+                print(f"[待办] 查询失败: {e}\n")
+            continue
+
         # ── /status 命令：实时 VA 状态监控 ──
         if user_input.strip().lower() == "/status":
             va_tier_current = "未检测"
@@ -700,7 +735,7 @@ def main():
                 va_check = va_estimate(user_input)
                 va_tier_current = get_va_tier(va_check['arousal']).upper()
             except Exception as e:
-                print(f"[VA估算] /status 异常: {e}")
+                print(f"[VA估算] 状态跳过: {e}")
             anchor = _extract_memory_anchor(recent, 8)
             max_turns_current = _get_max_turns(va_tier_current.lower() if va_tier_current != "未检测" else "mid")
             model_label = "Pro (思考可见)" if "pro" in CHAT_MODEL else "Flash (高速)"
@@ -769,7 +804,7 @@ def main():
                         "expanded": desc
                     }, ensure_ascii=False) + "\n")
             except Exception as e:
-                print(f"[和弦日志] 写入异常: {e}")
+                print(f"[和弦日志] 写入跳过: {e}")
             continue
 
         # ── /card 命令：手动蒸馏上一轮对话为记忆卡片 ──
@@ -826,7 +861,7 @@ def main():
             with open(log_path, "a", encoding="utf-8") as lf:
                 lf.write(json.dumps({"timestamp": fmt_time(now_utc()), "event": "user_message", "bark_sent": False, "message_preview": user_input[:80]}, ensure_ascii=False) + "\n")
         except Exception as e:
-            print(f"[用户消息日志] 写入异常: {e}")
+            print(f"[用户消息] 日志跳过: {e}")
 
         turn_counter += 1
         current_turn = turn_counter
@@ -857,7 +892,7 @@ def main():
                         va["chord_dynamic"] = parts[2]
                         va["chord_expanded"] = _describe_chord(parts[0])
         except Exception as e:
-            print(f"[和弦消费] state.json 读取异常: {e}")
+            print(f"[和弦消费] 无残留和弦: {e}")
 
         max_turns = _get_max_turns(va_tier)
 
@@ -920,11 +955,70 @@ def main():
                 "4.情绪→emotional | 5.自我暴露→deep_talks | 6.约定→commitments\n"
                 "7.亲密请求→erotic | 8.笑点梗→interaction | 9.里程碑→milestone\n"
                 "记录格式：在回复末尾附加 <!-- propose_card: 标题|分类|重要度|内容 -->\n"
-                "重要度1-10。无重大事件不添加。\n"
+                "重要度1-10。重点关注：童年经历、未完成心愿、深层恐惧、长期孤独——这些容易被忽略但极为重要。\n"
+                "如果用户一句话里包含多个独立事件（如生日计划+童年创伤+偏好改变），请为每个事件各写一张卡。\n"
                 "引用记忆卡片：<!-- ref:ID1,ID2 -->\n"
                 "[运维指令结束]\n"
             )
             full_context += propose_card_instruction
+
+        # ── 注入近日事件日志 + 艾森豪威尔四象限（防 AI 误判完成） ──
+        try:
+            from datetime import datetime as _dt, timedelta as _td
+            diary_dir = os.path.join(PROJECT_ROOT, "diary")
+            for days_back in range(3):
+                d = (_dt.now() - _td(days=days_back)).strftime("%Y-%m-%d")
+                ep = os.path.join(diary_dir, f"{d}_events.json")
+                if os.path.exists(ep):
+                    with open(ep, "r", encoding="utf-8") as ef:
+                        ev = json.load(ef)
+                    full_context += f"【{d} 事件日志】\n"
+                    if ev.get("completions"):
+                        full_context += "  已完成: " + "; ".join(ev["completions"][:5]) + "\n"
+                    eis = ev.get("eisenhower", {})
+                    quad_show = [
+                        ("重要且紧急", "important_urgent"),
+                        ("重要不紧急", "important_not_urgent"),
+                    ]
+                    for label, key in quad_show:
+                        items = eis.get(key, [])
+                        if items:
+                            full_context += f"  [{label}]:\n"
+                            for it in items[:5]:
+                                dl = f" 📅{it.get('deadline','')}" if it.get('deadline') and it['deadline'] != '无' else ""
+                                full_context += f"    - {it.get('item','?')}{dl}\n"
+                    cal = ev.get("calendar", [])
+                    if cal:
+                        full_context += "  日历:\n"
+                        for ce in sorted(cal, key=lambda x: x.get('date', ''))[:5]:
+                            full_context += f"    📅 {ce.get('date','?')} {ce.get('event','?')}\n"
+            full_context += "\n"
+        except Exception:
+            pass
+
+        # ── 注入周收拢（如果有） ──
+        try:
+            import glob as _glob
+            weeklies = sorted(_glob.glob(os.path.join(PROJECT_ROOT, "diary", "weekly_*.md")), reverse=True)
+            if weeklies:
+                with open(weeklies[0], "r", encoding="utf-8") as wf:
+                    weekly_text = wf.read()
+                full_context += f"【本周待办收拢】\n{weekly_text[:1500]}\n\n"
+        except Exception:
+            pass
+
+        # ── 待办清单注入 AI 上下文 ──
+        try:
+            from memory.memory_manager import get_todo_list
+            todos = get_todo_list()
+            if todos:
+                full_context += "【当前待办清单】按时间排序，只有用户明确说完成时才划：\n"
+                for t in todos[:8]:
+                    td = f" 📅{t['target_date']}" if t['target_date'] else ""
+                    full_context += f"  [{t['quadrant']}] {t['title']}{td}\n"
+                full_context += "\n"
+        except Exception:
+            pass
 
         # resolve_card 指令不受 VA 门控，确保任何唤醒度下都能标记完成
         full_context += "【运维常驻】如果用户提到有时间期限的事（半年后、下下星期、3天后、明年…），你必须心算出具体日期，在回复末尾输出：<!-- target_date: YYYY-MM-DD -->。例如「半年后过生日」→ <!-- target_date: 2026-11-18 -->。\n"
@@ -957,9 +1051,9 @@ def main():
                 full_context += "你心里记着这几件她还没做完的事。如果她说其中某件已经完成了，你会在回复最后默默帮她在系统里划掉——用这个格式记下来：\n"
                 for uid, utitle, ucat, ucontent in unresolved:
                     full_context += f"  「{utitle}」→ <!-- resolve_card: {uid} -->\n"
-                full_context += "别替她客气。她说做完了你就划。这是你作为她系统的自觉。\n"
+                full_context += "只在她说「做好了/拿到了/喝到了/收到了/做完了」这种明确完成时才划。她换话题、说「好了」当语气词、或者暂时不聊这件事——都不算完成，不要划。\n"
         except Exception as e:
-            print(f"[未解决事项查询] 异常: {e}")
+            print(f"[未解决事项] 跳过: {e}")
 
         full_context += f"【当前系统时间】{datetime.now().strftime('%Y-%m-%d %H:%M')}（北京时间）\n"
 

@@ -248,6 +248,50 @@ def resolve_expired_cards():
     finally:
         conn.close()
 
+def get_todo_list() -> list:
+    """待办清单：所有带 target_date 或 category=commitments 的未解决卡片，按时间排序。"""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        c = conn.cursor()
+        c.execute("""
+            SELECT id, title, category, importance, target_date, chord, valence, arousal, resolved
+            FROM cards
+            WHERE review_status='final' AND resolved=0
+              AND (target_date IS NOT NULL AND target_date != ''
+                   OR category IN ('commitments', 'daily_life'))
+            ORDER BY
+                CASE WHEN target_date IS NOT NULL AND target_date != '' THEN target_date ELSE '9999-99-99' END ASC,
+                importance DESC
+        """)
+        rows = c.fetchall()
+        todos = []
+        for row in rows:
+            cid, title, cat, imp, td, chord, val, aro, res = row
+            # 艾森豪威尔分类
+            if imp >= 8:
+                quad = "重要不紧急"
+            elif td and td < datetime.now(timezone.utc).strftime('%Y-%m-%d'):
+                quad = "重要且紧急"
+            elif cat == 'daily_life':
+                quad = "不重要但紧急" if td else "不重要不紧急"
+            elif cat == 'commitments':
+                quad = "重要不紧急" if imp >= 7 else "不重要但紧急"
+            else:
+                quad = "不重要不紧急"
+            todos.append({
+                "id": cid, "title": title, "category": cat,
+                "importance": imp, "target_date": td or "",
+                "chord": chord or "", "valence": val, "arousal": aro,
+                "quadrant": quad, "resolved": bool(res),
+            })
+        return todos
+    except Exception as e:
+        print(f"[memory_manager] 待办查询失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
 def run_audit():
     print("[memory_manager] 开始执行完整审计...")
     update_active_status()

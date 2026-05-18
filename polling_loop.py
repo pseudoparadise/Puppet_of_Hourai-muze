@@ -39,7 +39,7 @@ def main():
     print(f"[DSphantom轮询守护] 按 Ctrl+C 停止\n")
 
     from bark_trigger import main as bark_main
-    from delegate.dreaming import chain_dream
+    from delegate.dreaming import chain_dream, weekly_sweep
 
     # ── 毒点15修复：启动日志 ──
     _log_event("polling_start")
@@ -70,6 +70,7 @@ def main():
     last_diary_time = time.time()  # 毒点12：时间驱动日记
     last_audit_time = time.time()  # 长期优化四
     last_miner_time = time.time()  # 长期优化五：人格蒸馏
+    last_sweep_time = time.time()  # 周收拢
 
     cycle_count = 0
     consecutive_empty = 0
@@ -130,6 +131,17 @@ def main():
             except Exception as e:
                 _log_event("miner_error", {"error": str(e)[:200]})
             last_miner_time = now_ts
+
+        # ── 周收拢：每7天聚合待办事项 ──
+        SWEEP_INTERVAL = 7 * 24 * 3600
+        if now_ts - last_sweep_time > SWEEP_INTERVAL:
+            print("[周收拢] 聚合近7天待办...")
+            _log_event("sweep_scheduled")
+            try:
+                weekly_sweep()
+            except Exception as e:
+                _log_event("sweep_error", {"error": str(e)[:200]})
+            last_sweep_time = now_ts
 
         # 倒计时
         for i in range(INTERVAL_MINUTES * 60, 0, -1):
