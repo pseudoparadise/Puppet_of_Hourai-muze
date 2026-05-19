@@ -268,10 +268,20 @@ def get_todo_list() -> list:
         for row in rows:
             cid, title, cat, imp, td, chord, val, aro, res = row
             # 艾森豪威尔分类
+            now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
             if imp >= 8:
                 quad = "重要不紧急"
-            elif td and td < datetime.now(timezone.utc).strftime('%Y-%m-%d'):
-                quad = "重要且紧急"
+            elif td and td < now_str:
+                quad = "重要且紧急"  # 过期未完成
+            elif cat == 'todo':
+                if td:
+                    try:
+                        days_left = (datetime.strptime(td, '%Y-%m-%d').replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)).days
+                        quad = "重要且紧急" if days_left <= 7 else "重要不紧急"
+                    except ValueError:
+                        quad = "重要不紧急"
+                else:
+                    quad = "不重要但紧急"  # todo 无 deadline → 需要定时间
             elif cat == 'daily_life':
                 quad = "不重要但紧急" if td else "不重要不紧急"
             elif cat == 'commitments':

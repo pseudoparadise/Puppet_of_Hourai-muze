@@ -925,7 +925,12 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
             }
             # ── P1-3: 同 session 同 category 去重 ──
             cooldown = 10 if triggered_category in {'daily_life','emotional','preferences'} else 0
-            if not session_cards_written or _check_cooldown(session_cards_written, triggered_category, current_turn, cooldown):
+            # ── 写卡拦截器：auto-trigger 路径也检查 ──
+            from memory.card_guard import check_before_write as _guard_check
+            _should_block, _block_reason = _guard_check(title, content, user_input)
+            if _should_block:
+                print(f"[写卡拦截-auto] 已拦截: {_block_reason}")
+            elif not session_cards_written or _check_cooldown(session_cards_written, triggered_category, current_turn, cooldown):
                 write_pending_card(card_draft)
                 if session_cards_written is not None:
                     session_cards_written[triggered_category] = current_turn
@@ -1456,10 +1461,10 @@ def main():
                         f"【裁决者判定 — 此任务已过期但未完成（置信度 {arb_confidence:.2f}）】\n"
                         f"  过期卡片ID: {', '.join(arb_targets)}\n"
                         f"  理由: {arb_reason}\n"
-                        f"  用户不是宣告完成，而是在说还没做/拖延了。你必须自然追问新的时间。\n"
-                        f"  示例: \"那头什么时候洗？给我一个时间。\"\n"
-                        f"  得到用户回复的新时间后，用 <!-- update_card: ID|target_date=新日期|status=in_progress -->\n"
-                        f"  绝不在此轮输出 resolve_card。\n\n"
+                        f"  旧 deadline 已作废。你必须在此轮输出两件事：\n"
+                        f"  1. <!-- resolve_card: {arb_targets[0]} --> 划掉旧卡\n"
+                        f"  2. <!-- propose_card: 标题|todo|7|内容 --> 建新卡（target_date 留空或追问后填入）\n"
+                        f"  回复示例: \"12点的 deadline 过了。头还得洗——想什么时候？\"\n\n"
                     )
                 elif arb_judge == "ambiguous":
                     full_context += (
@@ -1704,16 +1709,18 @@ def main():
             if os.path.exists(pending_path):
                 try:
                     with open(pending_path, "r", encoding="utf-8") as pf:
-                        pending_count = len(json.load(pf))
-                    # ── 毒点40修复：阶梯冷却，堆积越多提醒越频密 ──
+                        pending_cards = json.load(pf)
+                    pending_count = len(pending_cards)
+                    todo_count = sum(1 for pc in pending_cards if pc.get('category') == 'todo')
+                    # ── 阶梯冷却，堆积越多提醒越频密 ──
                     if pending_count >= 15:
-                        print(f"[管家] 卡片池堆积严重！快打开 card_manager 清理一下，记忆快进不来了。（{pending_count} 张待审核）")
-                        _pool_remind_cooldown = 0   # 每轮都提醒
+                        print(f"[管家] 卡片池堆积严重！快打开 card_manager 清理。（{pending_count} 张待审核，{todo_count} 张待办）")
+                        _pool_remind_cooldown = 0
                     elif pending_count >= 10:
-                        print(f"[管家] 卡片池告急！{pending_count} 张待审核，尽快清理。")
+                        print(f"[管家] 卡片池告急！{pending_count} 张待审核（{todo_count} 张待办），尽快清理。")
                         _pool_remind_cooldown = 5
                     elif pending_count >= 5:
-                        print(f"[管家] 有 {pending_count} 张待审核卡片在等你，别拖哦。")
+                        print(f"[管家] 有 {pending_count} 张待审核（{todo_count} 张待办）在等你，别拖哦。")
                         _pool_remind_cooldown = 10
                     # else: cooldown 保持为 0，下一轮继续检查
                 except:

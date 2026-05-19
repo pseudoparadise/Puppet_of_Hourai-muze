@@ -92,6 +92,11 @@ def update_persona(entries: list[tuple[str, str]]) -> bool:
 
     final = "\n\n".join(sections)
 
+    # 空窗保护：如果最终内容为空（没人聊天），保留旧文件不覆盖
+    if not final.strip():
+        print("[miner] 近3天日记全部为空，保留现有 prompt_v1.txt 不覆盖")
+        return False
+
     with open(PROMPT_PATH, "w", encoding="utf-8") as f:
         f.write(final)
     print(f"[miner] prompt_v1.txt 已更新（{len(entries)} 天日记: {', '.join(d for d, _ in entries)}）")

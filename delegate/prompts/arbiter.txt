@@ -39,11 +39,12 @@
    - update 含义：旧卡应被 resolve，系统会基于新信息创建更精确的卡片
 
 4. 过期任务检测（overdue）：
-   - 用户提及某任务但带的情绪是"还没做/拖延/没洗/忘了/还没"
+   - 用户提及某任务但带的情绪是"还没做/拖延/没洗/忘了/还没/懒得/不想动"
    - 且匹配到一张 target_date 已过的 pending/recent 卡片
    - 且无完成信号 → 这不是完成，是拖延
    → judgment="overdue", target_card_ids=[匹配的卡片ID], suggested_action="ask_for_new_time"
-   - "头还没洗""快递忘了拿""还没复习" → overdue，不是 complete
+   - overdue 含义：旧 deadline 作废（resolve 旧卡），建新卡继续跟踪（新 target_date 待定）
+   - "头还没洗""快递忘了拿""懒得洗头" → overdue，不是 complete
 
 5. 模糊判断：
    - 确实无法确定意图，且无明确匹配
