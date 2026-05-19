@@ -380,11 +380,11 @@ def delete_card(card_id: str) -> bool:
 
 
 def resolve_card(card_id: str) -> bool:
-    """标记卡片为已解决（resolved=1）。用于对话中自动检测「我做完了」等信号。"""
+    """标记卡片为已解决（resolved=1, status='completed'）。用于对话中自动检测「我做完了」等信号。"""
     conn = sqlite3.connect(DB_PATH)
     try:
         c = conn.cursor()
-        c.execute("UPDATE cards SET resolved = 1 WHERE id = ? AND review_status='final'", (card_id,))
+        c.execute("UPDATE cards SET resolved = 1, status = 'completed' WHERE id = ? AND review_status='final'", (card_id,))
         if c.rowcount == 0:
             return False
         conn.commit()
@@ -392,6 +392,31 @@ def resolve_card(card_id: str) -> bool:
         return True
     except Exception as e:
         print(f"[memory_manager] 标记已解决失败 card_id={card_id}: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def set_card_status(card_id: str, status: str) -> bool:
+    """更新卡片流转状态（进行中/阻塞），不标记为已完成。"""
+    if status not in ('in_progress', 'blocked', 'active'):
+        print(f"[memory_manager] 无效状态: {status}，跳过 card_id={card_id}")
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        c = conn.cursor()
+        c.execute(
+            "UPDATE cards SET status = ? WHERE id = ? AND review_status='final' AND resolved = 0",
+            (status, card_id)
+        )
+        if c.rowcount == 0:
+            return False
+        conn.commit()
+        label = {'in_progress': '进行中', 'blocked': '阻塞', 'active': '活跃'}[status]
+        print(f"[memory_manager] 卡片 {card_id} 状态 → {label}")
+        return True
+    except Exception as e:
+        print(f"[memory_manager] 状态更新失败 card_id={card_id}: {e}")
         return False
     finally:
         conn.close()

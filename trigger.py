@@ -360,6 +360,29 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
         except Exception as e:
             print(f"[自动解决] 检查失败 card_id={cid_to_resolve}: {e}")
 
+    # ── status_card：AI 标记卡片流转状态（进行中/阻塞），不是完成 ──
+    status_match = re.search(r'<!--\s*status_card:\s*(.*?)\s*-->', raw_reply, re.IGNORECASE)
+    if status_match:
+        display_reply = re.sub(r'<!--\s*status_card:.*?\s*-->', '', display_reply, flags=re.IGNORECASE).strip()
+        raw_status = status_match.group(1).strip()
+        # 格式: 卡片ID|进行中  或  卡片ID|阻塞
+        parts = [p.strip() for p in raw_status.split("|")]
+        if len(parts) == 2:
+            sid, slabel = parts
+            status_map = {"进行中": "in_progress", "阻塞": "blocked"}
+            db_status = status_map.get(slabel)
+            if db_status and sid:
+                try:
+                    from memory.memory_manager import set_card_status
+                    if set_card_status(sid, db_status):
+                        print(f"[状态流转] 卡片 {sid} → {slabel}")
+                    else:
+                        print(f"[状态流转] 卡片 {sid} 不存在或已解决，跳过")
+                except Exception as e:
+                    print(f"[状态流转] 失败 card_id={sid}: {e}")
+            else:
+                print(f"[状态流转] 无效状态标签: {slabel}")
+
     # 机制 B：用户明确宣告完成 → 关键词匹配未解决卡片 → 自动 resolve
     # 值枚举：每个都是明确完成义，不会被日常语气词误匹配
     completion_keywords = [
@@ -936,105 +959,139 @@ def main():
         from delegate_tools import JAILBREAK_PREFIX
         full_context = JAILBREAK_PREFIX + RP_DECLARATION + "\n\n" + PERSONA + "\n\n"
 
-        # 运维指令区：放在人格之后、上下文之前，加明确分隔
-        memory_tier_instruction = (
-            "[以下为系统运维指令，仅在非秋名山模式下优先参考]\n"
-            "【记忆系统分层】\n"
-            "L1短期：今日对话+7日滚动总结，日常陪伴优先参考；\n"
-            "L2长期：已定稿记忆卡片，按引用次数和重要性排序；\n"
-            "L3核心：人格底色+里程碑事件，永久保留。\n"
+        # ═══════════════════════════════════════════════════════════
+        # 分类校准：在写卡/更新卡片之前先判断用户意图
+        # ═══════════════════════════════════════════════════════════
+        full_context += (
+            "[系统运维指令 — 分类校准]\n"
+            "面对用户输入，在生成任何卡片操作之前，先做一次分类判断：\n"
+            "  A. 新待办指令 — 用户提出了新的事项、计划、承诺、偏好 → 末尾附加 <!-- propose_card: 标题|分类|重要度|内容 -->\n"
+            "  B. 状态反馈 — 用户对已有事项表达了进展、困难、搁置 → 末尾附加 <!-- status_card: 卡片ID|进行中 --> 或 <!-- status_card: 卡片ID|阻塞 -->\n"
+            "  C. 明确完成 — 用户宣告事项已做完 → 末尾附加 <!-- resolve_card: 卡片ID -->\n"
+            "关键规则：状态反馈 ≠ 已完成。\"好了这下完蛋了\"\"还在修\"\"卡住了\"\"先不做了\"这些都不是完成，是阻塞。只用 status_card，绝不用 resolve_card。\n"
+            "仅当用户使用了\"修好了/做完了/拿到了/收到了/搞定了/打通了\"等明确完成宣告词，才用 resolve_card。\n"
+            "[分类校准结束]\n\n"
         )
 
-        # ── VA 瘦身：高唤醒模式跳过写卡/引用运维指令，让模型注意力全在飙车上 ──
-        # resolve_card 指令始终保持，确保任何模式下都能标记事项完成
-        if va_tier != 'high':
-            propose_card_instruction = (
-                memory_tier_instruction +
-                "【记忆卡片写入标准】\n"
-                "1.日常状态→daily_life | 2.喜好→preferences | 3.计划→commitments\n"
-                "4.情绪→emotional | 5.自我暴露→deep_talks | 6.约定→commitments\n"
-                "7.亲密请求→erotic | 8.笑点梗→interaction | 9.里程碑→milestone\n"
-                "记录格式：在回复末尾附加 <!-- propose_card: 标题|分类|重要度|内容 -->\n"
-                "重要度1-10。重点关注：童年经历、未完成心愿、深层恐惧、长期孤独——这些容易被忽略但极为重要。\n"
-                "如果用户一句话里包含多个独立事件（如生日计划+童年创伤+偏好改变），请为每个事件各写一张卡。\n"
-                "引用记忆卡片：<!-- ref:ID1,ID2 -->\n"
-                "[运维指令结束]\n"
-            )
-            full_context += propose_card_instruction
+        from datetime import datetime as _dt, timedelta as _td
+        diary_dir = os.path.join(PROJECT_ROOT, "diary")
 
-        # ── 注入近日事件日志 + 艾森豪威尔四象限（防 AI 误判完成） ──
-        try:
-            from datetime import datetime as _dt, timedelta as _td
-            diary_dir = os.path.join(PROJECT_ROOT, "diary")
-            for days_back in range(3):
-                d = (_dt.now() - _td(days=days_back)).strftime("%Y-%m-%d")
-                ep = os.path.join(diary_dir, f"{d}_events.json")
-                if os.path.exists(ep):
+        # ═══════════════════════════════════════════════════════════
+        # 叙事缓冲区：近三天日记原文 — 理解近期发生了什么
+        # ═══════════════════════════════════════════════════════════
+        narrative_parts = []
+        for days_back in range(1, 4):
+            d = (_dt.now() - _td(days=days_back)).strftime("%Y-%m-%d")
+            diary_md = os.path.join(diary_dir, f"{d}.md")
+            if os.path.exists(diary_md):
+                try:
+                    with open(diary_md, "r", encoding="utf-8") as df:
+                        md_content = df.read()
+                    # 提取 ## 日记 段的第一段叙事
+                    import re as _re_n
+                    m = _re_n.search(r'^## .+?\n+(.*?)(?=\n## |\Z)', md_content, _re_n.MULTILINE | _re_n.DOTALL)
+                    if m:
+                        nar = m.group(1).strip()
+                        narrative_parts.append(f"### {d}\n{nar[:400]}")
+                except Exception:
+                    pass
+        if narrative_parts:
+            full_context += "【叙事缓冲区 — 近三天发生了什么】\n" + "\n\n".join(narrative_parts) + "\n\n"
+
+        # ── 近期概览（滚动总结） ──
+        summary = load_rolling_summary()
+        if summary:
+            full_context += f"【7日滚动概览】\n{summary[:800]}\n\n"
+
+        # ═══════════════════════════════════════════════════════════
+        # 指令缓冲区：当前待办及艾森豪威尔分类 — 知道要做什么
+        # ═══════════════════════════════════════════════════════════
+        instruction_parts = []
+
+        # 事件日志的四象限（近3天）
+        for days_back in range(1, 4):
+            d = (_dt.now() - _td(days=days_back)).strftime("%Y-%m-%d")
+            ep = os.path.join(diary_dir, f"{d}_events.json")
+            if os.path.exists(ep):
+                try:
                     with open(ep, "r", encoding="utf-8") as ef:
                         ev = json.load(ef)
-                    full_context += f"【{d} 事件日志】\n"
                     if ev.get("completions"):
-                        full_context += "  已完成: " + "; ".join(ev["completions"][:5]) + "\n"
+                        instruction_parts.append(f"[{d} 已完成] " + "; ".join(ev["completions"][:5]))
                     eis = ev.get("eisenhower", {})
-                    quad_show = [
-                        ("重要且紧急", "important_urgent"),
-                        ("重要不紧急", "important_not_urgent"),
-                    ]
-                    for label, key in quad_show:
+                    for label, key in [("重要且紧急", "important_urgent"), ("重要不紧急", "important_not_urgent")]:
                         items = eis.get(key, [])
                         if items:
-                            full_context += f"  [{label}]:\n"
                             for it in items[:5]:
-                                dl = f" 📅{it.get('deadline','')}" if it.get('deadline') and it['deadline'] != '无' else ""
-                                full_context += f"    - {it.get('item','?')}{dl}\n"
+                                dl = f" 📅{it['deadline']}" if it.get('deadline') and it['deadline'] != '无' else ""
+                                instruction_parts.append(f"[{label}] {it.get('item','?')}{dl}")
                     cal = ev.get("calendar", [])
-                    if cal:
-                        full_context += "  日历:\n"
-                        for ce in sorted(cal, key=lambda x: x.get('date', ''))[:5]:
-                            full_context += f"    📅 {ce.get('date','?')} {ce.get('event','?')}\n"
-            full_context += "\n"
-        except Exception:
-            pass
+                    for ce in sorted(cal, key=lambda x: x.get('date', ''))[:5]:
+                        instruction_parts.append(f"📅 {ce.get('date','?')} {ce.get('event','?')}")
+                except Exception:
+                    pass
 
-        # ── 注入周收拢（如果有） ──
-        try:
-            import glob as _glob
-            weeklies = sorted(_glob.glob(os.path.join(PROJECT_ROOT, "diary", "weekly_*.md")), reverse=True)
-            if weeklies:
-                with open(weeklies[0], "r", encoding="utf-8") as wf:
-                    weekly_text = wf.read()
-                full_context += f"【本周待办收拢】\n{weekly_text[:1500]}\n\n"
-        except Exception:
-            pass
-
-        # ── 待办清单注入 AI 上下文 ──
+        # 数据库待办清单
         try:
             from memory.memory_manager import get_todo_list
             todos = get_todo_list()
             if todos:
-                full_context += "【当前待办清单】按时间排序，只有用户明确说完成时才划：\n"
                 for t in todos[:8]:
                     td = f" 📅{t['target_date']}" if t['target_date'] else ""
-                    full_context += f"  [{t['quadrant']}] {t['title']}{td}\n"
-                full_context += "\n"
+                    instruction_parts.append(f"[{t['quadrant']}] {t['title']}{td}")
         except Exception:
             pass
 
-        # resolve_card 指令不受 VA 门控，确保任何唤醒度下都能标记完成
-        full_context += "【运维常驻】如果用户提到有时间期限的事（半年后、下下星期、3天后、明年…），你必须心算出具体日期，在回复末尾输出：<!-- target_date: YYYY-MM-DD -->。例如「半年后过生日」→ <!-- target_date: 2026-11-18 -->。\n"
-        full_context += "【运维常驻】标记事项完成：<!-- resolve_card: 卡片ID -->。用户提及已完成某事项时使用。\n\n"
+        if instruction_parts:
+            full_context += "【指令缓冲区 — 当前待办及艾森豪威尔分类，仅用户明确宣告完成时才划掉】\n"
+            full_context += "\n".join(f"  - {p}" for p in instruction_parts) + "\n\n"
 
-        # 上下文区：离用户输入最近，情感权重最高
-        summary = load_rolling_summary()
-        if summary:
-            full_context += f"【近期概览】\n{summary}\n\n"
+        # ── 周收拢（长期待办拦截） ──
+        try:
+            import glob as _glob
+            weeklies = sorted(_glob.glob(os.path.join(diary_dir, "weekly_*.md")), reverse=True)
+            if weeklies:
+                with open(weeklies[0], "r", encoding="utf-8") as wf:
+                    weekly_text = wf.read()
+                full_context += f"【本周待办收拢 — 长期事项】\n{weekly_text[:1200]}\n\n"
+        except Exception:
+            pass
 
+        # ═══════════════════════════════════════════════════════════
+        # 运维常驻指令（不受 VA 门控）
+        # ═══════════════════════════════════════════════════════════
+        full_context += (
+            "【卡片操作格式】\n"
+            "  新卡片: <!-- propose_card: 标题|分类|重要度|内容 -->\n"
+            "  状态更新: <!-- status_card: 卡片ID|进行中 --> 或 <!-- status_card: 卡片ID|阻塞 -->\n"
+            "  标记完成: <!-- resolve_card: 卡片ID -->\n"
+            "  引用记忆: <!-- ref:ID1,ID2 -->\n"
+            "  目标日期: <!-- target_date: YYYY-MM-DD -->\n\n"
+        )
+
+        # ── VA 瘦身：高唤醒模式跳过写卡标准，但分类校准和操作格式保留 ──
+        if va_tier != 'high':
+            full_context += (
+                "【记忆卡片写入标准】\n"
+                "1.日常状态→daily_life | 2.喜好→preferences | 3.计划→commitments\n"
+                "4.情绪→emotional | 5.自我暴露→deep_talks | 6.约定→commitments\n"
+                "7.亲密请求→erotic | 8.笑点梗→interaction | 9.里程碑→milestone\n"
+                "重要度1-10。重点关注：童年经历、未完成心愿、深层恐惧、长期孤独。\n"
+                "用户一句话含多个独立事件时，为每个事件各写一张卡。\n"
+                "status_card 用于非完成的状态流转：<!-- status_card: ID|进行中 --> 或 <!-- status_card: ID|阻塞 -->\n"
+                "resolve_card 仅用于明确完成宣告，误判会导致待办丢失，慎重。\n"
+            )
+
+        # ═══════════════════════════════════════════════════════════
+        # 记忆召回 + 情绪 + 未解决卡片
+        # ═══════════════════════════════════════════════════════════
         if memory_block:
-            full_context += memory_block + "\n"
+            full_context += "\n" + memory_block + "\n"
 
         if va:
-            full_context += f"【用户情绪】效价={va['valence']:.2f}, 唤醒度={va['arousal']:.2f}, 温度={va['suggested_temperature']}, 描述={va['description']}\n"
-        # unresolved cards
+            full_context += f"【用户情绪】效价={va['valence']:.2f}, 唤醒度={va['arousal']:.2f}, 描述={va['description']}\n"
+
+        # 未解决卡片（供 status_card / resolve_card 引用）
         try:
             db_path = os.path.join(PROJECT_ROOT, "memory", "cards.db")
             conn = sqlite3.connect(db_path)
@@ -1048,10 +1105,10 @@ def main():
             unresolved = c.fetchall()
             conn.close()
             if unresolved:
-                full_context += "你心里记着这几件她还没做完的事。如果她说其中某件已经完成了，你会在回复最后默默帮她在系统里划掉——用这个格式记下来：\n"
+                full_context += "【可操作卡片 — 以下事项尚未完成，可对其使用 status_card 或 resolve_card】\n"
                 for uid, utitle, ucat, ucontent in unresolved:
-                    full_context += f"  「{utitle}」→ <!-- resolve_card: {uid} -->\n"
-                full_context += "只在她说「做好了/拿到了/喝到了/收到了/做完了」这种明确完成时才划。她换话题、说「好了」当语气词、或者暂时不聊这件事——都不算完成，不要划。\n"
+                    full_context += f"  「{utitle}」→ status_card: {uid}|进行中/阻塞 或 resolve_card: {uid}\n"
+                full_context += "\n"
         except Exception as e:
             print(f"[未解决事项] 跳过: {e}")
 

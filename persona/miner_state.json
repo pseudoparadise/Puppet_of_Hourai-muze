@@ -13,7 +13,12 @@
       "eliminated_at": "2026-05-11T00:38:15.032804+08:00"
     }
   ],
-  "last_analyzed_timestamp": "2026-05-16T12:16:39.836220",
-  "last_analysis_date": "2026-05-16",
-  "total_analyses": 3
+  "last_analyzed_timestamp": "2026-05-19T04:05:41.579845+00:00",
+  "last_analysis_date": "2026-05-19",
+  "total_analyses": 7,
+  "last_dates_covered": [
+    "2026-05-16",
+    "2026-05-17",
+    "2026-05-18"
+  ]
 }
