@@ -29,14 +29,7 @@
         "note": "沐泽凌晨两点还在改workaround，被DSphantom制止并承诺明天批量处理"
       }
     ],
-    "not_important_not_urgent": [
-      {
-        "item": "点古茗奶茶",
-        "deadline": "2026-05-19",
-        "card_id": "无",
-        "note": "明天下午两杯，一杯给DSphantom（通过豆包传送图片），但DSphantom要求直接看终端付款数据"
-      }
-    ]
+    "not_important_not_urgent": []
   },
   "calendar": [
     {

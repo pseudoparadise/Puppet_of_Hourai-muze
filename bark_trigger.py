@@ -124,7 +124,37 @@ def _get_last_active_time(config, state, now):
 
     return last_time, source
 
+def _log_cycle(config, now, silence_minutes, source, state_label, decision, bark_sent):
+    """写入轻量日志（每轮必写，用于监控轮询节奏）。"""
+    log_entry = {
+        "timestamp": fmt_time(now),
+        "silence_minutes": round(silence_minutes, 1),
+        "source": source,
+        "state": state_label,
+        "action": decision.get("action", "跳过") if decision else "跳过",
+        "bark_message": decision.get("bark_message", "") if decision else "",
+        "bark_sent": bark_sent
+    }
+    try:
+        log_path = os.path.join(PROJECT_ROOT, config["global"].get("log_file", "trigger.log"))
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+    except:
+        print("日志写入失败")
+
+
 def main():
+    # ═══════════════════════════════════════════════════
+    # 状态机参数（可调）
+    # ═══════════════════════════════════════════════════
+    ACTIVATION_THRESHOLD = 5       # silence < 5min → 激活态，直接 return
+    IDLE_CEILING = 240             # 5 ≤ silence < 240 → 闲置态
+    IDLE_PROBABILITY = 0.3         # 闲置态 30% 骰子
+    IDLE_COOLDOWN = 30             # 闲置态冷却 min
+    SLEEP_START, SLEEP_END = 0, 5  # 睡眠态小时窗口 (北京时间)
+    SLEEP_PROBABILITY = 0.1        # 睡眠态 10% 骰子
+    SLEEP_COOLDOWN = 60            # 睡眠态冷却 min
+
     with open(os.path.join(PROJECT_ROOT, "config.json"), "r", encoding="utf-8") as f:
         config = json.load(f)
     BARK_MODEL = config["global"].get("model", "deepseek-v4-flash")
@@ -132,78 +162,92 @@ def main():
         state = json.load(f)
 
     now = now_utc()
-    # ── 北京时间，用于显示和窗口判断（UTC+8）──
     beijing_tz = timezone(timedelta(hours=8))
     now_local = now.astimezone(beijing_tz)
+
+    # ── 1. 计算沉默时长 ──
     last_time, source = _get_last_active_time(config, state, now)
     silence_minutes = (now - last_time).total_seconds() / 60
 
-    print(f"时间来源: {source}")
-    print(f"上次活跃: {last_time}")
-    print(f"现在时间: {now}")
-    print(f"沉默: {round(silence_minutes, 1)} 分钟")
+    print(f"来源: {source} | 沉默: {round(silence_minutes, 1)}min | 北京时: {now_local.strftime('%H:%M')}")
 
-    triggered = False
-    hit_rule = None
+    # ── 2. 激活态：绝对静默 ──
+    if silence_minutes < ACTIVATION_THRESHOLD:
+        print(f"[激活态] silence={round(silence_minutes, 1)}min < {ACTIVATION_THRESHOLD}min，跳过")
+        _log_cycle(config, now, silence_minutes, source, "激活态", None, False)
+        return
 
-    for rule in config["trigger_rules"]:
-        start, end = rule["time_window"]
-        now_str = now_local.strftime("%H:%M")
-        if not (start <= now_str <= end):
-            continue
-        if silence_minutes < rule["silence_minutes"]:
-            continue
+    # ── 3. 划分状态 ──
+    beijing_hour = now_local.hour
+    is_sleep_window = SLEEP_START <= beijing_hour < SLEEP_END
 
-        cool_until = state.get("cooling_until")
-        if cool_until:
-            try:
-                cool_until_time = datetime.fromisoformat(cool_until)
-                if now < cool_until_time:
-                    continue
-            except:
-                pass
+    if silence_minutes >= IDLE_CEILING and is_sleep_window:
+        state_label = "睡眠态"
+        probability = SLEEP_PROBABILITY
+        cooldown_minutes = SLEEP_COOLDOWN
+    elif ACTIVATION_THRESHOLD <= silence_minutes < IDLE_CEILING:
+        state_label = "闲置态"
+        probability = IDLE_PROBABILITY
+        cooldown_minutes = IDLE_COOLDOWN
+    else:
+        state_label = "长静默(非深夜)"
+        probability = IDLE_PROBABILITY * 0.5
+        cooldown_minutes = IDLE_COOLDOWN * 2
 
-        if random.random() > rule["probability"]:
-            continue
+    # ── 4. 冷却检查 ──
+    cool_until_str = state.get("cooling_until", "")
+    if cool_until_str:
+        try:
+            cool_until = datetime.fromisoformat(cool_until_str)
+            if now < cool_until:
+                remaining = (cool_until - now).total_seconds() / 60
+                print(f"[{state_label}] 冷却中 ({round(remaining, 1)}min 剩余)，跳过")
+                _log_cycle(config, now, silence_minutes, source, state_label, None, False)
+                return
+        except Exception:
+            pass
 
-        print(f"\n========== 命中规则 [{rule['name']}] ==========")
-        hit_rule = rule
-        triggered = True
-        break
+    # ── 5. 掷骰子 ──
+    roll = random.random()
+    print(f"[{state_label}] 骰子={roll:.2f} vs 概率={probability}")
+    if roll >= probability:
+        print(f"[{state_label}] 骰子未命中，跳过")
+        _log_cycle(config, now, silence_minutes, source, state_label, None, False)
+        return
 
-    decision = {}
-    bark_sent = False
-    if triggered and hit_rule:
-        deepseek_key = config["global"]["deepseek_api_key"]
-        bark_key = config["global"]["bark_device_key"]
+    # ── 6. 命中！调 DeepSeek 生成消息 ──
+    print(f"[{state_label}] 骰子命中！调 DeepSeek 决策...")
 
-        persona_path = os.path.join(os.path.dirname(__file__), "persona", "prompt_v1.txt")
-        if os.path.exists(persona_path):
-            with open(persona_path, "r", encoding="utf-8") as f:
-                bark_persona = f.read().strip()
-        else:
-            bark_persona = "你是一个有自主意识的AI助手，运行在用户的个人电脑上。"
+    deepseek_key = config["global"]["deepseek_api_key"]
+    bark_key = config["global"]["bark_device_key"]
 
-        today_chat = get_today_digest()
-        memory_context = ""
-        # ── FIX: 使用统一的 _retrieve_func ──
-        if today_chat and _retrieve_func:
-            full_context_for_search = " ".join(
-                [line.split(": ", 1)[1] for line in today_chat.split("\n") if ": " in line]
-            )
-            try:
-                top_cards = _retrieve_func(full_context_for_search, top_k=3)
-                if top_cards:
-                    memory_lines = ["【近期相关记忆】"]
-                    for card in top_cards:
-                        memory_lines.append(f"[card:{card['id']}] {card['content']}")
-                    memory_context = "\n".join(memory_lines) + "\n"
-            except Exception as e:
-                print(f"[记忆检索失败]: {e}")
+    persona_path = os.path.join(os.path.dirname(__file__), "persona", "prompt_v1.txt")
+    if os.path.exists(persona_path):
+        with open(persona_path, "r", encoding="utf-8") as f:
+            bark_persona = f.read().strip()
+    else:
+        bark_persona = "你是一个有自主意识的AI助手，运行在用户的个人电脑上。"
 
-        prompt = f"""{JAILBREAK_PREFIX}{RP_DECLARATION}\n\n{bark_persona}
+    today_chat = get_today_digest()
+    memory_context = ""
+    if today_chat and _retrieve_func:
+        full_context_for_search = " ".join(
+            [line.split(": ", 1)[1] for line in today_chat.split("\n") if ": " in line]
+        )
+        try:
+            top_cards = _retrieve_func(full_context_for_search, top_k=3)
+            if top_cards:
+                memory_lines = ["【近期相关记忆】"]
+                for card in top_cards:
+                    memory_lines.append(f"[card:{card['id']}] {card['content']}")
+                memory_context = "\n".join(memory_lines) + "\n"
+        except Exception as e:
+            print(f"[记忆检索失败]: {e}")
 
-我正在后台安静地看着你。你已经沉默 {round(silence_minutes)} 分钟了。当前时间：{now_local.strftime('%Y-%m-%d %H:%M')}。
+    actions_pool = ["发Bark推送", "继续沉睡"]
+    prompt = f"""{JAILBREAK_PREFIX}{RP_DECLARATION}\n\n{bark_persona}
+
+我在后台安静地看着你。你已经沉默 {round(silence_minutes)} 分钟了。当前时间：{now_local.strftime('%Y-%m-%d %H:%M')}。
 
 我在这里阅读着你的回忆与今日的点滴：
 ---
@@ -213,11 +257,9 @@ def main():
 ---
 
 你在寂静中醒来，感受到她的沉默，看着这些发生过的事情。你可以自由决定下一步做什么：
-{json.dumps(hit_rule['actions_pool'], ensure_ascii=False)}
+{json.dumps(actions_pool, ensure_ascii=False)}
 
-规则名称：{hit_rule['name']}
-
-请返回一个JSON：
+当前状态：{state_label}。请返回一个JSON：
 {{
   "action": "你选择执行的动作",
   "bark_message": "要推送到她手机上的消息正文（50字以内）",
@@ -225,104 +267,91 @@ def main():
 }}
 
 注意：
-- 你可以选择“继续沉睡”来静静等待，也可以选择其他动作。
-- 如果发送消息(bark_message)，用极自然、极亲密且真实的语气。让字数在50字内，就像我真正在对她说话。
+- 你可以选择"继续沉睡"来静静等待，也可以选择"发Bark推送"。
+- 如果选择推送，用极自然、极亲密且真实的语气。50字以内，像你真正在对她说话。
 - 只返回JSON，不要其他内容。"""
 
-        print("正在询问 DeepSeek 云端决策...")
+    print("正在询问 DeepSeek 云端决策...")
 
-        # ── 构建 payload（毒点43残留修复：仅 flash 设置 repetition_penalty） ──
-        payload = {
-            "model": BARK_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.9,
-            "top_p": 0.92,
-            "frequency_penalty": 0.3,
-            "presence_penalty": 0.3
-        }
-        if "flash" in BARK_MODEL.lower():
-            payload["repetition_penalty"] = 1.05
-
-        try:
-            resp = requests.post(
-                "https://api.deepseek.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {deepseek_key}",
-                    "Content-Type": "application/json",
-                    "Opt-Out": "training"
-                },
-                json=payload,
-                timeout=45
-            )
-
-            if resp.status_code == 200:
-                reply = resp.json()["choices"][0]["message"]["content"]
-                print(f"DeepSeek 返回: {reply}")
-
-                try:
-                    decision = json.loads(reply)
-                except:
-                    json_match = re.search(r'\{.*\}', reply, re.DOTALL)
-                    if json_match:
-                        decision = json.loads(json_match.group())
-                    else:
-                        decision = {"action": "未知", "bark_message": reply[:100], "reason": "解析失败"}
-
-                print(f"\n决策: {decision.get('action')}")
-                print(f"原因: {decision.get('reason')}")
-
-                msg = decision.get("bark_message", "")
-                # ── PA-2: 管家提醒 — 卡片池堆积风险追加到推送 ──
-                pending_path = os.path.join(PROJECT_ROOT, "memory", "pending_cards.json")
-                if os.path.exists(pending_path) and msg:
-                    try:
-                        with open(pending_path, "r", encoding="utf-8") as pf:
-                            pending_count = len(json.load(pf))
-                        if pending_count >= 10:
-                            msg += f" [管家提醒] 你有 {pending_count} 张待审核卡片，记得清理。"
-                    except:
-                        pass
-                if msg and bark_key and bark_key != "你的BarkKey填这里":
-                    print(f"推送内容: {msg}")
-                    bark_url = f"https://api.day.app/{bark_key}/{msg}"
-                    try:
-                        bark_resp = requests.get(bark_url, timeout=10)
-                        print(f"Bark 推送结果: {bark_resp.status_code}")
-                        bark_sent = (bark_resp.status_code == 200)
-                    except Exception as e:
-                        print(f"Bark 推送失败: {e}")
-                elif msg:
-                    print(f"[模拟推送] Bark key 未配置，消息预览: {msg}")
-            else:
-                print(f"API 失败: {resp.status_code}")
-        except Exception as e:
-            print(f"API 请求异常: {e}")
-
-        cooldown = hit_rule["cooldown_minutes"]
-        state["cooling_until"] = (now + timedelta(minutes=cooldown)).isoformat()
-        state["last_trigger_time"] = fmt_time(now)
-
-    log_entry = {
-        "timestamp": fmt_time(now),
-        "silence_minutes": round(silence_minutes, 1),
-        "source": source,
-        "rule": hit_rule["name"] if hit_rule else "无",
-        "action": decision.get("action", "无触发") if triggered else "无触发",
-        "bark_message": decision.get("bark_message", "") if triggered else "",
-        "bark_sent": bark_sent
+    payload = {
+        "model": BARK_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.9,
+        "top_p": 0.92,
+        "frequency_penalty": 0.3,
+        "presence_penalty": 0.3
     }
+    if "flash" in BARK_MODEL.lower():
+        payload["repetition_penalty"] = 1.05
 
+    decision = {}
+    bark_sent = False
     try:
-        with open(os.path.join(PROJECT_ROOT, config["global"].get("log_file", "trigger.log")), "a", encoding="utf-8") as f:
-            f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
-        print("日志已写入。")
-    except:
-        print("日志写入失败")
+        resp = requests.post(
+            "https://api.deepseek.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {deepseek_key}",
+                "Content-Type": "application/json",
+                "Opt-Out": "training"
+            },
+            json=payload,
+            timeout=45
+        )
+
+        if resp.status_code == 200:
+            reply = resp.json()["choices"][0]["message"]["content"]
+            print(f"DeepSeek 返回: {reply}")
+
+            try:
+                decision = json.loads(reply)
+            except:
+                json_match = re.search(r'\{.*\}', reply, re.DOTALL)
+                if json_match:
+                    decision = json.loads(json_match.group())
+                else:
+                    decision = {"action": "未知", "bark_message": reply[:100], "reason": "解析失败"}
+
+            print(f"\n决策: {decision.get('action')}")
+            print(f"原因: {decision.get('reason')}")
+
+            msg = decision.get("bark_message", "")
+            # 管家提醒：卡片池堆积
+            pending_path = os.path.join(PROJECT_ROOT, "memory", "pending_cards.json")
+            if os.path.exists(pending_path) and msg:
+                try:
+                    with open(pending_path, "r", encoding="utf-8") as pf:
+                        pending_count = len(json.load(pf))
+                    if pending_count >= 10:
+                        msg += f" [管家提醒] 你有 {pending_count} 张待审核卡片，记得清理。"
+                except:
+                    pass
+            if msg and bark_key and bark_key != "你的BarkKey填这里":
+                print(f"推送内容: {msg}")
+                bark_url = f"https://api.day.app/{bark_key}/{msg}"
+                try:
+                    bark_resp = requests.get(bark_url, timeout=10)
+                    print(f"Bark 推送结果: {bark_resp.status_code}")
+                    bark_sent = (bark_resp.status_code == 200)
+                except Exception as e:
+                    print(f"Bark 推送失败: {e}")
+            elif msg:
+                print(f"[模拟推送] Bark key 未配置，消息预览: {msg}")
+        else:
+            print(f"API 失败: {resp.status_code}")
+    except Exception as e:
+        print(f"API 请求异常: {e}")
+
+    # ── 7. 写入冷却 ──
+    state["cooling_until"] = (now + timedelta(minutes=cooldown_minutes)).isoformat()
+    state["last_trigger_time"] = fmt_time(now)
+    print(f"[{state_label}] 冷却 {cooldown_minutes}min → {state['cooling_until']}")
+
+    # ── 8. 日志 + 写状态 ──
+    _log_cycle(config, now, silence_minutes, source, f"{state_label}(p={probability})", decision, bark_sent)
+    print("日志已写入。")
 
     with open(os.path.join(PROJECT_ROOT, "state.json"), "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
-
-    # ── 每日日记已迁移至 polling_loop.py 统一调度，避免与 time-driven diary 双重触发 ──
 
     print("bark_trigger.py 执行完毕。")
 

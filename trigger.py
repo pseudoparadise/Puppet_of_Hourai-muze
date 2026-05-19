@@ -389,6 +389,9 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
         "修好了", "做完了", "完成了", "搞定了", "弄好了",
         "打通了", "调通了", "拿到了", "收到了", "喝到了",
         "吃完了", "已经做了", "已经修了", "已经解决了",
+        "来一起", "OCR", "给你看", "展示", "你看",
+        "到了到了", "来了来了", "买到了", "到手了",
+        "回来了", "好了好了", "搞完了", "干完了", "办完了",
     ]
     if any(kw in user_input for kw in completion_keywords):
         try:
@@ -435,6 +438,45 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
         except Exception as e:
             print(f"[关键词解决] 扫描跳过: {e}")
 
+    # ── 常驻 pending 扫描：不受关键词门控，每轮必跑 ──
+    pending_path = os.path.join(PROJECT_ROOT, "memory", "pending_cards.json")
+    if os.path.exists(pending_path):
+        try:
+            import re as _re2
+            _STOP_CHARS2 = set('的了是在我有他个这着就和也要会可你他们来到说去为上对得大子能过下一地出道自以时年看没那天家开小成把前还但只想中里用生种起知好些间因所如然后其最她它已当两从方实长更应什')
+            def _key_chars2(s):
+                s = s.lower()
+                chars = set(_re2.findall(r'[一-鿿]', s)) - _STOP_CHARS2
+                for t in _re2.findall(r'[a-z][a-z0-9]+', s):
+                    chars.add(t)
+                return chars
+            user_chars2 = _key_chars2(user_input)
+            with open(pending_path, "r", encoding="utf-8") as pf:
+                pending_cards = json.load(pf)
+            pending_modified = False
+            for pc in pending_cards:
+                if pc.get("id") in resolved_ids:
+                    continue
+                if pc.get("importance", 5) >= 8:
+                    continue
+                pc_title = pc.get("title", "")
+                pc_content = pc.get("content", "")
+                title_chars = _key_chars2(pc_title)
+                title_overlap = len(user_chars2 & title_chars)
+                content_chars = _key_chars2(pc_content or '')
+                content_overlap = len(user_chars2 & content_chars)
+                if title_overlap >= 1 or content_overlap >= 2:
+                    print(f"[pending常驻扫描] 用户消息与待审核卡「{pc_title}」重叠（标题={title_overlap} 内容={content_overlap}），自动移除")
+                    resolved_ids.add(pc.get("id"))
+                    pending_modified = True
+            if pending_modified:
+                pending_cards = [pc for pc in pending_cards if pc.get("id") not in resolved_ids]
+                from delegate_tools import atomic_write_json as _awj_pending
+                _awj_pending(pending_path, pending_cards)
+                print(f"[pending常驻扫描] pending_cards.json 已更新，剩余 {len(pending_cards)} 张")
+        except Exception as e_pending:
+            pass  # 静默降级，不阻塞主流程
+
     propose_match = re.search(r'<!--\s*propose_card:\s*(.*?)\s*-->', raw_reply, re.IGNORECASE)
     if propose_match:
         display_reply = re.sub(r'<!--\s*propose_card:.*?\s*-->', '', display_reply, flags=re.IGNORECASE).strip()
@@ -469,10 +511,77 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
             }
             # ── P1-3: 同 session 同 category 去重 ──
             category = parts[1] if parts[1] in ['milestone','commitments','turning_points','deep_talks','interaction','preferences','real_world','daily_life','emotional','habits','erotic'] else 'interaction'
-            if not session_cards_written or _check_cooldown(session_cards_written, category, current_turn, 0):
+
+            # ═══════════════════════════════════════════════════
+            # 双事件兜底：写新卡前检索旧卡，重叠则视为完成信号
+            # ═══════════════════════════════════════════════════
+            blocked_by_overlap = False
+            try:
+                proposed_text = (title + " " + content).lower()
+                # 特征词提取（复用 mechanism B 的 _key_chars）
+                _STOP_CHARS = set('的了是在我有他个这着就和也要可会你他们来到说去为上对得大子能过下一地出道自以时年看没那天家开小成把前还但只想中里用生种起知好些间因所如然后其最她它已当两从方实更长应什')
+                def _extract_features(s):
+                    s = s.lower()
+                    chars = set(re.findall(r'[一-鿿]', s)) - _STOP_CHARS
+                    for t in re.findall(r'[a-z][a-z0-9]+', s):
+                        chars.add(t)
+                    return chars
+                proposed_features = _extract_features(proposed_text)
+
+                # 扫未解决卡片
+                _odb = os.path.join(PROJECT_ROOT, "memory", "cards.db")
+                _oconn = sqlite3.connect(_odb)
+                _oc = _oconn.cursor()
+                _oc.execute(
+                    "SELECT id, title, content, importance FROM cards WHERE review_status='final' AND resolved=0 ORDER BY created_at DESC LIMIT 20"
+                )
+                for _oid, _otitle, _ocontent, _oimp in _oc.fetchall():
+                    _old_text = (_otitle + " " + (_ocontent or "")).lower()
+                    _old_features = _extract_features(_old_text)
+                    _overlap = len(proposed_features & _old_features)
+                    if _overlap >= 2:  # 至少 2 个特征词重叠
+                        # 安全阀：基石卡不自动 resolve
+                        if _oimp and _oimp >= 8:
+                            continue
+                        from memory.memory_manager import resolve_card as _resolve_old
+                        if _resolve_old(_oid):
+                            print(f"[写卡拦截] 新卡「{title}」与旧卡「{_otitle}」特征重叠({_overlap})，自动 resolve 旧卡，丢弃新卡")
+                            blocked_by_overlap = True
+                            resolved_ids.add(_oid)
+                _oconn.close()
+                # ── 扩展扫描：pending_cards.json ──
+                _pp = os.path.join(PROJECT_ROOT, "memory", "pending_cards.json")
+                if os.path.exists(_pp) and not blocked_by_overlap:
+                    try:
+                        with open(_pp, "r", encoding="utf-8") as _pf:
+                            _pending = json.load(_pf)
+                        _pending_removed = False
+                        for _pc in _pending:
+                            _ptext = (_pc.get("title", "") + " " + _pc.get("content", "")).lower()
+                            _pfeatures = _extract_features(_ptext)
+                            _poverlap = len(proposed_features & _pfeatures)
+                            if _poverlap >= 2:
+                                if _pc.get("importance", 5) >= 8:
+                                    continue
+                                print(f"[写卡拦截-pending] 新卡「{title}」与待审核卡「{_pc.get('title','')}」重叠({_poverlap})，丢弃新卡，移除旧待审核卡")
+                                blocked_by_overlap = True
+                                _pending_removed = True
+                        if _pending_removed:
+                            _pending = [_pc for _pc in _pending if _pc.get("title", "") != title or len(_extract_features((_pc.get("title","")+" "+_pc.get("content","")).lower()) & proposed_features) < 2]
+                            from delegate_tools import atomic_write_json as _awj3
+                            _awj3(_pp, _pending)
+                            print(f"[写卡拦截-pending] pending_cards.json 已更新，剩余 {len(_pending)} 张")
+                    except Exception as _e3:
+                        print(f"[写卡拦截-pending] 扫描跳过: {_e3}")
+            except Exception as e:
+                print(f"[写卡拦截] 检索跳过: {e}")
+
+            if not blocked_by_overlap and (not session_cards_written or _check_cooldown(session_cards_written, category, current_turn, 0)):
                 write_pending_card(card_draft)
                 if session_cards_written is not None:
                     session_cards_written[category] = current_turn
+            elif blocked_by_overlap:
+                print(f"[写卡拦截] 新卡已丢弃，旧卡已 resolve")
 
     if not propose_match:
         # ── 多类型关键词规则触发写卡（可同时命中多类，每类生成一张） ──
@@ -968,8 +1077,11 @@ def main():
             "  A. 新待办指令 — 用户提出了新的事项、计划、承诺、偏好 → 末尾附加 <!-- propose_card: 标题|分类|重要度|内容 -->\n"
             "  B. 状态反馈 — 用户对已有事项表达了进展、困难、搁置 → 末尾附加 <!-- status_card: 卡片ID|进行中 --> 或 <!-- status_card: 卡片ID|阻塞 -->\n"
             "  C. 明确完成 — 用户宣告事项已做完 → 末尾附加 <!-- resolve_card: 卡片ID -->\n"
-            "关键规则：状态反馈 ≠ 已完成。\"好了这下完蛋了\"\"还在修\"\"卡住了\"\"先不做了\"这些都不是完成，是阻塞。只用 status_card，绝不用 resolve_card。\n"
-            "仅当用户使用了\"修好了/做完了/拿到了/收到了/搞定了/打通了\"等明确完成宣告词，才用 resolve_card。\n"
+            "关键规则：\n"
+            "  1. 状态反馈 ≠ 已完成。\"好了这下完蛋了\"\"还在修\"\"卡住了\"\"先不做了\"不是完成，是阻塞。\n"
+            "  2. 用户引用了过去的承诺（\"昨天说好的\"\"上次答应的\"）并同时展示结果/实物/证明 → 这是完成，不是新事。\n"
+            "  3. OCR文字、图片描述、\"给你看\"\"展示一下\"\"来一起X\"→ 这些是完成信号，不是新任务。\n"
+            "  4. 看到以上信号时，先扫一遍【可操作卡片】列表，找到对应卡片，输出 resolve_card，绝不 propose_card。\n"
             "[分类校准结束]\n\n"
         )
 
