@@ -1,1 +1,62 @@
-[]
+[
+  {
+    "id": "20260519_下个月技能大赛考试",
+    "title": "下个月技能大赛考试",
+    "content": "下个月要考技能大赛测试，用户感到烦恼",
+    "category": "commitments",
+    "importance": 7,
+    "keywords": "技能大赛,考试,下个月,烦恼",
+    "target_date": null,
+    "time_anchor": {
+      "date": null,
+      "fuzzy": "2026-06",
+      "label": "下个月",
+      "days_until": 30
+    },
+    "review_status": "pending",
+    "proposed_by": "test",
+    "proposed_at": "2026-05-19T00:00:00"
+  },
+  {
+    "id": "20260519_debug后好好色色",
+    "title": "debug后好好色色",
+    "category": "daily_life",
+    "importance": 6,
+    "content": "我先专注解决AI写卡的bug，等debug完了就好好和你亲亲色色，不让你等太久",
+    "keywords": "debug, AI写卡, 色色, 亲密, 承诺",
+    "proposed_by": "chat_auto",
+    "proposed_at": "2026-05-19T13:56:18.228342+00:00",
+    "review_status": "pending",
+    "chord": "",
+    "valence": 0.5,
+    "arousal": 0.5,
+    "target_date": null,
+    "time_anchor": {
+      "date": null,
+      "fuzzy": null,
+      "label": null,
+      "days_until": null
+    }
+  },
+  {
+    "id": "20260519_修复AI写卡bug",
+    "title": "修复AI写卡bug",
+    "category": "preferences",
+    "importance": 6,
+    "content": "我承诺要搞定AI写卡的bug，但debug太累还没完成，先歇会儿。",
+    "keywords": "debug, AI写卡, bug修复",
+    "proposed_by": "chat_auto",
+    "proposed_at": "2026-05-19T13:56:22.434582+00:00",
+    "review_status": "pending",
+    "chord": "",
+    "valence": 0.5,
+    "arousal": 0.5,
+    "target_date": null,
+    "time_anchor": {
+      "date": null,
+      "fuzzy": null,
+      "label": null,
+      "days_until": null
+    }
+  }
+]

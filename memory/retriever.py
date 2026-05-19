@@ -20,14 +20,19 @@ SCORING_CONFIG = {
     "w_semantic": 1.0,      # 语义相似度权重
     "w_importance": 0.5,    # 重要度权重
     "w_anchor": 0.2,        # 岩之定锚权重（importance>=8 时激活）
-    "w_diffusion": 0.1,     # 风之扩散随机加成上限
+    "w_diffusion": 0.15,    # 风之扩散随机加成上限（微调↑ 0.1→0.15）
     "w_recency": 0.3,       # 雷之突进时间加权系数
-    "w_decay": 0.15,        # 冰之冻结衰减系数
+    "w_decay": 0.2,         # 冰之冻结衰减系数（微调↑ 0.15→0.2）
     "w_va": 0.2,            # VA 情绪加成权重
     "w_fire": 0.25,         # 火元素爆发搜索权重（中/高唤醒时激活）
-    "w_water": 0.15,        # 水元素平滑修正权重（低/中唤醒时激活）
+    "w_water": 0.2,         # 水元素平滑修正权重（微调↑ 0.15→0.2）
     "diversity_enabled": True,  # 是否启用多样性约束
     "min_categories": 2,    # 最小跨类别数
+    # ── 三个温和 penalty（打破马太效应，0.01~0.10 级别） ──
+    "w_presence_penalty": 0.03,   # 本轮/上轮刚出现过的卡 → 微弱扣分
+    "w_repetition_penalty": 0.08, # 近3轮出现2+次 → 中度扣分
+    "w_frequency_penalty": 0.01,  # 每个 usage_count 带来的负向拉力
+    "frequency_penalty_cap": 0.10, # frequency penalty 上限
 }
 
 # 独立的状态计数器，不再污染权重配置（毒点23修复）
@@ -39,10 +44,84 @@ USAGE_STATS = {
     "recency_refs": 0,
 }
 
+# ── 三轮检索追踪器：实现 presence / repetition penalty ──
+_RECENT_ROUNDS = []  # [[card_id, ...], [card_id, ...], ...] 最近3轮
+_MAX_ROUNDS = 3
+
+
+def _track_retrieved(card_ids: list):
+    """记录本轮召回的卡片 ID。"""
+    _RECENT_ROUNDS.append(list(card_ids))
+    if len(_RECENT_ROUNDS) > _MAX_ROUNDS:
+        _RECENT_ROUNDS.pop(0)
+
+
+def _compute_penalty(card_id: str, weights: dict) -> float:
+    """
+    计算三个温和 penalty 的总和（presence + repetition + frequency）。
+    全部在 0.01~0.10 级别，只在分数接近时打破僵局。
+    """
+    penalty = 0.0
+    w_presence = weights.get('w_presence_penalty', 0)
+    w_repetition = weights.get('w_repetition_penalty', 0)
+    w_frequency = weights.get('w_frequency_penalty', 0)
+    freq_cap = weights.get('frequency_penalty_cap', 0.10)
+
+    # ── presence penalty：本轮或上一轮出现过 → 微弱扣分 ──
+    recent_flat = set()
+    for round_ids in _RECENT_ROUNDS[-2:]:  # 最近2轮
+        recent_flat.update(round_ids)
+    if card_id in recent_flat:
+        penalty += w_presence
+
+    # ── repetition penalty：近3轮出现2+次 → 中度扣分 ──
+    appearance_count = sum(1 for round_ids in _RECENT_ROUNDS if card_id in round_ids)
+    if appearance_count >= 2:
+        penalty += w_repetition * min(appearance_count - 1, 2)  # 出现3次扣2倍
+
+    return min(penalty, 0.15)  # 总 penalty 上限
+
+
+def _track_referenced(card_ids: list):
+    """追踪被 AI 实际引用的卡片（区别于被检索但未引用的）。"""
+    USAGE_STATS["total_refs"] = USAGE_STATS.get("total_refs", 0) + len(card_ids)
+
+
+def artifact_adapt():
+    """
+    圣遗物自适应：每 100 次检索检查引用率，自动微调探针权重。
+    引用率低 → 探索不足 → 提升扩散+火。引用率高 → 收敛 → 恢复默认。
+    """
+    total = USAGE_STATS.get("total_searches", 0)
+    if total == 0 or total % 100 != 0:
+        return
+
+    refs = USAGE_STATS.get("total_refs", 0)
+    hit_rate = refs / max(total, 1)
+    print(f"[圣遗物自适应] 检索{total}次, 引用率={hit_rate:.2%}")
+
+    # 引用率 < 15%：探索不足，提升扩散+火
+    if hit_rate < 0.15:
+        SCORING_CONFIG["w_diffusion"] = min(0.25, SCORING_CONFIG.get("w_diffusion", 0.15) + 0.02)
+        SCORING_CONFIG["w_fire"] = min(0.35, SCORING_CONFIG.get("w_fire", 0.25) + 0.02)
+        print(f"[圣遗物自适应] 探索不足 → 扩散={SCORING_CONFIG['w_diffusion']:.2f} 火={SCORING_CONFIG['w_fire']:.2f}")
+    # 引用率 > 40%：检索精准，恢复默认
+    elif hit_rate > 0.40:
+        SCORING_CONFIG["w_diffusion"] = max(0.10, SCORING_CONFIG.get("w_diffusion", 0.15) - 0.01)
+        SCORING_CONFIG["w_fire"] = max(0.20, SCORING_CONFIG.get("w_fire", 0.25) - 0.01)
+        print(f"[圣遗物自适应] 检索精准 → 扩散={SCORING_CONFIG['w_diffusion']:.2f} 火={SCORING_CONFIG['w_fire']:.2f}")
+    else:
+        print(f"[圣遗物自适应] 引用率正常，维持当前权重")
+
+    # 重置计数器（保留趋势）
+    USAGE_STATS["total_searches"] = 0
+    USAGE_STATS["total_refs"] = 0
+
+
 # ── P1-4: 深度卡片分类列表（模块级常量，供 _score_card 和 _build_candidate_pool 共享） ──
 DEEP_CATEGORIES = {'milestone', 'commitments', 'deep_talks', 'turning_points', 'real_world'}
 # ── P1-3: 日活卡片分类列表 ──
-DAILY_CATEGORIES = {'daily_life', 'interaction', 'emotional', 'preferences', 'habits'}
+DAILY_CATEGORIES = {'daily_life', 'interaction', 'emotional', 'preferences', 'habits', 'todo'}
 
 # ── 和弦情绪四组：和弦名 → group ──
 CHORD_GROUP = {
@@ -154,9 +233,13 @@ def _build_candidate_pool(all_cards: list, anchor_ids: set, va_tier: str,
             if card.get('category') in DEEP_CATEGORIES:
                 include = True
         else:
-            # ── 毒点24修复：中唤醒不进行全表追加，改为最后统一随机采样 ──
-            # 随机采样在 return 前处理，锚定卡片不受限制
-            pass
+            # ── 中唤醒：随机采样非锚定卡，打破马太效应 ──
+            if card.get('category') in DAILY_CATEGORIES and card.get('usage_count', 0) >= 1:
+                include = True  # 日活卡至少被用过1次的进候选
+            elif card.get('importance', 5) >= 6:
+                include = True  # 高重要性卡给机会
+            elif card.get('resolved') == 0 and card.get('category') in DEEP_CATEGORIES:
+                include = True  # 未解决的深层卡给机会
         if include:
             pool.append(card)
             seen_ids.add(card['id'])
@@ -187,7 +270,7 @@ def _build_candidate_pool(all_cards: list, anchor_ids: set, va_tier: str,
         return pool[:candidate_limit]
 
 
-def _score_card(card: dict, hit_count: int, distance: float, weights: dict = None, anchor_ids: set = None, va_tier: str = "mid") -> float:
+def _score_card(card: dict, hit_count: int, distance: float, weights: dict = None, anchor_ids: set = None, va_tier: str = "mid", **kwargs) -> float:
     """
     ── NEW: 独立打分函数，为未来记忆卡片重排算法优化收口 ──
     集成岩/风/雷/冰四探针 + 锚定集合加成
@@ -196,7 +279,9 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
     hit_count: 关键词命中次数
     distance: FAISS L2 距离（越小越相似）
     weights: 权重 dict，默认使用 SCORING_CONFIG
+    stamina_phase: 体力衰减相位 0.0(广撒网)→1.0(精挑)，默认 0.5
     """
+    stamina_phase = kwargs.get('stamina_phase', 0.5)
     # ── ST-2: resolved 卡片沉底（分數×0.05），不改 importance 真實值 ──
     resolved_penalty = 0.05 if card.get('resolved') == 1 else 1.0
 
@@ -224,25 +309,30 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
     if w.get('w_diffusion', 0) > 0:
         diffusion_bonus = random.uniform(0, w['w_diffusion'])
 
-    # 雷之突进：近7天创建的卡片获得时间加权
+    # 雷之突进：最近被引用/创建的卡片获得时间加权（优先 last_referenced_at）
     recent_bonus = 0
-    if w.get('w_recency', 0) > 0 and card.get('created_at'):
-        try:
-            created = datetime.fromisoformat(card['created_at'])
-            days_ago = (datetime.now() - created).days
-            if days_ago <= 7:
-                recent_bonus = w['w_recency'] * (1 - days_ago / 7)  # 越新加成越高
-        except:
-            pass
+    if w.get('w_recency', 0) > 0:
+        ref_date_str = card.get('last_referenced_at') or card.get('created_at')
+        if ref_date_str:
+            try:
+                ref_date = datetime.fromisoformat(ref_date_str)
+                days_ago = (datetime.now() - ref_date).days
+                if days_ago <= 7:
+                    recent_bonus = w['w_recency'] * (1 - days_ago / 7)
+                elif days_ago <= 14:
+                    recent_bonus = w['w_recency'] * 0.3  # 第二周残值
+            except:
+                pass
 
-    # 冰之冻结：长期未引用卡片平滑降权
+    # 冰之冻结：14天未引用开始衰减，与卡片重要性成正比（高重要性卡更不耐冷落）
     decay_penalty = 0
     if w.get('w_decay', 0) > 0 and card.get('last_referenced_at'):
         try:
             last_ref = datetime.fromisoformat(card['last_referenced_at'])
             days_unused = (datetime.now() - last_ref).days
-            if days_unused > 30:
-                decay_penalty = w['w_decay'] * min(1.0, (days_unused - 30) / 60)  # 30天后开始衰减，90天达到最大
+            if days_unused > 14:
+                imp = card.get('importance', 5)
+                decay_penalty = w['w_decay'] * min(1.0, (days_unused - 14) / 45) * (imp / 5.0)
         except:
             pass
 
@@ -292,12 +382,13 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
         if any(kw.strip() in desc_lower for kw in card_kws.split(',')):
             water_smooth += w.get('w_va', 0.2) * 0.5
 
-    # ── P1-3: 草之生长按category差异化上限 ──
+    # ── P1-3: 草之生长 — 饱和曲线，usage≥10后不再增长 ──
     growth_bonus = 0
     usage = card.get('usage_count', 0)
     if usage > 0:
-        growth_cap = 0.8 if card.get('category') in DAILY_CATEGORIES else 0.5
-        growth_bonus = min(growth_cap, usage * 0.05)
+        growth_cap = 0.4 if card.get('category') in DAILY_CATEGORIES else 0.3
+        effective_usage = min(usage, 10)  # 饱和上限，打破马太效应
+        growth_bonus = growth_cap * (1 - 1.0 / (1 + effective_usage * 0.3))  # 对数饱和
 
     # ── P2-1: 绽放反应（草+水） ──
     if va_tier in ("low", "mid") and w.get('w_water', 0) > 0 and growth_bonus > 0:
@@ -332,10 +423,31 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
     # ── P2-4: 圣遗物计数器 ──
     USAGE_STATS["total_searches"] = USAGE_STATS.get("total_searches", 0) + 1
 
+    # ── 体力衰减：早期扩散↑锚定↓(广撒网)，后期扩散↓锚定↑(精挑) ──
+    explore_factor = 1.0 - stamina_phase  # 1.0→0.0
+    converge_factor = stamina_phase       # 0.0→1.0
+    diffusion_bonus *= (0.7 + 0.6 * explore_factor)  # 早期 ×1.3, 后期 ×0.7
+    anchor_bonus *= (0.5 + 1.0 * converge_factor)    # 早期 ×0.5, 后期 ×1.5
+    fire_burst *= (0.6 + 0.8 * explore_factor)       # 早期 ×1.4, 后期 ×0.6
+
+    # ── 宝箱奖励：3% 概率大跳 (0.15~0.30) ──
+    treasure_bonus = 0.0
+    if random.random() < 0.03:
+        treasure_bonus = random.uniform(0.15, 0.30)
+        USAGE_STATS["treasure_hits"] = USAGE_STATS.get("treasure_hits", 0) + 1
+
+    # ── 三个温和 penalty：presence + repetition + frequency ──
+    presence_repetition_penalty = _compute_penalty(card.get('id', ''), w)
+    usage = card.get('usage_count', 0)
+    freq_cap = w.get('frequency_penalty_cap', 0.10)
+    frequency_penalty = min(freq_cap, usage * w.get('w_frequency_penalty', 0.01))
+
     return (
         keyword_score + semantic_score + importance_score +
         anchor_bonus + diffusion_bonus + recent_bonus - decay_penalty +
-        fire_burst + water_smooth + growth_bonus + chord_harvest
+        fire_burst + water_smooth + growth_bonus + chord_harvest +
+        treasure_bonus
+        - presence_repetition_penalty - frequency_penalty
     ) * resolved_penalty
 
 
@@ -466,6 +578,22 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
             seen[c["id"]] = c
 
     merged = sorted(seen.values(), key=lambda x: x["score"], reverse=True)
+    pool_size = max(len(merged), 1)
+
+    # ── 体力衰减：前段广撒网(扩散↑)，后段精挑(锚定↑) ──
+    for i, card in enumerate(merged):
+        stamina_phase = i / pool_size  # 0.0(队列前) → 1.0(队列尾)
+        explore_factor = 1.0 - stamina_phase
+        converge_factor = stamina_phase
+        # 调制分数：前段扩散+火↑，后段锚定+水↑
+        stamina_mod = (
+            (0.7 + 0.6 * explore_factor) * card.get("score", 0) * 0.3  # 扩散分量
+            + (0.5 + 1.0 * converge_factor) * card.get("score", 0) * 0.3  # 锚定分量
+        )
+        card["score"] = card["score"] + stamina_mod * 0.15  # 温和调制 15%
+
+    # 重排
+    merged.sort(key=lambda x: x["score"], reverse=True)
 
     result = []
     categories_used = set()
@@ -496,6 +624,26 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
     if va_tier == "high":
         result = result[:3]
 
+    # ── 传送锚点：霸榜卡触发传送，10%概率用冰封/锚定卡替换最低分 ──
+    if result and random.random() < 0.10:
+        # 检测霸榜：任意卡在近3轮都出现
+        dominated_ids = set()
+        for cid in set(c["id"] for c in result):
+            appearances = sum(1 for round_ids in _RECENT_ROUNDS if cid in round_ids)
+            if appearances >= min(len(_RECENT_ROUNDS), 3):
+                dominated_ids.add(cid)
+        if dominated_ids:
+            # 从冰封层(decay>0)或未召回卡中随机传送
+            frozen_pool = [c for c in merged if c["id"] not in {r["id"] for r in result}]
+            if frozen_pool:
+                teleport_card = random.choice(frozen_pool)
+                # 替换分数最低的非锚定卡
+                non_anchors = [(i, c) for i, c in enumerate(result) if c["id"] not in anchor_ids]
+                if non_anchors:
+                    worst_idx, _ = max(non_anchors, key=lambda x: x[1]["score"])
+                    result[worst_idx] = teleport_card
+                    print(f"[传送锚点] 霸榜卡{dominated_ids} → 传送「{teleport_card['title']}」")
+
     output = []
     for card in result:
         output.append({
@@ -509,4 +657,8 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
             "hit_count": card.get("hit_count", 0),
             "distance": round(card.get("distance", 1.0), 4)
         })
+    # ── 追踪本轮召回，供下轮 presence/repetition penalty 使用 ──
+    _track_retrieved([c["id"] for c in output])
+    # ── 圣遗物自适应：每100次检索自动调参 ──
+    artifact_adapt()
     return output

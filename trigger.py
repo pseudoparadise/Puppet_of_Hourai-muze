@@ -276,12 +276,182 @@ def _check_cooldown(written: dict, category: str, current_turn: int, cooldown: i
     return (current_turn - written[category]) > cooldown
 
 
-def _parse_target_date(text: str):
-    """从中文文本解析目标日期。返回 'YYYY-MM-DD' 或 None。"""
+def _sync_diary_on_card_change(card_id: str, action: str, details: dict = None):
+    """
+    卡片 resolve/update 时，同步更新对应日记的 events.json。
+    action: "resolved" → 从 eisenhower 移入 completions
+    action: "updated" → 更新 eisenhower 中对应项的 deadline/note
+    """
+    import re as _re_sync
+    # 尝试从 card_id 提取日期前缀
+    m = _re_sync.match(r'^(\d{4})(\d{2})(\d{2})_', card_id)
+    if not m:
+        return
+    diary_date = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    events_path = os.path.join(PROJECT_ROOT, "diary", f"{diary_date}_events.json")
+    if not os.path.exists(events_path):
+        return
+
+    try:
+        from delegate_tools import atomic_write_json
+        with open(events_path, "r", encoding="utf-8") as ef:
+            ev = json.load(ef)
+
+        if action == "resolved":
+            # 从四象限中找出匹配项 → 移入 completions
+            eis = ev.get("eisenhower", {})
+            for quad in list(eis.keys()):
+                resolved_items = []
+                remaining = []
+                for it in eis[quad]:
+                    if card_id in it.get("card_id", ""):
+                        resolved_items.append(it["item"])
+                    else:
+                        remaining.append(it)
+                eis[quad] = remaining
+                if resolved_items:
+                    ev.setdefault("completions", [])
+                    ev["completions"].extend(resolved_items)
+                    print(f"[日记同步] {diary_date}: {resolved_items} → completions")
+
+        elif action == "updated" and details:
+            eis = ev.get("eisenhower", {})
+            for quad in list(eis.keys()):
+                for it in eis[quad]:
+                    if card_id in it.get("card_id", ""):
+                        if "target_date" in details:
+                            it["deadline"] = details["target_date"]
+                        if "status" in details:
+                            it["note"] = f"状态: {details['status']}"
+                        print(f"[日记同步] {diary_date}: 更新「{it['item']}」→ {details}")
+
+        atomic_write_json(events_path, ev)
+    except Exception as e:
+        print(f"[日记同步] 跳过: {e}")
+
+
+def _parse_time_anchor(text: str) -> dict:
+    """
+    提取文本中的时间锚点，支持精确和模糊。
+    返回: {"date": "YYYY-MM-DD"|None, "fuzzy": "YYYY-MM"|None,
+           "label": str|None, "days_until": int|None}
+    """
     import re as _re
     from datetime import datetime, timedelta
     today = datetime.now()
-    # 下个月N号/日
+    result = {"date": None, "fuzzy": None, "label": None, "days_until": None}
+
+    # 1. 精确: 下个月N号
+    m = _re.search(r'下个?月(\d{1,2})[号日]', text)
+    if m:
+        d = int(m.group(1))
+        next_month = today.month % 12 + 1
+        year = today.year if next_month > today.month else today.year + 1
+        try:
+            dt = datetime(year, next_month, d)
+            result["date"] = dt.strftime('%Y-%m-%d')
+            result["label"] = f"下个月{d}号"
+            result["days_until"] = (dt - today).days
+            return result
+        except ValueError:
+            pass
+
+    # 2. 精确: N月N号
+    m = _re.search(r'(\d{1,2})月(\d{1,2})[号日]', text)
+    if m:
+        mo, d = int(m.group(1)), int(m.group(2))
+        year = today.year if mo >= today.month else today.year + 1
+        try:
+            dt = datetime(year, mo, d)
+            result["date"] = dt.strftime('%Y-%m-%d')
+            result["label"] = f"{mo}月{d}号"
+            result["days_until"] = (dt - today).days
+            return result
+        except ValueError:
+            pass
+
+    # 3. 精确: 今晚/今天
+    if _re.search(r'今晚|今天晚上|今夜|今天', text):
+        result["date"] = today.strftime('%Y-%m-%d')
+        result["label"] = "今天"
+        result["days_until"] = 0
+        return result
+
+    # 4. 模糊: 今年N月下旬/中旬/上旬
+    m = _re.search(r'今年(\d{1,2})月(上旬|中旬|下旬)', text)
+    if m:
+        mo, period = int(m.group(1)), m.group(2)
+        day_map = {'上旬': 5, '中旬': 15, '下旬': 25}
+        d = day_map.get(period, 15)
+        try:
+            dt = datetime(today.year, mo, d)
+            result["date"] = dt.strftime('%Y-%m-%d')
+            result["fuzzy"] = f"{today.year}-{mo:02d}"
+            result["label"] = f"今年{mo}月{period}"
+            result["days_until"] = (dt - today).days
+            return result
+        except ValueError:
+            pass
+
+    # 5. 模糊: N月下旬/中旬/上旬（省略"今年"）
+    m = _re.search(r'(\d{1,2})月(上旬|中旬|下旬)', text)
+    if m:
+        mo, period = int(m.group(1)), m.group(2)
+        day_map = {'上旬': 5, '中旬': 15, '下旬': 25}
+        d = day_map.get(period, 15)
+        year = today.year if mo >= today.month else today.year + 1
+        try:
+            dt = datetime(year, mo, d)
+            result["date"] = dt.strftime('%Y-%m-%d')
+            result["fuzzy"] = f"{year}-{mo:02d}"
+            result["label"] = f"{mo}月{period}"
+            result["days_until"] = (dt - today).days
+            return result
+        except ValueError:
+            pass
+
+    # 6. 模糊: 下个月/下下个月（无具体日期）
+    m = _re.search(r'下下个?月|下个?月', text)
+    if m:
+        offset = 2 if '下下' in m.group() else 1
+        mo = today.month + offset
+        year = today.year + (mo - 1) // 12
+        mo = (mo - 1) % 12 + 1
+        result["fuzzy"] = f"{year}-{mo:02d}"
+        result["label"] = m.group()
+        result["days_until"] = 30 * offset  # 粗略估计
+        return result
+
+    # 7. 模糊: N月（仅月份，无具体日期）
+    m = _re.search(r'(\d{1,2})月', text)
+    if m:
+        mo = int(m.group(1))
+        year = today.year if mo >= today.month else today.year + 1
+        result["fuzzy"] = f"{year}-{mo:02d}"
+        result["label"] = f"{mo}月"
+        dt = datetime(year, mo, 1)
+        result["days_until"] = (dt - today).days
+        return result
+
+    # 8. 相对: 明天/后天/大后天（仅时间约束上下文）
+    rel = {'明天': 1, '后天': 2, '大后天': 3}
+    for kw, delta in rel.items():
+        if _re.search(rf'{kw}.*(之前|以内|一定|必须|得)', text) or _re.search(rf'(之前|以内).*{kw}', text):
+            dt = today + timedelta(days=delta)
+            result["date"] = dt.strftime('%Y-%m-%d')
+            result["label"] = kw
+            result["days_until"] = delta
+            return result
+
+    return result
+
+
+def _parse_target_date(text: str):
+    """从中文文本解析目标日期。返回 'YYYY-MM-DD' 或 None。降级兼容旧调用。"""
+    anchor = _parse_time_anchor(text)
+    return anchor.get("date")
+
+    # 1. 下个月N号/日
     m = _re.search(r'下个?月(\d{1,2})[号日]', text)
     if m:
         d = int(m.group(1))
@@ -291,7 +461,8 @@ def _parse_target_date(text: str):
             return datetime(year, next_month, d).strftime('%Y-%m-%d')
         except ValueError:
             return None
-    # N月N号/日
+
+    # 2. N月N号/日（精确日期）
     m = _re.search(r'(\d{1,2})月(\d{1,2})[号日]', text)
     if m:
         mo, d = int(m.group(1)), int(m.group(2))
@@ -300,11 +471,41 @@ def _parse_target_date(text: str):
             return datetime(year, mo, d).strftime('%Y-%m-%d')
         except ValueError:
             return None
-    # 明天/后天/大后天
+
+    # 3. 今晚 / 今天晚上 / 今夜 → 今天
+    if _re.search(r'今晚|今天晚上|今夜', text):
+        return today.strftime('%Y-%m-%d')
+
+    # 4. 今年N月下旬/中旬/上旬
+    m = _re.search(r'今年(\d{1,2})月(上旬|中旬|下旬)', text)
+    if m:
+        mo, period = int(m.group(1)), m.group(2)
+        day_map = {'上旬': 5, '中旬': 15, '下旬': 25}
+        d = day_map.get(period, 15)
+        try:
+            return datetime(today.year, mo, d).strftime('%Y-%m-%d')
+        except ValueError:
+            return None
+
+    # 5. N月下旬/中旬/上旬（省略"今年"）
+    m = _re.search(r'(\d{1,2})月(上旬|中旬|下旬)', text)
+    if m:
+        mo, period = int(m.group(1)), m.group(2)
+        day_map = {'上旬': 5, '中旬': 15, '下旬': 25}
+        d = day_map.get(period, 15)
+        year = today.year if mo >= today.month else today.year + 1
+        try:
+            return datetime(year, mo, d).strftime('%Y-%m-%d')
+        except ValueError:
+            return None
+
+    # 6. 明天/后天/大后天（仅当出现在时间约束上下文中，非后果描述）
     rel = {'明天': 1, '后天': 2, '大后天': 3}
     for kw, delta in rel.items():
-        if kw in text:
+        # 只有在"之前/以内/一定要"等约束词附近才视为 deadline
+        if _re.search(rf'{kw}.*(之前|以内|一定|必须|得)', text) or _re.search(rf'(之前|以内).*{kw}', text):
             return (today + timedelta(days=delta)).strftime('%Y-%m-%d')
+
     return None
 
 # ── 后处理 ──
@@ -325,6 +526,13 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
             print(f"[记忆引用] 卡片 {cid} 已续命")
         else:
             print(f"[记忆引用] 卡片 {cid} 续命失败")
+    # ── 追踪引用：供圣遗物自适应计算引用率 ──
+    if ref_ids:
+        try:
+            from memory.retriever import _track_referenced
+            _track_referenced(ref_ids)
+        except Exception:
+            pass
 
     # ── 提取 AI 计算的目标日期标记 <!-- target_date: YYYY-MM-DD --> ──
     target_date_from_ai = None
@@ -351,14 +559,44 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
             if row and row[0] >= 8:
                 print(f"[自动解决] 拦截：{cid_to_resolve} 为基石卡 (imp={row[0]})，不自动 resolve")
             elif row:
-                from memory.memory_manager import resolve_card as do_resolve
-                if do_resolve(cid_to_resolve):
+                from memory.memory_manager import should_auto_resolve as _sar_a, resolve_card as do_resolve
+                _allowed, _reason = _sar_a(cid_to_resolve, days_threshold=30)  # AI显式resolve最可信，放宽到30天
+                if not _allowed:
+                    print(f"[自动解决] 时间拒止 {cid_to_resolve}: {_reason}，降级为 status_card 处理")
+                elif do_resolve(cid_to_resolve):
                     print(f"[自动解决] AI 已将卡片 {cid_to_resolve} 标记为已解决")
                     resolved_ids.add(cid_to_resolve)
+                    _sync_diary_on_card_change(cid_to_resolve, "resolved")
             else:
                 print(f"[自动解决] 跳过：{cid_to_resolve} 不存在或已 resolve")
         except Exception as e:
             print(f"[自动解决] 检查失败 card_id={cid_to_resolve}: {e}")
+
+    # ── update_card：AI 原地更新卡片字段（推迟、改期、补充信息） ──
+    update_match = re.search(r'<!--\s*update_card:\s*(.*?)\s*-->', raw_reply, re.IGNORECASE)
+    if update_match:
+        display_reply = re.sub(r'<!--\s*update_card:.*?\s*-->', '', display_reply, flags=re.IGNORECASE).strip()
+        raw_update = update_match.group(1).strip()
+        # 格式: 卡片ID|field=value|field=value
+        parts = [p.strip() for p in raw_update.split("|")]
+        if len(parts) >= 2:
+            uid = parts[0]
+            updates = {}
+            for kv in parts[1:]:
+                if "=" in kv:
+                    k, v = kv.split("=", 1)
+                    updates[k.strip()] = v.strip()
+            if updates:
+                try:
+                    from memory.memory_manager import update_card as do_update
+                    if do_update(uid, updates):
+                        print(f"[卡片更新] {uid}: {updates}")
+                        # ── 日记同步：update 也触发事件日志更新 ──
+                        _sync_diary_on_card_change(uid, "updated", updates)
+                    else:
+                        print(f"[卡片更新] {uid} 失败（不存在或已解决）")
+                except Exception as e:
+                    print(f"[卡片更新] 异常: {e}")
 
     # ── status_card：AI 标记卡片流转状态（进行中/阻塞），不是完成 ──
     status_match = re.search(r'<!--\s*status_card:\s*(.*?)\s*-->', raw_reply, re.IGNORECASE)
@@ -401,7 +639,7 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
             c.execute("""
                 SELECT id, title, category, content, importance FROM cards
                 WHERE review_status='final' AND resolved=0
-                AND category IN ('commitments','daily_life')
+                AND category IN ('commitments','daily_life','todo')
                 ORDER BY created_at DESC LIMIT 10
             """)
             # 卡片标题+内容 → 字符集（过滤高频无意义字），与用户消息做重叠
@@ -428,19 +666,29 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 content_overlap = len(user_chars & content_chars)
                 if title_overlap >= 1 or content_overlap >= 2:
                     try:
-                        from memory.memory_manager import resolve_card as do_resolve2
+                        from memory.memory_manager import should_auto_resolve as _sar, resolve_card as do_resolve2
+                        _allowed, _reason = _sar(uid, context_anchor=_parse_time_anchor(user_input))
+                        if not _allowed:
+                            print(f"[关键词解决] 时间拒止 {uid}: {_reason}，跳过")
+                            continue
                         if do_resolve2(uid):
-                            print(f"[关键词解决] 用户宣告完成 → 卡片 {uid} 已自动标记为已解决（标题={title_overlap} 内容={content_overlap}）")
+                            print(f"[关键词解决] 卡片 {uid} 已标记为已解决（标题={title_overlap} 内容={content_overlap}）")
                             resolved_ids.add(uid)
+                            _sync_diary_on_card_change(uid, "resolved")
                     except Exception as e2:
                         print(f"[关键词解决] 单卡跳过 {uid}: {e2}")
             conn.close()
         except Exception as e:
             print(f"[关键词解决] 扫描跳过: {e}")
 
-    # ── 常驻 pending 扫描：不受关键词门控，每轮必跑 ──
+    # ── pending 扫描：仅在检测到完成信号时触发 ──
+    pending_completion_signals = [
+        "好了", "完了", "拿到了", "做好了", "做完了", "搞定了", "搞完了",
+        "回来了", "到了", "喝到了", "吃完了", "买好了", "干完了", "到手了",
+        "修好了", "打通了", "调通了", "收到了", "办完了",
+    ]
     pending_path = os.path.join(PROJECT_ROOT, "memory", "pending_cards.json")
-    if os.path.exists(pending_path):
+    if os.path.exists(pending_path) and any(sig in user_input for sig in pending_completion_signals):
         try:
             import re as _re2
             _STOP_CHARS2 = set('的了是在我有他个这着就和也要会可你他们来到说去为上对得大子能过下一地出道自以时年看没那天家开小成把前还但只想中里用生种起知好些间因所如然后其最她它已当两从方实长更应什')
@@ -465,17 +713,18 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 title_overlap = len(user_chars2 & title_chars)
                 content_chars = _key_chars2(pc_content or '')
                 content_overlap = len(user_chars2 & content_chars)
-                if title_overlap >= 1 or content_overlap >= 2:
-                    print(f"[pending常驻扫描] 用户消息与待审核卡「{pc_title}」重叠（标题={title_overlap} 内容={content_overlap}），自动移除")
+                # 高阈值：标题≥2个特征词重叠 AND 内容也有重叠，或标题≥3
+                if (title_overlap >= 2 and content_overlap >= 1) or title_overlap >= 3:
+                    print(f"[pending扫描] 完成信号+强重叠 → 待审核卡「{pc_title}」自动移除（标题={title_overlap} 内容={content_overlap}）")
                     resolved_ids.add(pc.get("id"))
                     pending_modified = True
             if pending_modified:
                 pending_cards = [pc for pc in pending_cards if pc.get("id") not in resolved_ids]
                 from delegate_tools import atomic_write_json as _awj_pending
                 _awj_pending(pending_path, pending_cards)
-                print(f"[pending常驻扫描] pending_cards.json 已更新，剩余 {len(pending_cards)} 张")
+                print(f"[pending扫描] pending_cards.json 已更新，剩余 {len(pending_cards)} 张")
         except Exception as e_pending:
-            pass  # 静默降级，不阻塞主流程
+            pass  # 静默降级
 
     propose_match = re.search(r'<!--\s*propose_card:\s*(.*?)\s*-->', raw_reply, re.IGNORECASE)
     if propose_match:
@@ -507,10 +756,11 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 "chord": va.get("chord", "") if va else "",
                 "valence": va.get("valence", 0.0) if va else 0.0,
                 "arousal": va.get("arousal", 0.5) if va else 0.5,
-                "target_date": target_date_from_ai or _parse_target_date(user_input)
+                "target_date": target_date_from_ai or _parse_target_date(user_input),
+                "time_anchor": _parse_time_anchor(user_input)
             }
             # ── P1-3: 同 session 同 category 去重 ──
-            category = parts[1] if parts[1] in ['milestone','commitments','turning_points','deep_talks','interaction','preferences','real_world','daily_life','emotional','habits','erotic'] else 'interaction'
+            category = parts[1] if parts[1] in ['milestone','commitments','turning_points','deep_talks','interaction','preferences','real_world','daily_life','emotional','habits','erotic','todo'] else 'interaction'
 
             # ═══════════════════════════════════════════════════
             # 双事件兜底：写新卡前检索旧卡，重叠则视为完成信号
@@ -543,11 +793,16 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                         # 安全阀：基石卡不自动 resolve
                         if _oimp and _oimp >= 8:
                             continue
-                        from memory.memory_manager import resolve_card as _resolve_old
+                        from memory.memory_manager import should_auto_resolve as _sar3, resolve_card as _resolve_old
+                        _allowed, _reason = _sar3(_oid, context_anchor=_parse_time_anchor(user_input))
+                        if not _allowed:
+                            print(f"[写卡拦截] 时间拒止 {_oid}: {_reason}，跳过")
+                            continue
                         if _resolve_old(_oid):
                             print(f"[写卡拦截] 新卡「{title}」与旧卡「{_otitle}」特征重叠({_overlap})，自动 resolve 旧卡，丢弃新卡")
                             blocked_by_overlap = True
                             resolved_ids.add(_oid)
+                            _sync_diary_on_card_change(_oid, "resolved")
                 _oconn.close()
                 # ── 扩展扫描：pending_cards.json ──
                 _pp = os.path.join(PROJECT_ROOT, "memory", "pending_cards.json")
@@ -599,11 +854,13 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
         if any(kw in user_input for kw in like_words):
             triggered.append(("preferences", 6))
 
-        # 【3】时间与计划类
-        plan_words = ["今天", "明天", "周末", "下周", "以后", "要去", "准备去", "打算",
-                      "想去", "想去看", "想去做"]
+        # 【3】时间与计划类 → todo（时间锚定待办）
+        plan_words = ["今天", "明天", "周末", "下周", "下个星期", "下个月", "以后",
+                      "要去", "准备去", "打算", "想去", "想去看", "想去做",
+                      "等会", "等会儿", "马上要", "快要", "就要", "一会", "要到了",
+                      "之前一定", "之前肯定", "之前得"]
         if any(kw in user_input for kw in plan_words):
-            triggered.append(("commitments", 6))
+            triggered.append(("todo", 7))
 
         # 【4】情绪表达类
         emotion_words = ["好想你", "好想抱抱", "无聊", "孤单", "寂寞", "想你",
@@ -663,7 +920,8 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 "chord": va.get("chord", "") if va else "",
                 "valence": va.get("valence", 0.0) if va else 0.0,
                 "arousal": va.get("arousal", 0.5) if va else 0.5,
-                "target_date": target_date_from_ai or _parse_target_date(user_input)
+                "target_date": target_date_from_ai or _parse_target_date(user_input),
+                "time_anchor": _parse_time_anchor(user_input)
             }
             # ── P1-3: 同 session 同 category 去重 ──
             cooldown = 10 if triggered_category in {'daily_life','emotional','preferences'} else 0
@@ -673,24 +931,39 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                     session_cards_written[triggered_category] = current_turn
 
             # 偏好冲突检测：新 preferences → 找旧 preferences 关键词重叠 → resolve
+            # 阈值≥2防止误伤（如"11月"和"坚持"不应被视为冲突）
             if triggered_category == 'preferences':
                 try:
                     _pdb = os.path.join(PROJECT_ROOT, "memory", "cards.db")
                     _pconn = sqlite3.connect(_pdb)
                     _pc = _pconn.cursor()
                     _pc.execute(
-                        "SELECT id, title, keywords FROM cards WHERE review_status='final' AND resolved=0 AND category='preferences'"
+                        "SELECT id, title, keywords, content FROM cards WHERE review_status='final' AND resolved=0 AND category='preferences'"
                     )
                     _new_kws = set(kw.strip().lower() for kw in (refined.get('keywords', '') if refined else '').split(',') if kw.strip())
-                    for _pid, _ptitle, _pkws in _pc.fetchall():
+                    for _pid, _ptitle, _pkws, _pcontent in _pc.fetchall():
                         if _pid == card_draft['id']:
                             continue
                         _old_kws = set(kw.strip().lower() for kw in (_pkws or '').split(',') if kw.strip())
-                        _overlap = _new_kws & _old_kws
-                        if len(_overlap) >= 1:
-                            from memory.memory_manager import resolve_card as _resolve_old
+                        _kw_overlap = len(_new_kws & _old_kws)
+                        # 需要≥2个关键词重叠，或1个重叠+标题/内容特征重叠≥3
+                        import re as _re_pc
+                        _STOP3 = set('的了是在我有他个这着就和也要会可你他们来到说去为上对得大子能过下一地出道自以时年看没那天家开小成把前还但只想中里用生种起知好些间因所如然后其最她它已当两从方实长更应什')
+                        def _feat3(s):
+                            s = s.lower()
+                            chars = set(_re_pc.findall(r'[一-鿿]', s)) - _STOP3
+                            for t in _re_pc.findall(r'[a-z][a-z0-9]+', s):
+                                chars.add(t)
+                            return chars
+                        _title_overlap = len(_feat3(title) & _feat3(_ptitle))
+                        if _kw_overlap >= 2 or (_kw_overlap >= 1 and _title_overlap >= 3):
+                            from memory.memory_manager import should_auto_resolve as _sar2, resolve_card as _resolve_old
+                            _allowed, _reason = _sar2(_pid, context_anchor=_parse_time_anchor(user_input))
+                            if not _allowed:
+                                print(f"[偏好冲突] 时间拒止 {_pid}: {_reason}，跳过")
+                                continue
                             if _resolve_old(_pid):
-                                print(f"[偏好冲突] 新偏好「{title}」→ 旧偏好「{_ptitle}」已自动划掉")
+                                print(f"[偏好冲突] 新偏好「{title}」→ 旧偏好「{_ptitle}」已自动划掉（kw={_kw_overlap} title={_title_overlap}）")
                     _pconn.close()
                 except Exception:
                     pass
@@ -775,7 +1048,6 @@ def main():
                 except:
                     pass
             try:
-                import sqlite3
                 db_path = os.path.join(PROJECT_ROOT, "memory", "cards.db")
                 conn = sqlite3.connect(db_path)
                 c2 = conn.cursor()
@@ -951,7 +1223,7 @@ def main():
             # 解析可选分类：/card milestones 或 /card commitments
             parts = user_input.strip().split(maxsplit=1)
             category_override = parts[1].strip() if len(parts) > 1 else None
-            valid_cats = ['milestone','commitments','turning_points','deep_talks','interaction','preferences','real_world','daily_life','emotional','habits','erotic']
+            valid_cats = ['milestone','commitments','turning_points','deep_talks','interaction','preferences','real_world','daily_life','emotional','habits','erotic','todo']
 
             print(f"[卡片] 正在蒸馏上一轮对话...")
             refined = refine_card_content(user_msg, ai_msg)
@@ -1064,9 +1336,65 @@ def main():
         except Exception as e:
             print(f"[记忆检索异常，跳过]: {e}")
 
+        # ═══════════════════════════════════════════════════════════
+        # 裁决者：在 AI 生成回复之前，独立判断用户意图
+        # ═══════════════════════════════════════════════════════════
+        arbiter_judgment = None
+        try:
+            from delegate.arbiter import judge as arbiter_judge
+            # 加载 pending_cards
+            arb_pending = []
+            pending_path_arb = os.path.join(PROJECT_ROOT, "memory", "pending_cards.json")
+            if os.path.exists(pending_path_arb):
+                with open(pending_path_arb, "r", encoding="utf-8") as apf:
+                    arb_pending = json.load(apf)
+            # 加载 recent (已召回的记忆卡片完整信息)
+            arb_recent = [{"id": c["id"], "title": c.get("title", ""),
+                          "content": (c.get("content", "") or "")[:100]}
+                         for c in (top_cards or [])]
+            # 注入近3天事件日志的四象限待办（裁决者需要知道短期/长期待办）
+            arb_diary_context = []
+            try:
+                from datetime import datetime as _dt_a, timedelta as _td_a
+                for days_back in range(1, 4):
+                    d = (_dt_a.now() - _td_a(days=days_back)).strftime("%Y-%m-%d")
+                    ep = os.path.join(PROJECT_ROOT, "diary", f"{d}_events.json")
+                    if os.path.exists(ep):
+                        with open(ep, "r", encoding="utf-8") as ef_a:
+                            ev_a = json.load(ef_a)
+                        eis = ev_a.get("eisenhower", {})
+                        for label, key in [("重要且紧急", "important_urgent"), ("重要不紧急", "important_not_urgent")]:
+                            for it in eis.get(key, [])[:3]:
+                                arb_diary_context.append(f"[{d}][{label}] {it.get('item','?')}")
+            except Exception:
+                pass
+            arbiter_judgment = arbiter_judge(user_input, arb_pending, arb_recent, arb_diary_context)
+            if arb_diary_context:
+                print(f"[裁决者] 注入日记待办: {len(arb_diary_context)} 条")
+            print(f"[裁决者] judgment={arbiter_judgment.get('judgment')} "
+                  f"confidence={arbiter_judgment.get('confidence', 0):.2f} "
+                  f"action={arbiter_judgment.get('suggested_action')} "
+                  f"targets={arbiter_judgment.get('target_card_ids', [])}")
+        except Exception as arb_e:
+            print(f"[裁决者] 调用失败，降级跳过: {arb_e}")
+
         # ── 提示词组装：破甲前缀 → 角色扮演声明 → 人格 → 运维指令 → 上下文（毒点22修复） ──
         from delegate_tools import JAILBREAK_PREFIX
         full_context = JAILBREAK_PREFIX + RP_DECLARATION + "\n\n" + PERSONA + "\n\n"
+
+        # ── 时间锚点：代码计算的确定事实，模型用此推理而非瞎猜 ──
+        now_anchor = datetime.now()
+        next_month = now_anchor.month % 12 + 1
+        next_month_year = now_anchor.year if next_month > now_anchor.month else now_anchor.year + 1
+        full_context += (
+            f"【时间锚点 — 日历事实，你必须以此为准】\n"
+            f"  今天 = {now_anchor.strftime('%Y-%m-%d')}（{now_anchor.year}年{now_anchor.month}月{now_anchor.day}日）\n"
+            f"  本周 = {now_anchor.strftime('%Y')}年第{now_anchor.isocalendar()[1]}周\n"
+            f"  下个月 = {next_month_year}年{next_month}月\n"
+            f"  今年 = {now_anchor.year}年\n"
+            f"  明年 = {now_anchor.year + 1}年\n"
+            f"  当前时间 = {now_anchor.strftime('%H:%M')}（北京时间）\n"
+        )
 
         # ═══════════════════════════════════════════════════════════
         # 分类校准：在写卡/更新卡片之前先判断用户意图
@@ -1084,6 +1412,61 @@ def main():
             "  4. 看到以上信号时，先扫一遍【可操作卡片】列表，找到对应卡片，输出 resolve_card，绝不 propose_card。\n"
             "[分类校准结束]\n\n"
         )
+
+        # ── 裁决者结果注入 ──
+        if arbiter_judgment:
+            arb_confidence = arbiter_judgment.get("confidence", 0)
+            arb_judge = arbiter_judgment.get("judgment", "ambiguous")
+            arb_targets = arbiter_judgment.get("target_card_ids", [])
+            arb_reason = arbiter_judgment.get("reasoning", "")
+
+            if arb_confidence < 0.3:
+                # 低置信度：禁止写卡，强制 AI 向用户确认
+                full_context += (
+                    f"【裁决者判定 — 意图极不确定（置信度 {arb_confidence:.2f}）】\n"
+                    f"  理由: {arb_reason}\n"
+                    f"  本回复中你必须向用户确认意图，不得输出 propose_card 或 resolve_card。\n"
+                    f"  用自然的语气追问，比如\"你说的X是指Y还是Z？\"\n\n"
+                )
+            elif arb_confidence >= 0.75:
+                if arb_judge == "complete" and arb_targets:
+                    full_context += (
+                        f"【裁决者判定 — 此条消息为任务完成（置信度 {arb_confidence:.2f}）】\n"
+                        f"  已完成卡片ID: {', '.join(arb_targets)}\n"
+                        f"  理由: {arb_reason}\n"
+                        f"  你必须在此轮回复中输出 <!-- resolve_card: {arb_targets[0]} -->，不得输出 propose_card。\n"
+                        f"  你的回复应自然确认完成，不创建任何新卡片。\n\n"
+                    )
+                elif arb_judge == "new":
+                    full_context += (
+                        f"【裁决者判定 — 此条消息为新任务（置信度 {arb_confidence:.2f}）】\n"
+                        f"  理由: {arb_reason}\n"
+                        f"  按正常写卡流程处理。\n\n"
+                    )
+                elif arb_judge == "update" and arb_targets:
+                    full_context += (
+                        f"【裁决者判定 — 此为已有卡片的更新（置信度 {arb_confidence:.2f}）】\n"
+                        f"  被更新的卡片ID: {', '.join(arb_targets)}\n"
+                        f"  理由: {arb_reason}\n"
+                        f"  你必须在此轮回复中输出 <!-- resolve_card: {arb_targets[0]} --> 并同时输出一张信息更精确的新卡 <!-- propose_card: ... -->\n"
+                        f"  你的回复应自然确认更新（如\"考试日期下来了？好，我更新到6月2号\"）。\n\n"
+                    )
+                elif arb_judge == "overdue" and arb_targets:
+                    full_context += (
+                        f"【裁决者判定 — 此任务已过期但未完成（置信度 {arb_confidence:.2f}）】\n"
+                        f"  过期卡片ID: {', '.join(arb_targets)}\n"
+                        f"  理由: {arb_reason}\n"
+                        f"  用户不是宣告完成，而是在说还没做/拖延了。你必须自然追问新的时间。\n"
+                        f"  示例: \"那头什么时候洗？给我一个时间。\"\n"
+                        f"  得到用户回复的新时间后，用 <!-- update_card: ID|target_date=新日期|status=in_progress -->\n"
+                        f"  绝不在此轮输出 resolve_card。\n\n"
+                    )
+                elif arb_judge == "ambiguous":
+                    full_context += (
+                        f"【裁决者判定 — 意图模糊（置信度 {arb_confidence:.2f}）】\n"
+                        f"  理由: {arb_reason}\n"
+                        f"  在回复中请自然地向用户确认意图。\n\n"
+                    )
 
         from datetime import datetime as _dt, timedelta as _td
         diary_dir = os.path.join(PROJECT_ROOT, "diary")
@@ -1184,12 +1567,15 @@ def main():
         # ── VA 瘦身：高唤醒模式跳过写卡标准，但分类校准和操作格式保留 ──
         if va_tier != 'high':
             full_context += (
-                "【记忆卡片写入标准】\n"
+                "【记忆卡片写入标准 — 待办(todo)与承诺(commitments)分开】\n"
                 "1.日常状态→daily_life | 2.喜好→preferences | 3.计划→commitments\n"
                 "4.情绪→emotional | 5.自我暴露→deep_talks | 6.约定→commitments\n"
                 "7.亲密请求→erotic | 8.笑点梗→interaction | 9.里程碑→milestone\n"
+                "10.时间锚定待办→todo（取快递、考试、生日、洗头、出门、外卖、技能测试……）\n"
                 "重要度1-10。重点关注：童年经历、未完成心愿、深层恐惧、长期孤独。\n"
                 "用户一句话含多个独立事件时，为每个事件各写一张卡。\n"
+                "分类规则：有时间锚点但无承诺语气 → todo。有保证/发誓/答应语气 → commitments。\n"
+                "既有时间锚又有承诺语气（\"我保证今晚洗头\"\"周边到了一起拍开箱\"）→ 写两张：todo + commitments。\n"
                 "status_card 用于非完成的状态流转：<!-- status_card: ID|进行中 --> 或 <!-- status_card: ID|阻塞 -->\n"
                 "resolve_card 仅用于明确完成宣告，误判会导致待办丢失，慎重。\n"
             )
@@ -1211,7 +1597,7 @@ def main():
             c.execute("""
                 SELECT id, title, category, content FROM cards
                 WHERE review_status='final' AND resolved=0
-                AND category IN ('commitments','daily_life')
+                AND category IN ('commitments','daily_life','todo')
                 ORDER BY created_at DESC LIMIT 5
             """)
             unresolved = c.fetchall()

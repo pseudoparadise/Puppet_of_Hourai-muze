@@ -223,7 +223,7 @@ class CardManager:
         ttk.Label(filter_frame, text="分类筛选:").pack(side=tk.LEFT, padx=5)
         self.final_cat_filter = ttk.Combobox(filter_frame, values=[
             "全部","milestone","commitments","turning_points","deep_talks",
-            "interaction","preferences","real_world","daily_life","emotional","habits","erotic"
+            "interaction","preferences","real_world","daily_life","emotional","habits","erotic","todo"
         ], state="readonly", width=14)
         self.final_cat_filter.set("全部")
         self.final_cat_filter.pack(side=tk.LEFT, padx=5)
@@ -418,12 +418,62 @@ class CardManager:
 
         action_frame = ttk.Frame(self.dormant_frame)
         action_frame.pack(fill=tk.X, pady=5)
+        ttk.Button(action_frame, text="详情", command=self.show_dormant_detail).pack(side=tk.LEFT, padx=5)
         ttk.Button(action_frame, text="复权 (重新激活)", command=self.revive_card).pack(side=tk.LEFT, padx=5)
+        ttk.Button(action_frame, text="彻底删除", command=self.delete_dormant_card).pack(side=tk.LEFT, padx=5)
 
         self.dormant_status = ttk.Label(self.dormant_frame, text="就绪")
         self.dormant_status.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
 
         self.load_dormant()
+
+    def show_dormant_detail(self):
+        """查看休眠卡片完整内容，方便人工检查后决定是否删除。"""
+        selected = self.dormant_tree.selection()
+        if not selected:
+            messagebox.showwarning("未选中", "请先在休眠列表里点选一张卡片。")
+            return
+        values = self.dormant_tree.item(selected[0], "values")
+        card_id = values[0]
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("SELECT * FROM cards WHERE id=?", (card_id,))
+            row = c.fetchone()
+            conn.close()
+            if row:
+                cols = [d[0] for d in c.description]
+                info = "\n".join(f"{k}: {v}" for k, v in zip(cols, row) if v is not None)
+            else:
+                info = f"卡片 {card_id} 不在数据库中。"
+        except Exception as e:
+            info = f"查询失败: {e}"
+        messagebox.showinfo(f"休眠卡片详情 — {card_id}", info)
+
+    def delete_dormant_card(self):
+        """彻底删除休眠卡片（从 DB + FAISS 索引中移除）。"""
+        selected = self.dormant_tree.selection()
+        if not selected:
+            messagebox.showwarning("未选中", "请先在休眠列表里点选一张卡片。")
+            return
+        card_id = self.dormant_tree.item(selected[0], "values")[0]
+        title = self.dormant_tree.item(selected[0], "values")[1]
+        if not messagebox.askyesno("确认彻底删除",
+                                   f"确定要永久删除休眠卡片吗？\n\n"
+                                   f"ID: {card_id}\n标题: {title}\n\n"
+                                   f"这个操作无法撤销，卡片将从数据库和检索索引中彻底移除。"):
+            return
+        try:
+            from memory_manager import delete_card
+            success = delete_card(card_id)
+            if success:
+                messagebox.showinfo("成功", f"休眠卡片 {card_id} 已彻底删除。")
+                self.load_dormant()
+                self.load_final()
+            else:
+                messagebox.showerror("失败", f"删除卡片 {card_id} 失败。")
+        except Exception as e:
+            messagebox.showerror("异常", f"删除异常: {e}")
 
     def load_dormant(self):
         for item in self.dormant_tree.get_children():

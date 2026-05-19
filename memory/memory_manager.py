@@ -100,7 +100,7 @@ def update_active_status():
             UPDATE cards SET enabled_in_context = 1
             WHERE review_status = 'final'
             AND (
-                category IN ('milestone', 'commitments', 'deep_talks', 'preferences')
+                category IN ('milestone', 'commitments', 'deep_talks', 'preferences', 'todo')
                 OR importance >= 8
                 OR (julianday(?) - julianday(COALESCE(last_referenced_at, created_at) || '+00:00')) <= 30
             )
@@ -258,7 +258,7 @@ def get_todo_list() -> list:
             FROM cards
             WHERE review_status='final' AND resolved=0
               AND (target_date IS NOT NULL AND target_date != ''
-                   OR category IN ('commitments', 'daily_life'))
+                   OR category IN ('commitments', 'daily_life', 'todo'))
             ORDER BY
                 CASE WHEN target_date IS NOT NULL AND target_date != '' THEN target_date ELSE '9999-99-99' END ASC,
                 importance DESC
@@ -299,7 +299,59 @@ def run_audit():
     suggest_importance_calibration()
     suggest_merges()
     resolve_expired_cards()
+    abyss_challenge()
     print("[memory_manager] 审计完成。")
+
+
+def abyss_challenge():
+    """
+    深渊挑战：对最优卡片做局部深度搜索。
+    找出 usage_count 最高的 5 张卡，通过 FAISS 找最近邻居。
+    对邻居中未被充分使用的卡（usage≤1），小幅提升 importance（上限 6）。
+    """
+    try:
+        from .encoder import load_index, search_index, embed
+        index = load_index()
+        if index.ntotal == 0:
+            return
+
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("""SELECT id, title, usage_count, importance, content FROM cards
+                     WHERE review_status='final' AND resolved=0 AND enabled_in_context=1
+                     ORDER BY usage_count DESC LIMIT 5""")
+        top_cards = c.fetchall()
+
+        boosted = 0
+        for cid, title, usage, imp, content in top_cards:
+            if usage < 3:
+                continue
+            try:
+                query_vec = embed(content or title)
+                neighbors = search_index(index, query_vec, k=6)  # 含自身
+                for nid, dist in neighbors:
+                    if nid == cid:
+                        continue
+                    c.execute("SELECT importance, usage_count, title FROM cards WHERE id=? AND resolved=0",
+                              (nid,))
+                    row = c.fetchone()
+                    if row and row[1] is not None and row[1] <= 1 and row[0] < 6:
+                        new_imp = min(row[0] + 1, 6)
+                        c.execute("UPDATE cards SET importance=? WHERE id=?", (new_imp, nid))
+                        print(f"[深渊挑战] {title} → 邻居「{row[2]}」importance {row[0]}→{new_imp}")
+                        boosted += 1
+                        if boosted >= 5:  # 每次审计最多提 5 张
+                            break
+                if boosted >= 5:
+                    break
+            except Exception as e:
+                print(f"[深渊挑战] 单卡跳过 {cid}: {e}")
+        conn.commit()
+        conn.close()
+        if boosted > 0:
+            print(f"[深渊挑战] 共提升 {boosted} 张邻居卡片")
+    except Exception as e:
+        print(f"[深渊挑战] 跳过: {e}")
 
 def get_card_status() -> list:
     conn = sqlite3.connect(DB_PATH)
@@ -392,6 +444,210 @@ def resolve_card(card_id: str) -> bool:
         return True
     except Exception as e:
         print(f"[memory_manager] 标记已解决失败 card_id={card_id}: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def card_age_days(card_id: str) -> int | None:
+    """
+    从卡片 ID 前缀提取日期，计算距今多少天。
+    ID 格式: YYYYMMDD_标题 (如 20260519_和DS老师拍开箱视频)
+    返回: 天数，提取失败返回 None。
+    """
+    import re as _re_age
+    m = _re_age.match(r'^(\d{4})(\d{2})(\d{2})_', card_id)
+    if not m:
+        return None
+    try:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        card_date = datetime(y, mo, d, tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        return (now - card_date).days
+    except ValueError:
+        return None
+
+
+def time_match_score(old_card_id: str, context_anchor: dict = None) -> tuple[int, str]:
+    """
+    计算两张卡的时间锚匹配度。优先于关键词匹配。
+    返回 (score, reason)，score 越高越相关。
+
+    context_anchor: {"date": "YYYY-MM-DD"|None, "fuzzy": "YYYY-MM"|None, ...}
+    """
+    if not context_anchor:
+        return 0, "无上下文时间锚"
+    ctx_date = context_anchor.get("date")
+    ctx_fuzzy = context_anchor.get("fuzzy")
+
+    # 查 DB 的 target_date（唯一的时间锚来源，不降级到卡片创建日期）
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        c = conn.cursor()
+        c.execute("SELECT target_date FROM cards WHERE id = ?", (old_card_id,))
+        row = c.fetchone()
+        old_target_date = row[0] if row else None
+    finally:
+        conn.close()
+
+    # 从 target_date 推导 fuzzy 月份
+    old_fuzzy = old_target_date[:7] if old_target_date and len(old_target_date) >= 7 else None
+
+    # 情况1：双方都有精确日期 → 算天数差
+    if ctx_date and old_target_date:
+        try:
+            from datetime import datetime as _dt2
+            ctx_dt = _dt2.strptime(ctx_date, "%Y-%m-%d")
+            old_dt = _dt2.strptime(old_target_date, "%Y-%m-%d")
+            days_apart = abs((ctx_dt - old_dt).days)
+            if days_apart <= 3:
+                return 10, f"同时间窗口(相差{days_apart}天)"
+            elif days_apart <= 14:
+                return 8, f"近时间窗口(相差{days_apart}天)"
+            elif days_apart <= 30:
+                return 5, f"同月(相差{days_apart}天)"
+            else:
+                return 2, f"不同月份(相差{days_apart}天)"
+        except ValueError:
+            pass
+
+    # 情况2：双方都有模糊月份 → 同月匹配
+    if ctx_fuzzy and old_fuzzy:
+        if ctx_fuzzy == old_fuzzy:
+            return 7, f"同月({ctx_fuzzy})"
+        elif ctx_fuzzy[:4] == old_fuzzy[:4] and abs(int(ctx_fuzzy[5:]) - int(old_fuzzy[5:])) <= 1:
+            return 4, f"相邻月({old_fuzzy} vs {ctx_fuzzy})"
+        else:
+            return 1, f"不同月({old_fuzzy} vs {ctx_fuzzy})"
+
+    # 情况3：一方有精确日期，另一方有模糊月份
+    if ctx_date and old_fuzzy:
+        if ctx_date[:7] == old_fuzzy:
+            return 6, f"同月({old_fuzzy})"
+        return 2, f"不同月({old_fuzzy})"
+
+    # 情况4：一方有时间锚，另一方完全没有 → 低相关
+    if old_target_date or old_fuzzy:
+        return 3, "旧卡有时间锚但匹配度不高"
+    else:
+        # 旧卡无时间锚（如"坚持干下去"）→ 新卡有时间锚 → 大概率不相关
+        if ctx_date or ctx_fuzzy:
+            return -1, "旧卡无时间锚，新卡有时间锚 → 不同事件类型"
+
+    return 0, "无法比较"
+
+
+def should_auto_resolve(card_id: str, days_threshold: int = 7,
+                          context_anchor: dict = None) -> tuple[bool, str]:
+    """
+    时间戳拒止 + 时间锚匹配：检查卡片是否适合被自动划掉。
+    优先使用卡片 ID 前缀的时间戳；降级使用 DB 中的 created_at。
+    返回 (允许, 原因)。
+
+    规则（按优先级）：
+    1. 时间锚匹配度 ≥ 5 → 允许（同时间窗口，高概率相关）
+    2. 时间锚匹配度 < 0 → 拒止（旧卡无时间锚，新卡有 → 不同事件类型）
+    3. 卡片创建 ≤ days_threshold 天 → 允许
+    4. 卡片创建 > days_threshold 天 → 仅 target_date 已过期才允许
+    5. 否则 → 拒止
+    """
+    # ── 时间锚匹配优先 ──
+    if context_anchor and (context_anchor.get("date") or context_anchor.get("fuzzy")):
+        score, reason = time_match_score(card_id, context_anchor)
+        if score >= 5:
+            return True, f"时间匹配({reason})"
+        if score < 0:
+            return False, f"时间锚拒止({reason})"
+    # ── 优先用 ID 前缀时间戳 ──
+    age_days = card_age_days(card_id)
+    if age_days is not None:
+        if age_days <= days_threshold:
+            return True, f"近期卡片(ID前缀, {age_days}天前)"
+        # ID 显示老卡，再查 DB 的 target_date 做二次验证
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            c = conn.cursor()
+            c.execute("SELECT target_date FROM cards WHERE id = ?", (card_id,))
+            row = c.fetchone()
+            if row and row[0]:
+                try:
+                    td = datetime.strptime(row[0], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                    now = datetime.now(timezone.utc)
+                    if td < now:
+                        return True, f"老卡但已过期(ID {age_days}天前, target={row[0]})"
+                except ValueError:
+                    pass
+        finally:
+            conn.close()
+        return False, f"时间拒止: ID前缀显示{age_days}天前, 无过期target"
+
+    # ── 降级：用 DB created_at ──
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        c = conn.cursor()
+        c.execute(
+            "SELECT created_at, target_date, title FROM cards WHERE id = ?",
+            (card_id,)
+        )
+        row = c.fetchone()
+        if not row:
+            return False, "卡片不存在"
+        created_str, target_date, title = row
+
+        now = datetime.now(timezone.utc)
+        if created_str:
+            try:
+                created_at = datetime.fromisoformat(created_str)
+            except ValueError:
+                created_at = datetime.strptime(created_str, "%Y-%m-%d %H:%M:%S")
+            age_days = (now - created_at.replace(tzinfo=timezone.utc)).days
+        else:
+            age_days = 999
+
+        if age_days <= days_threshold:
+            return True, f"近期卡片({age_days}天前)"
+
+        # 老卡：检查 target_date 是否也已过期
+        if target_date:
+            try:
+                td = datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                if td < now:
+                    return True, f"老卡但已过期({age_days}天前, target={target_date})"
+            except ValueError:
+                pass
+
+        return False, f"时间拒止: {age_days}天前创建, 无过期target"
+    except Exception as e:
+        return False, f"检查失败: {e}"
+    finally:
+        conn.close()
+
+
+def update_card(card_id: str, updates: dict) -> bool:
+    """
+    原地更新卡片字段，不划掉不重建。
+    updates: {"target_date": "2026-05-20", "status": "in_progress", "content": "新内容", ...}
+    仅更新提供的字段。
+    """
+    allowed_fields = {'target_date', 'status', 'content', 'title', 'importance', 'keywords', 'category'}
+    safe_updates = {k: v for k, v in updates.items() if k in allowed_fields}
+    if not safe_updates:
+        return False
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        set_clauses = ", ".join(f"{k} = ?" for k in safe_updates)
+        values = list(safe_updates.values()) + [card_id]
+        c = conn.cursor()
+        c.execute(f"UPDATE cards SET {set_clauses} WHERE id = ?", values)
+        if c.rowcount == 0:
+            conn.rollback()
+            return False
+        conn.commit()
+        print(f"[memory_manager] 卡片 {card_id} 已更新: {safe_updates}")
+        return True
+    except Exception as e:
+        print(f"[memory_manager] 更新失败 card_id={card_id}: {e}")
         return False
     finally:
         conn.close()

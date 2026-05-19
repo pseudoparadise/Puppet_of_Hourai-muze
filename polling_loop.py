@@ -99,15 +99,23 @@ def main():
             last_heartbeat = now_ts
             cycle_count = 0
 
-        # ── 毒点12修复：时间驱动日记（每24小时） ──
-        if now_ts - last_diary_time > DIARY_INTERVAL:
-            print("[每日日记] 时间驱动生成...")
-            _log_event("diary_scheduled")
+        # ── 毒点12修复v2：日记对齐到自然日 00:00-00:30（北京时间） ──
+        from datetime import datetime as _dt_now
+        bj_now = _dt_now.utcnow().astimezone(__import__('datetime', fromlist=['timezone']).timezone(
+            __import__('datetime', fromlist=['timedelta']).timedelta(hours=8)))
+        bj_hour = bj_now.hour
+        bj_minute = bj_now.minute
+        # 在北京时间 00:00-00:30 窗口内触发，且上次触发不是今天
+        today_bj = bj_now.strftime("%Y-%m-%d")
+        last_diary_date = getattr(main, '_last_diary_date', "")
+        if bj_hour == 0 and bj_minute < 30 and last_diary_date != today_bj:
+            print(f"[每日日记] 自然日触发 — 北京时间 {bj_now.strftime('%H:%M')}")
+            _log_event("diary_scheduled", {"reason": "midnight_window"})
             try:
                 chain_dream()
+                main._last_diary_date = today_bj  # type: ignore
             except Exception as e:
                 _log_event("diary_error", {"error": str(e)[:200]})
-            last_diary_time = now_ts
 
         # ── 长期优化四：深渊审计（每6小时） ──
         if now_ts - last_audit_time > AUDIT_INTERVAL:
@@ -121,16 +129,16 @@ def main():
                 _log_event("audit_error", {"error": str(e)[:200]})
             last_audit_time = now_ts
 
-        # ── 长期优化五：人格蒸馏自动调度（每24小时，在日记之后） ──
-        if now_ts - last_miner_time > DIARY_INTERVAL:
-            print("[人格蒸馏] 自动调度中...")
-            _log_event("miner_scheduled")
+        # ── 长期优化五v2：人格蒸馏对齐日记，日记生成后触发（00:30-01:00窗口） ──
+        if bj_hour == 0 and 30 <= bj_minute < 60 and last_diary_date != getattr(main, '_last_miner_date', ""):
+            print("[人格蒸馏] 日界线后触发 — 在日记生成之后")
+            _log_event("miner_scheduled", {"reason": "after_diary"})
             try:
                 from persona.miner import main as miner_main
                 miner_main()
+                main._last_miner_date = today_bj  # type: ignore
             except Exception as e:
                 _log_event("miner_error", {"error": str(e)[:200]})
-            last_miner_time = now_ts
 
         # ── 周收拢：每7天聚合待办事项 ──
         SWEEP_INTERVAL = 7 * 24 * 3600
