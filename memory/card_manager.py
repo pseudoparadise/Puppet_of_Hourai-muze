@@ -241,8 +241,9 @@ class CardManager:
         ttk.Button(btn_frame, text="删除", command=self.delete_final_card).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="标记已解决", command=self.resolve_card).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="查看详情", command=self.show_card_detail).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="回填向量", command=self.backfill_embeddings).pack(side=tk.LEFT, padx=5)
 
-        columns = ("id", "title", "category", "importance", "valence", "arousal", "days_remaining", "enabled", "resolved", "content")
+        columns = ("id", "title", "category", "importance", "valence", "arousal", "days_remaining", "enabled", "resolved", "vec", "content")
         self.final_tree = ttk.Treeview(self.final_frame, columns=columns, show="headings", height=12)
         self.final_tree.heading("id", text="卡片ID")
         self.final_tree.heading("title", text="标题")
@@ -253,6 +254,7 @@ class CardManager:
         self.final_tree.heading("days_remaining", text="剩余")
         self.final_tree.heading("enabled", text="活跃")
         self.final_tree.heading("resolved", text="已解决")
+        self.final_tree.heading("vec", text="向量")
         self.final_tree.heading("content", text="内容")
         self.final_tree.column("id", width=130)
         self.final_tree.column("title", width=110)
@@ -263,6 +265,7 @@ class CardManager:
         self.final_tree.column("days_remaining", width=50)
         self.final_tree.column("enabled", width=40)
         self.final_tree.column("resolved", width=50)
+        self.final_tree.column("vec", width=40)
         self.final_tree.column("content", width=320)
         self.final_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         self.final_tree.bind("<Double-1>", lambda e: self.show_card_detail())
@@ -283,6 +286,7 @@ class CardManager:
                 SELECT id, title, category, importance,
                        valence, arousal,
                        created_at, last_referenced_at, enabled_in_context, resolved,
+                       embedding IS NOT NULL as has_vec,
                        COALESCE(content,'') as content
                 FROM cards WHERE review_status='final'
                 ORDER BY created_at DESC
@@ -319,6 +323,7 @@ class CardManager:
                     days_str,
                     "是" if row["enabled_in_context"] else "否",
                     "是" if row["resolved"] else "否",
+                    "✓" if row["has_vec"] else "✗",
                     row["content"][:120]
                 ), iid=row["id"])
                 shown += 1
@@ -414,7 +419,7 @@ class CardManager:
         btn_frame.pack(fill=tk.X, pady=5)
         ttk.Button(btn_frame, text="刷新休眠列表", command=self.load_dormant).pack(side=tk.LEFT, padx=5)
 
-        columns = ("id", "title", "category", "importance", "valence", "arousal", "content")
+        columns = ("id", "title", "category", "importance", "valence", "arousal", "vec", "content")
         self.dormant_tree = ttk.Treeview(self.dormant_frame, columns=columns, show="headings", height=15)
         self.dormant_tree.heading("id", text="卡片ID")
         self.dormant_tree.heading("title", text="标题")
@@ -422,6 +427,7 @@ class CardManager:
         self.dormant_tree.heading("importance", text="重要度")
         self.dormant_tree.heading("valence", text="效价")
         self.dormant_tree.heading("arousal", text="唤醒")
+        self.dormant_tree.heading("vec", text="向量")
         self.dormant_tree.heading("content", text="内容")
         self.dormant_tree.column("id", width=140)
         self.dormant_tree.column("title", width=100)
@@ -429,6 +435,7 @@ class CardManager:
         self.dormant_tree.column("importance", width=60)
         self.dormant_tree.column("valence", width=55)
         self.dormant_tree.column("arousal", width=55)
+        self.dormant_tree.column("vec", width=40)
         self.dormant_tree.column("content", width=350)
         self.dormant_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         self.dormant_tree.bind("<Double-1>", lambda e: self.show_card_detail())
@@ -499,15 +506,17 @@ class CardManager:
         conn = sqlite3.connect(DB_PATH)
         try:
             c = conn.cursor()
-            c.execute("SELECT id, title, category, importance, valence, arousal, content FROM cards WHERE review_status='final' AND enabled_in_context=0 ORDER BY id")
+            c.execute("SELECT id, title, category, importance, valence, arousal, embedding IS NOT NULL as has_vec, content FROM cards WHERE review_status='final' AND enabled_in_context=0 ORDER BY id")
             rows = c.fetchall()
             for row in rows:
                 vals = list(row)
                 # 格式化 VA 值
                 vals[4] = f"{vals[4]:+.1f}" if vals[4] is not None else "+0.0"
                 vals[5] = f"{vals[5]:.1f}" if vals[5] is not None else "0.5"
-                if len(vals) > 6:
-                    vals[6] = str(vals[6])[:150]
+                # 向量指示
+                vals[6] = "✓" if vals[6] else "✗"
+                if len(vals) > 7:
+                    vals[7] = str(vals[7])[:150]
                 self.dormant_tree.insert("", tk.END, values=vals, iid=row[0])
             self.dormant_status.config(text=f"共 {len(rows)} 张休眠卡片。")
         except Exception as e:
@@ -540,6 +549,21 @@ class CardManager:
             messagebox.showerror("异常", f"复权异常: {e}")
         finally:
             conn.close()
+
+
+    def backfill_embeddings(self):
+        """调 backfill_embeddings.py 批量回填老卡向量"""
+        if not messagebox.askyesno("确认", "将扫描所有缺向量的卡片，调用豆包 embedding API 生成向量。\n\n"
+                                            "已有向量的卡片自动跳过。是否继续？"):
+            return
+        try:
+            from backfill_embeddings import main as do_backfill
+            do_backfill()
+            messagebox.showinfo("完成", "向量回填完成。请点「刷新」查看结果。")
+            self.load_final()
+            self.load_dormant()
+        except Exception as e:
+            messagebox.showerror("异常", f"回填失败: {e}")
 
 
 if __name__ == "__main__":

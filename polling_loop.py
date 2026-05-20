@@ -53,15 +53,16 @@ def main():
     except Exception as e:
         _log_event("audit_error", {"error": str(e)})
 
-    # ── 追补日记：启动时当天日记不存在则立即生成（统一调度，避免 bark_trigger 双重触发） ──
-    from delegate_tools import now_utc as _now_utc_startup
-    today_str = _now_utc_startup().strftime("%Y-%m-%d")
-    diary_check = os.path.join(PROJECT_ROOT, "diary", f"{today_str}.md")
+    # ── 追补日记：启动时检查昨天（北京时间）日记是否存在 ──
+    from datetime import datetime as _dt_startup, timezone as _tz_startup, timedelta as _td_startup
+    _bj_now_startup = _dt_startup.now(_tz_startup.utc) + _td_startup(hours=8)
+    _yesterday_bj = (_bj_now_startup - _td_startup(days=1)).strftime("%Y-%m-%d")
+    diary_check = os.path.join(PROJECT_ROOT, "diary", f"{_yesterday_bj}.md")
     if not os.path.exists(diary_check):
-        print(f"[每日日记] 启动追补：{today_str} 日记不存在，立即生成...")
-        _log_event("diary_scheduled", {"reason": "startup_catchup"})
+        print(f"[每日日记] 启动追补：{_yesterday_bj} 日记不存在，立即生成...")
+        _log_event("diary_scheduled", {"reason": "startup_catchup", "date": _yesterday_bj})
         try:
-            chain_dream()
+            chain_dream(_yesterday_bj)
         except Exception as e:
             _log_event("diary_error", {"error": str(e)[:200]})
 
@@ -109,13 +110,17 @@ def main():
         today_bj = bj_now.strftime("%Y-%m-%d")
         last_diary_date = getattr(main, '_last_diary_date', "")
         if bj_hour == 0 and bj_minute < 30 and last_diary_date != today_bj:
-            print(f"[每日日记] 自然日触发 — 北京时间 {bj_now.strftime('%H:%M')}")
-            _log_event("diary_scheduled", {"reason": "midnight_window"})
+            from datetime import datetime as _dt_mid, timezone as _tz_mid, timedelta as _td_mid
+            _bj_mid = _dt_mid.now(_tz_mid.utc) + _td_mid(hours=8)
+            _yesterday_mid = (_bj_mid - _td_mid(days=1)).strftime("%Y-%m-%d")
+            print(f"[每日日记] 自然日触发 — 北京时间 {bj_now.strftime('%H:%M')}，生成 {_yesterday_mid} 日记")
+            _log_event("diary_scheduled", {"reason": "midnight_window", "date": _yesterday_mid})
             try:
-                chain_dream()
+                chain_dream(_yesterday_mid)
                 main._last_diary_date = today_bj  # type: ignore
             except Exception as e:
                 _log_event("diary_error", {"error": str(e)[:200]})
+                # 失败不更新 _last_diary_date，让后续周期重试
 
         # ── 长期优化四：深渊审计（每6小时） ──
         if now_ts - last_audit_time > AUDIT_INTERVAL:

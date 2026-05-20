@@ -622,109 +622,115 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 print(f"[状态流转] 无效状态标签: {slabel}")
 
     # 机制 B：用户明确宣告完成 → 关键词匹配未解决卡片 → 自动 resolve
-    # 值枚举：每个都是明确完成义，不会被日常语气词误匹配
-    completion_keywords = [
-        "修好了", "做完了", "完成了", "搞定了", "弄好了",
-        "打通了", "调通了", "拿到了", "收到了", "喝到了",
-        "吃完了", "已经做了", "已经修了", "已经解决了",
-        "来一起", "OCR", "给你看", "展示", "你看",
-        "到了到了", "来了来了", "买到了", "到手了",
-        "回来了", "好了好了", "搞完了", "干完了", "办完了",
+    # ── 完成信号检测：关键词快速触发 → embedding 语义确认 ──
+    # 瘦身关键词：仅保留最可靠的「主语+完成动词」模式，不含「展示」「来一起」
+    _completion_trigger_kw = [
+        "修好了", "做完了", "完成了", "搞定了", "拿到了", "收到了",
+        "吃完了", "买好了", "干完了", "到手了", "回来了",
+        "打通了", "调通了", "办完了", "做好了",
     ]
-    if any(kw in user_input for kw in completion_keywords):
+    _cpl_vec = None
+    if any(kw in user_input for kw in _completion_trigger_kw):
         try:
-            db_path = os.path.join(PROJECT_ROOT, "memory", "cards.db")
-            conn = sqlite3.connect(db_path)
-            c = conn.cursor()
-            c.execute("""
-                SELECT id, title, category, content, importance FROM cards
-                WHERE review_status='final' AND resolved=0
-                AND category IN ('commitments','daily_life','todo')
-                ORDER BY created_at DESC LIMIT 10
-            """)
-            # 卡片标题+内容 → 字符集（过滤高频无意义字），与用户消息做重叠
-            import re as _re
-            _STOP_CHARS = set('的了是在我有他个这着就和也要会可你他们来到说去为上对得大子能过下一地出道自以时年看没那天家开小成把前还但只想中里用生种起知好些间因所如然后其最她它已当两从方实长更应什')
-            def _key_chars(s):
-                s = s.lower()
-                chars = set(_re.findall(r'[一-鿿]', s)) - _STOP_CHARS
-                for t in _re.findall(r'[a-z][a-z0-9]+', s):
-                    chars.add(t)
-                return chars
-            user_chars = _key_chars(user_input)
-            for uid, utitle, ucat, ucontent, uimportance in c.fetchall():
-                if uid in resolved_ids:
-                    continue
-                # 安全阀：importance >= 8 的基石卡不自动 resolve
-                if uimportance >= 8:
-                    continue
-                # 标题匹配：权重高，阈值 2
-                title_chars = _key_chars(utitle)
-                title_overlap = len(user_chars & title_chars)
-                # 内容匹配：权重低，阈值 4（防长内容假阳性）
-                content_chars = _key_chars(ucontent or '')
-                content_overlap = len(user_chars & content_chars)
-                if title_overlap >= 1 or content_overlap >= 2:
-                    try:
-                        from memory.memory_manager import should_auto_resolve as _sar, resolve_card as do_resolve2
-                        _allowed, _reason = _sar(uid, context_anchor=_parse_time_anchor(user_input))
-                        if not _allowed:
-                            print(f"[关键词解决] 时间拒止 {uid}: {_reason}，跳过")
+            from encoder import embed as _embed_cpl, load_index as _load_idx_cpl, search_index as _search_cpl
+            import numpy as _np_cpl
+            _cpl_vec = _embed_cpl(user_input)
+            _cpl_idx = _load_idx_cpl()
+            if _cpl_idx.ntotal > 0:
+                _cpl_neighbors = _search_cpl(_cpl_idx, _cpl_vec, k=10)
+                if _cpl_neighbors:
+                    _cpl_ids = [nid for nid, _ in _cpl_neighbors]
+                    _cpl_db = sqlite3.connect(os.path.join(PROJECT_ROOT, "memory", "cards.db"))
+                    _cpl_c = _cpl_db.cursor()
+                    _cpl_c.execute(
+                        "SELECT id, title, category, content, importance, embedding FROM cards "
+                        "WHERE id IN ({}) AND review_status='final' AND resolved=0 "
+                        "AND category IN ('commitments','daily_life','todo')"
+                        .format(','.join(['?' for _ in _cpl_ids])),
+                        _cpl_ids
+                    )
+                    for _cid, _ctitle, _ccat, _ccontent, _cimp, _ceblob in _cpl_c.fetchall():
+                        if _cid in resolved_ids:
                             continue
-                        if do_resolve2(uid):
-                            print(f"[关键词解决] 卡片 {uid} 已标记为已解决（标题={title_overlap} 内容={content_overlap}）")
-                            resolved_ids.add(uid)
-                            _sync_diary_on_card_change(uid, "resolved")
-                    except Exception as e2:
-                        print(f"[关键词解决] 单卡跳过 {uid}: {e2}")
-            conn.close()
+                        if (_cimp or 5) >= 8:
+                            continue
+                        if _ceblob is None:
+                            continue
+                        _c_evec = _np_cpl.frombuffer(_ceblob, dtype=_np_cpl.float32)
+                        _c_dot = _np_cpl.dot(_cpl_vec, _c_evec)
+                        _c_norm = _np_cpl.linalg.norm(_cpl_vec) * _np_cpl.linalg.norm(_c_evec)
+                        _c_cos = float(_c_dot / _c_norm) if _c_norm > 0 else 0.0
+                        if _c_cos < 0.55:
+                            continue
+                        from memory.memory_manager import should_auto_resolve as _sar, resolve_card as do_resolve2
+                        _allowed, _reason = _sar(_cid, context_anchor=_parse_time_anchor(user_input))
+                        if not _allowed:
+                            print(f"[完成检测] 时间拒止 {_cid}: {_reason}，跳过")
+                            continue
+                        if do_resolve2(_cid):
+                            print(f"[完成检测] 卡片 {_cid}({_ctitle}) 语义匹配(cos={_c_cos:.3f})，已解决")
+                            resolved_ids.add(_cid)
+                            _sync_diary_on_card_change(_cid, "resolved")
+                    _cpl_db.close()
         except Exception as e:
-            print(f"[关键词解决] 扫描跳过: {e}")
+            print(f"[完成检测] embedding 路径跳过: {e}，降级关键词兜底")
+            _fallback_kw = ["做完了", "完成了", "搞定了", "拿到了"]
+            if any(kw in user_input for kw in _fallback_kw):
+                try:
+                    _fb_db = sqlite3.connect(os.path.join(PROJECT_ROOT, "memory", "cards.db"))
+                    _fb_c = _fb_db.cursor()
+                    _fb_c.execute(
+                        "SELECT id, title, importance FROM cards "
+                        "WHERE review_status='final' AND resolved=0 "
+                        "AND category IN ('commitments','daily_life','todo') LIMIT 10"
+                    )
+                    for _fid, _ftitle, _fimp in _fb_c.fetchall():
+                        if _fid in resolved_ids or (_fimp or 5) >= 8:
+                            continue
+                        if _ftitle[:4] in user_input or user_input[:4] in _ftitle:
+                            from memory.memory_manager import resolve_card as _fb_resolve
+                            if _fb_resolve(_fid):
+                                print(f"[完成检测-兜底] {_fid}({_ftitle}) 已解决")
+                                resolved_ids.add(_fid)
+                                _sync_diary_on_card_change(_fid, "resolved")
+                    _fb_db.close()
+                except Exception:
+                    pass
 
-    # ── pending 扫描：仅在检测到完成信号时触发 ──
-    pending_completion_signals = [
-        "好了", "完了", "拿到了", "做好了", "做完了", "搞定了", "搞完了",
-        "回来了", "到了", "喝到了", "吃完了", "买好了", "干完了", "到手了",
-        "修好了", "打通了", "调通了", "收到了", "办完了",
-    ]
+    # ── pending 扫描：完成信号 → embedding 匹配待审核卡 ──
     pending_path = os.path.join(PROJECT_ROOT, "memory", "pending_cards.json")
-    if os.path.exists(pending_path) and any(sig in user_input for sig in pending_completion_signals):
+    if os.path.exists(pending_path) and any(kw in user_input for kw in _completion_trigger_kw):
         try:
-            import re as _re2
-            _STOP_CHARS2 = set('的了是在我有他个这着就和也要会可你他们来到说去为上对得大子能过下一地出道自以时年看没那天家开小成把前还但只想中里用生种起知好些间因所如然后其最她它已当两从方实长更应什')
-            def _key_chars2(s):
-                s = s.lower()
-                chars = set(_re2.findall(r'[一-鿿]', s)) - _STOP_CHARS2
-                for t in _re2.findall(r'[a-z][a-z0-9]+', s):
-                    chars.add(t)
-                return chars
-            user_chars2 = _key_chars2(user_input)
             with open(pending_path, "r", encoding="utf-8") as pf:
                 pending_cards = json.load(pf)
-            pending_modified = False
-            for pc in pending_cards:
-                if pc.get("id") in resolved_ids:
-                    continue
-                if pc.get("importance", 5) >= 8:
-                    continue
-                pc_title = pc.get("title", "")
-                pc_content = pc.get("content", "")
-                title_chars = _key_chars2(pc_title)
-                title_overlap = len(user_chars2 & title_chars)
-                content_chars = _key_chars2(pc_content or '')
-                content_overlap = len(user_chars2 & content_chars)
-                # 高阈值：标题≥2个特征词重叠 AND 内容也有重叠，或标题≥3
-                if (title_overlap >= 2 and content_overlap >= 1) or title_overlap >= 3:
-                    print(f"[pending扫描] 完成信号+强重叠 → 待审核卡「{pc_title}」自动移除（标题={title_overlap} 内容={content_overlap}）")
-                    resolved_ids.add(pc.get("id"))
-                    pending_modified = True
-            if pending_modified:
-                pending_cards = [pc for pc in pending_cards if pc.get("id") not in resolved_ids]
-                from delegate_tools import atomic_write_json as _awj_pending
-                _awj_pending(pending_path, pending_cards)
-                print(f"[pending扫描] pending_cards.json 已更新，剩余 {len(pending_cards)} 张")
+            if pending_cards:
+                from encoder import embed as _embed_pend
+                import numpy as _np_pend
+                _pv = _cpl_vec if _cpl_vec is not None else _embed_pend(user_input)
+                pending_modified = False
+                for pc in pending_cards:
+                    if pc.get("id") in resolved_ids or pc.get("importance", 5) >= 8:
+                        continue
+                    try:
+                        _ptext = pc.get("title", "") + " " + (pc.get("content", "") or "")
+                        _pvec = _embed_pend(_ptext)
+                        _pdot = _np_pend.dot(_pv, _pvec)
+                        _pnorm = _np_pend.linalg.norm(_pv) * _np_pend.linalg.norm(_pvec)
+                        _pcos = float(_pdot / _pnorm) if _pnorm > 0 else 0.0
+                        if _pcos >= 0.55:
+                            print(f"[pending完成] 待审核卡「{pc.get('title','?')}」语义匹配(cos={_pcos:.3f})，移除")
+                            resolved_ids.add(pc.get("id"))
+                            pending_modified = True
+                    except Exception:
+                        pass
+                if pending_modified:
+                    pending_cards = [pc for pc in pending_cards if pc.get("id") not in resolved_ids]
+                    from delegate_tools import atomic_write_json as _awj_pending
+                    _awj_pending(pending_path, pending_cards)
+                    print(f"[pending完成] pending_cards.json 已更新，剩余 {len(pending_cards)} 张")
         except Exception as e_pending:
-            pass  # 静默降级
+            pass
+
 
     propose_match = re.search(r'<!--\s*propose_card:\s*(.*?)\s*-->', raw_reply, re.IGNORECASE)
     if propose_match:
@@ -834,11 +840,44 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
             except Exception as e:
                 print(f"[写卡拦截] 检索跳过: {e}")
 
-            if not blocked_by_overlap and (not session_cards_written or _check_cooldown(session_cards_written, category, current_turn, 0)):
-                write_pending_card(card_draft)
-                if session_cards_written is not None:
-                    session_cards_written[category] = current_turn
-            elif blocked_by_overlap:
+            # ── 时间拒止通过后，card_guard embedding 语义去重 ──
+            if not blocked_by_overlap:
+                from memory.card_guard import check_before_write as _guard_propose, show_conflict_popup as _popup_propose
+                _p_blocked, _p_reason, _p_conflict = _guard_propose(title, content, user_input, card_draft)
+                if _p_blocked:
+                    if _p_conflict:
+                        action = _popup_propose(_p_conflict['new_card'], _p_conflict['old_card'],
+                                                _p_conflict['overlap'], _p_conflict['similarity'])
+                        if action == 'replace':
+                            from memory.memory_manager import resolve_card as _resolve_p
+                            _resolve_p(_p_conflict['old_card']['id'])
+                            resolved_ids.add(_p_conflict['old_card']['id'])
+                            _sync_diary_on_card_change(_p_conflict['old_card']['id'], "resolved")
+                            if _p_conflict.get('old_is_pending'):
+                                _pp_p = os.path.join(PROJECT_ROOT, "memory", "pending_cards.json")
+                                if os.path.exists(_pp_p):
+                                    with open(_pp_p, "r", encoding="utf-8") as _pf_p:
+                                        _p_all = json.load(_pf_p)
+                                    _p_all = [c for c in _p_all if c.get('id') != _p_conflict['old_card']['id']]
+                                    from delegate_tools import atomic_write_json as _awj_p
+                                    _awj_p(_pp_p, _p_all)
+                            if not session_cards_written or _check_cooldown(session_cards_written, category, current_turn, 0):
+                                write_pending_card(card_draft)
+                                if session_cards_written is not None:
+                                    session_cards_written[category] = current_turn
+                        elif action == 'keep_both':
+                            if not session_cards_written or _check_cooldown(session_cards_written, category, current_turn, 0):
+                                write_pending_card(card_draft)
+                                if session_cards_written is not None:
+                                    session_cards_written[category] = current_turn
+                        # 'discard' → blocked
+                    else:
+                        print(f"[写卡拦截] 已拦截: {_p_reason}")
+                elif not session_cards_written or _check_cooldown(session_cards_written, category, current_turn, 0):
+                    write_pending_card(card_draft)
+                    if session_cards_written is not None:
+                        session_cards_written[category] = current_turn
+            else:
                 print(f"[写卡拦截] 新卡已丢弃，旧卡已 resolve")
 
     if not propose_match:
@@ -1313,8 +1352,36 @@ def main():
                     "arousal": va.get("arousal", 0.5) if va else 0.5,
                     "target_date": _parse_target_date(user_input)
                 }
-                write_pending_card(card_draft)
-                print(f"[卡片] 已写入待审核: [{category}] {title}")
+                # ── 写卡拦截：/card 命令也走 card_guard ──
+                from memory.card_guard import check_before_write as _guard_manual, show_conflict_popup as _popup_manual
+                _m_blocked, _m_reason, _m_conflict = _guard_manual(title, content, user_input, card_draft)
+                if _m_blocked:
+                    if _m_conflict:
+                        action = _popup_manual(_m_conflict['new_card'], _m_conflict['old_card'],
+                                               _m_conflict['overlap'], _m_conflict['similarity'])
+                        if action == 'replace':
+                            from memory.memory_manager import resolve_card as _resolve_m
+                            _resolve_m(_m_conflict['old_card']['id'])
+                            if _m_conflict.get('old_is_pending'):
+                                _pp_m = os.path.join(PROJECT_ROOT, "memory", "pending_cards.json")
+                                if os.path.exists(_pp_m):
+                                    with open(_pp_m, "r", encoding="utf-8") as _pf_m:
+                                        _p_all = json.load(_pf_m)
+                                    _p_all = [c for c in _p_all if c.get('id') != _m_conflict['old_card']['id']]
+                                    from delegate_tools import atomic_write_json as _awj_m
+                                    _awj_m(_pp_m, _p_all)
+                            write_pending_card(card_draft)
+                            print(f"[卡片] 已写入待审核(替换旧卡): [{category}] {title}")
+                        elif action == 'keep_both':
+                            write_pending_card(card_draft)
+                            print(f"[卡片] 已写入待审核(保留两张): [{category}] {title}")
+                        else:
+                            print(f"[卡片] 已丢弃: {_m_reason}")
+                    else:
+                        print(f"[卡片] 已拦截: {_m_reason}")
+                else:
+                    write_pending_card(card_draft)
+                    print(f"[卡片] 已写入待审核: [{category}] {title}")
             else:
                 print("[卡片] 蒸馏失败，DeepSeek 没返回有效 JSON")
             print()

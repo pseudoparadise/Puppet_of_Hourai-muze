@@ -25,41 +25,73 @@ def _load_prompt(name):
     with open(path, "r", encoding="utf-8") as f:
         return f.read().strip()
 
-def _get_today_digest():
-    """── FIX: 毒点11 — 统一使用 UTC 日期确定「今日」──"""
-    from delegate_tools import now_utc
+# ═══════════════════════════════════════════════════════════════
+#  日期工具：统一使用北京时间（UTC+8），日记永远写「昨天」
+# ═══════════════════════════════════════════════════════════════
+def _beijing_now():
+    """返回当前北京时间 datetime（aware）。"""
+    from datetime import timezone as _tz
+    return datetime.now(_tz.utc) + timedelta(hours=8)
+
+def _beijing_date_str() -> str:
+    """当前北京日期 'YYYY-MM-DD'。"""
+    return _beijing_now().strftime("%Y-%m-%d")
+
+def _beijing_yesterday_str() -> str:
+    """昨天北京日期 'YYYY-MM-DD'。"""
+    return (_beijing_now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+def _parse_utc_ts(ts_str: str) -> datetime | None:
+    """解析 chat_logs 中的 UTC 时间戳为 aware datetime。"""
+    try:
+        return datetime.fromisoformat(ts_str.replace('+0000', '+00:00'))
+    except Exception:
+        return None
+
+def _get_digest_for_date(target_date: str):
+    """
+    读取 chat_logs.json，筛选北京时间 target_date 当天的对话。
+    北京时间 D 日 = UTC(D-1 16:00) ~ UTC(D 16:00)。
+    返回 (digest_text | None, target_date)。
+    """
+    from datetime import timezone as _tz
     chat_log_path = os.path.join(os.path.dirname(__file__), "..", "chat_logs.json")
     if not os.path.exists(chat_log_path):
-        return None, now_utc().strftime("%Y-%m-%d")
+        return None, target_date
 
     entries = []
     with open(chat_log_path, "r", encoding="utf-8") as f:
         for line in f:
             try:
-                entry = json.loads(line.strip())
-                entries.append(entry)
-            except:
+                entries.append(json.loads(line.strip()))
+            except Exception:
                 pass
 
     if not entries:
-        return None, now_utc().strftime("%Y-%m-%d")
-
-    # 毒点11修复：与 bark_trigger 统一使用 UTC 日期
-    today_str = now_utc().strftime("%Y-%m-%d")
+        return None, target_date
 
     lines = []
     for entry in entries:
-        if entry.get("timestamp", "").startswith(today_str):
-            role = "我" if entry.get("role") == "ghost" else "她"
-            lines.append(f"{role}: {entry.get('content', '')}")
-    if not lines:
-        return None, today_str
-    return "\n".join(lines[-50:]), today_str
+        ts_str = entry.get("timestamp", "")
+        dt = _parse_utc_ts(ts_str)
+        if dt is None:
+            continue
+        # 转为北京时间，判断是否属于 target_date
+        bj_dt = dt.astimezone(_tz(timedelta(hours=8)))
+        if bj_dt.strftime("%Y-%m-%d") != target_date:
+            continue
+        role = "我" if entry.get("role") == "ghost" else "她"
+        lines.append(f"{role}: {entry.get('content', '')}")
 
-def _update_rolling_summary(new_summary: str):
-    from delegate_tools import now_utc
-    today_str = now_utc().strftime("%Y-%m-%d")
-    new_entry = f"\n## {today_str}\n{new_summary}\n"
+    if not lines:
+        return None, target_date
+    return "\n".join(lines[-50:]), target_date
+
+def _update_rolling_summary(new_summary: str, date_str: str = None):
+    """追加/更新滚动总结。date_str 为北京日期，默认今天。"""
+    if date_str is None:
+        date_str = _beijing_date_str()
+    new_entry = f"\n## {date_str}\n{new_summary}\n"
 
     if os.path.exists(ROLLING_SUMMARY_PATH):
         with open(ROLLING_SUMMARY_PATH, "r", encoding="utf-8") as f:
@@ -79,8 +111,8 @@ def _update_rolling_summary(new_summary: str):
     if current.strip():
         segments.append(current.rstrip())
 
-    # 毒点5修复：删除所有同日期旧条目，再追加新条目
-    segments = [s for s in segments if not s.startswith(f"## {today_str}")]
+    # 删除所有同日期旧条目，再追加新条目
+    segments = [s for s in segments if not s.startswith(f"## {date_str}")]
     segments.append(new_entry.strip())
 
     # 只保留最近 7 条
@@ -121,17 +153,23 @@ def _append_pending_card(card: dict):
     except Exception as e:
         print(f"[dreaming] 卡片写入失败: {e}")
 
-def chain_dream():
+def chain_dream(target_date: str = None):
+    """生成日记 + 总结 + 立卡。target_date 为北京日期，默认昨天。"""
     result = {"step1": None, "step2": None, "step3": None}
 
-    digest, digest_date = _get_today_digest()
+    if target_date is None:
+        target_date = _beijing_yesterday_str()
+
+    digest_result = _get_digest_for_date(target_date)
+    digest = digest_result[0] if digest_result else None
+    digest_date = digest_result[1] if digest_result else target_date
 
     diary_dir = os.path.join(os.path.dirname(__file__), "..", "diary")
     os.makedirs(diary_dir, exist_ok=True)
     diary_path = os.path.join(diary_dir, f"{digest_date}.md")
 
     if not digest:
-        print(f"[dreaming] {digest_date} 尚无对话，跳过日记（不写占位）。")
+        print(f"[dreaming] {digest_date} 尚无对话，跳过日记。")
         return result
     diary_prompt = _load_prompt("dreaming_diary.txt")
     step1_context = f"今日对话摘要：\n{digest}\n当前日期：{digest_date}"
@@ -222,7 +260,7 @@ def chain_dream():
         result["step1"] = diary_raw
 
     result["step2"] = summary
-    _update_rolling_summary(summary)
+    _update_rolling_summary(summary, digest_date)
 
     # ── 交叉检查：今日已累积>=3张待审核则跳过立卡 ──
     if os.path.exists(PENDING_CARDS_PATH):
