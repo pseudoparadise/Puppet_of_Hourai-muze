@@ -871,15 +871,47 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
         if any(kw in user_input for kw in emotion_words):
             triggered.append(("emotional", 5))
 
-        # 【5】自我暴露类 → 不 auto-trigger，但注入提醒让 AI 主动建卡
-        exposure_signals = [
-            "我小时候", "我以前", "我从小", "童年", "我妈", "我爸", "家里",
-            "死", "灵魂", "意义", "永恒", "害怕", "伤害", "创伤",
-            "阴影", "孤独", "绝望", "天台", "轻生", "自杀",
-            "老师", "班主任", "同学", "学校", "初中", "高中",
-        ]
-        if any(kw in user_input for kw in exposure_signals):
-            va["_exposure_reminder"] = True  # 下游在 prompt 注入提醒
+        # 【5】自我暴露类 → embedding 语义检测（替代关键词硬编码）
+        _exposure_detected = False
+        try:
+            from encoder import embed as _embed_exp, load_index as _load_idx_exp, search_index as _search_exp
+            _exp_vec = _embed_exp(user_input)
+            _exp_idx = _load_idx_exp()
+            if _exp_idx.ntotal > 0:
+                _exp_neighbors = _search_exp(_exp_idx, _exp_vec, k=5)
+                if _exp_neighbors:
+                    _exp_ids = [nid for nid, _ in _exp_neighbors]
+                    import sqlite3 as _sql_exp
+                    import numpy as _np_exp
+                    _exp_db = _sql_exp.connect(os.path.join(PROJECT_ROOT, "memory", "cards.db"))
+                    _exp_c = _exp_db.cursor()
+                    _exp_c.execute(
+                        "SELECT id, category, embedding FROM cards WHERE id IN ({}) AND review_status='final'"
+                        .format(','.join(['?' for _ in _exp_ids])),
+                        _exp_ids
+                    )
+                    for _eid, _ecat, _eblob in _exp_c.fetchall():
+                        if _ecat not in ('deep_talks', 'milestone', 'turning_points'):
+                            continue
+                        if _eblob is None:
+                            continue
+                        _evec = _np_exp.frombuffer(_eblob, dtype=_np_exp.float32)
+                        _dot = _np_exp.dot(_exp_vec, _evec)
+                        _norm = _np_exp.linalg.norm(_exp_vec) * _np_exp.linalg.norm(_evec)
+                        _cos_sim = float(_dot / _norm) if _norm > 0 else 0.0
+                        if _cos_sim >= 0.65:
+                            va["_exposure_reminder"] = True
+                            print(f"[暴露检测] 用户输入与{_ecat}卡「{_eid}」语义相似(cos={_cos_sim:.3f})，注入提醒")
+                            _exposure_detected = True
+                            break
+                    _exp_db.close()
+        except Exception as _exp_e:
+            _fallback = ["轻生", "自杀", "不想活了", "天台", "结束一切"]
+            if any(kw in user_input for kw in _fallback):
+                va["_exposure_reminder"] = True
+                _exposure_detected = True
+            if not _exposure_detected:
+                print(f"[暴露检测] embedding 路径跳过: {_exp_e}")
 
         # 【6】约定承诺类（需双方确认）
         user_proposing = any(kw in user_input for kw in ["约定", "答应", "承诺", "保证", "一定"])
@@ -932,10 +964,32 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
             # ── P1-3: 同 session 同 category 去重 ──
             cooldown = 10 if triggered_category in {'daily_life','emotional','preferences'} else 0
             # ── 写卡拦截器：auto-trigger 路径也检查 ──
-            from memory.card_guard import check_before_write as _guard_check
-            _should_block, _block_reason = _guard_check(title, content, user_input)
+            from memory.card_guard import check_before_write as _guard_check, show_conflict_popup
+            _should_block, _block_reason, _conflict = _guard_check(title, content, user_input, card_draft)
             if _should_block:
-                print(f"[写卡拦截-auto] 已拦截: {_block_reason}")
+                if _conflict:
+                    action = show_conflict_popup(_conflict['new_card'], _conflict['old_card'],
+                                                 _conflict['overlap'], _conflict['similarity'])
+                    if action == 'replace':
+                        from memory.memory_manager import resolve_card as _resolve_conflict
+                        _resolve_conflict(_conflict['old_card']['id'])
+                        if _conflict.get('old_is_pending'):
+                            _pending_path = os.path.join(PROJECT_ROOT, "memory", "pending_cards.json")
+                            if os.path.exists(_pending_path):
+                                with open(_pending_path, "r", encoding="utf-8") as _pf:
+                                    _p_all = json.load(_pf)
+                                _p_all = [c for c in _p_all if c.get('id') != _conflict['old_card']['id']]
+                                from delegate_tools import atomic_write_json as _awj_conflict
+                                _awj_conflict(_pending_path, _p_all)
+                        write_pending_card(card_draft)
+                        if session_cards_written is not None:
+                            session_cards_written[triggered_category] = current_turn
+                    elif action == 'keep_both':
+                        write_pending_card(card_draft)
+                        if session_cards_written is not None:
+                            session_cards_written[triggered_category] = current_turn
+                else:
+                    print(f"[写卡拦截-auto] 已拦截: {_block_reason}")
             elif not session_cards_written or _check_cooldown(session_cards_written, triggered_category, current_turn, cooldown):
                 write_pending_card(card_draft)
                 if session_cards_written is not None:
@@ -1358,7 +1412,7 @@ def main():
                 except Exception:
                     pass
         except Exception as e:
-            print(f"[记忆检索异常，跳过]: {e}")
+            print(f"[记忆检索静默]: {e}")
 
         # ═══════════════════════════════════════════════════════════
         # 裁决者：在 AI 生成回复之前，独立判断用户意图
@@ -1735,6 +1789,18 @@ def main():
             print(f"[本轮检索卡片: {card_list}]")
         if ref_ids:
             print(f"[本轮引用卡片: {', '.join(ref_ids)}]")
+            # ── DB 反查标题，确保 <!-- ref: --> 路径引入的 ID 也能显示 ──
+            try:
+                db = sqlite3.connect(os.path.join(PROJECT_ROOT, "memory", "cards.db"))
+                db.row_factory = sqlite3.Row
+                placeholders = ','.join(['?' for _ in ref_ids])
+                cur = db.execute(f"SELECT id, title FROM cards WHERE id IN ({placeholders})", list(ref_ids))
+                id_title = {r['id']: r['title'] for r in cur.fetchall()}
+                db.close()
+                ref_with_titles = [f"{rid}({id_title.get(rid, '?')})" for rid in ref_ids]
+                print(f"[本轮引用详情: {', '.join(ref_with_titles)}]")
+            except Exception:
+                pass
 
         if cot:
             print(f"\x1b[2m[💭] {cot}\x1b[0m")

@@ -465,7 +465,10 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
     db_path = os.path.join(os.path.dirname(__file__), "cards.db")
 
     # ── VA 唤醒度三层分档：调整检索策略 ──
-    w = weights or SCORING_CONFIG
+    # ── 以 SCORING_CONFIG 为基底合并 weights，确保 w_keyword 等必要键始终存在 ──
+    w = dict(SCORING_CONFIG)
+    if weights:
+        w.update(weights)
     # ── 毒点32修复：deepcopy 避免跨调用污染原始配置 ──
     import copy
     effective_weights = copy.deepcopy(w)
@@ -503,12 +506,37 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
     # ── VA 阶段配置：velocity tracker 覆盖 VA 门控 ──
     phase_cfg = effective_weights.pop('_phase_cfg', None)
 
-    # ── 混合态检测 ──
-    COGNITIVE_KW = ['分析', '递归', 'debug', '为什么', '原因', '逻辑', '根因',
-                   '怎么', 'bug', 'code', '代码', '排查', '推导', '推理',
-                   '算', '多少', '推导', '论证', '反证', '追溯']
-    is_cognitive = any(kw in query.lower() for kw in COGNITIVE_KW)
-    mixed_mode = (va_tier == "high" and is_cognitive)
+    # ── 混合态检测：embedding 极性判断替代 COGNITIVE_KW 关键词列表 ──
+    # 如果 query embedding 更靠近"认知/技术"语义空间且 VA 高唤醒 → 混合态
+    mixed_mode = False
+    if va_tier == "high":
+        try:
+            from encoder import embed as _embed_mix
+            _qv = _embed_mix(query)
+            # 延迟加载参考向量（只 embed 一次，蹭后续 FAISS 搜索复用）
+            _COG_REF = getattr(retrieve, '_cog_ref_vec', None)
+            _EMO_REF = getattr(retrieve, '_emo_ref_vec', None)
+            if _COG_REF is None:
+                _COG_REF = _embed_mix("debug分析排查代码逻辑算法数据结构技术方案架构编译部署")
+                _EMO_REF = _embed_mix("难过伤心哭泣崩溃绝望孤独害怕焦虑愤怒委屈想念")
+                retrieve._cog_ref_vec = _COG_REF  # type: ignore
+                retrieve._emo_ref_vec = _EMO_REF  # type: ignore
+            import numpy as _np_mix
+            _dot_c = _np_mix.dot(_qv, _COG_REF)
+            _dot_e = _np_mix.dot(_qv, _EMO_REF)
+            _n_q = _np_mix.linalg.norm(_qv)
+            _n_c = _np_mix.linalg.norm(_COG_REF)
+            _n_e = _np_mix.linalg.norm(_EMO_REF)
+            _cos_cog = float(_dot_c / (_n_q * _n_c)) if _n_q * _n_c > 0 else 0.0
+            _cos_emo = float(_dot_e / (_n_q * _n_e)) if _n_q * _n_e > 0 else 0.0
+            is_cognitive = _cos_cog > _cos_emo and _cos_cog > 0.25
+            mixed_mode = is_cognitive
+            if mixed_mode:
+                print(f"[混合态] embedding极性: cog={_cos_cog:.3f} emo={_cos_emo:.3f} → 混合态")
+            # 缓存 query_vec 供后续 FAISS 复用
+            retrieve._cached_query_vec = _qv  # type: ignore
+        except Exception:
+            pass  # 降级：embedding 不可用时跳过混合态
 
     if phase_cfg:
         # VA 阶段配置覆盖（三阶段情绪弧）
@@ -583,7 +611,9 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
     semantic_hits = []
     if len(keyword_hits) < top_k:
         try:
-            query_vec = embed(query)
+            query_vec = getattr(retrieve, '_cached_query_vec', None)
+            if query_vec is None:
+                query_vec = embed(query)
             index = load_index()
             if index.ntotal > 0:
                 candidates = search_index(index, query_vec, k=min(10, max(effective_k * semantic_k_mult, 5)))
