@@ -90,6 +90,58 @@ def estimate(text: str, max_retries: int = 2) -> dict:
 
     return {"valence": 0.5, "arousal": 0.5, "suggested_temperature": "warm", "description": "中性（默认）"}
 
+
+# ═══════════════════════════════════════════════════
+# VA 速度追踪器：积累历史坐标，检测三阶段情绪弧
+# ═══════════════════════════════════════════════════
+_VA_HISTORY = []
+_MAX_HISTORY = 5
+
+
+def track_va(valence: float, arousal: float) -> dict:
+    global _VA_HISTORY
+    _VA_HISTORY.append((valence, arousal))
+    if len(_VA_HISTORY) > _MAX_HISTORY:
+        _VA_HISTORY.pop(0)
+
+    if len(_VA_HISTORY) >= 2:
+        prev_v, prev_a = _VA_HISTORY[-2]
+        delta_v = valence - prev_v
+        delta_a = arousal - prev_a
+    else:
+        delta_v, delta_a = 0, 0
+
+    # 优先级: cognitive_surge > emotional_flood > recovery > normal
+    # 因为 emotional_flood → cognitive_surge 的过渡需要优先检测上升趋势
+    if arousal > 0.45 and delta_v > 0.08:
+        phase = "cognitive_surge"   # 效价快速回升 → 理智涌入（即使仍高唤醒）
+    elif arousal > 0.70 and valence < 0.35:
+        phase = "emotional_flood"   # 高唤醒高负效价，无上升趋势 → 感性洪水
+    elif arousal < 0.45:
+        phase = "recovery"
+    else:
+        phase = "normal"
+
+    return {
+        "phase": phase, "valence": valence, "arousal": arousal,
+        "delta_v": delta_v, "delta_a": delta_a, "history_len": len(_VA_HISTORY),
+    }
+
+
+def va_phase_config(phase: str) -> dict:
+    if phase == "emotional_flood":
+        return {"fire_boost": True, "diversity_enabled": False,
+                "w_water_mult": 0.5, "deep_boost": True, "semantic_mult": 1.8}
+    elif phase == "cognitive_surge":
+        return {"fire_boost": True, "diversity_enabled": True,
+                "w_water_mult": 1.5, "deep_boost": False, "semantic_mult": 1.2}
+    elif phase == "recovery":
+        return {"fire_boost": False, "diversity_enabled": True,
+                "w_water_mult": 1.0, "deep_boost": False, "semantic_mult": 1.0}
+    else:
+        return {"fire_boost": False, "diversity_enabled": True,
+                "w_water_mult": 1.0, "deep_boost": False, "semantic_mult": 1.0}
+
 if __name__ == "__main__":
     test = estimate("我答应你每周陪我看一次星星")
     print("VA 估测结果:", test)

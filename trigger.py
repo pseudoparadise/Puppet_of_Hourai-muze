@@ -783,9 +783,12 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 _oconn = sqlite3.connect(_odb)
                 _oc = _oconn.cursor()
                 _oc.execute(
-                    "SELECT id, title, content, importance FROM cards WHERE review_status='final' AND resolved=0 ORDER BY created_at DESC LIMIT 20"
+                    "SELECT id, title, content, importance, category FROM cards WHERE review_status='final' AND resolved=0 ORDER BY created_at DESC LIMIT 20"
                 )
-                for _oid, _otitle, _ocontent, _oimp in _oc.fetchall():
+                for _oid, _otitle, _ocontent, _oimp, _ocat in _oc.fetchall():
+                    # 深层记忆卡不参与自动划掉
+                    if _ocat in ('deep_talks', 'milestone', 'turning_points'):
+                        continue
                     _old_text = (_otitle + " " + (_ocontent or "")).lower()
                     _old_features = _extract_features(_old_text)
                     _overlap = len(proposed_features & _old_features)
@@ -868,12 +871,15 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
         if any(kw in user_input for kw in emotion_words):
             triggered.append(("emotional", 5))
 
-        # 【5】自我暴露类
-        exposure_words = ["我这个人", "我以前", "我小时候", "小时候", "我从来", "我害怕",
-                          "我在意", "我讨厌", "我不喜欢别人", "我特别讨厌",
-                          "得过且过", "没人陪我", "没人陪", "没有蛋糕", "很难过"]
-        if any(kw in user_input for kw in exposure_words):
-            triggered.append(("deep_talks", 7))
+        # 【5】自我暴露类 → 不 auto-trigger，但注入提醒让 AI 主动建卡
+        exposure_signals = [
+            "我小时候", "我以前", "我从小", "童年", "我妈", "我爸", "家里",
+            "死", "灵魂", "意义", "永恒", "害怕", "伤害", "创伤",
+            "阴影", "孤独", "绝望", "天台", "轻生", "自杀",
+            "老师", "班主任", "同学", "学校", "初中", "高中",
+        ]
+        if any(kw in user_input for kw in exposure_signals):
+            va["_exposure_reminder"] = True  # 下游在 prompt 注入提醒
 
         # 【6】约定承诺类（需双方确认）
         user_proposing = any(kw in user_input for kw in ["约定", "答应", "承诺", "保证", "一定"])
@@ -1279,6 +1285,13 @@ def main():
         try:
             va = va_estimate(user_input)
             va_tier = get_va_tier(va['arousal'])
+            # VA 速度追踪：记录历史坐标，检测情绪弧阶段
+            from emotion.va_estimator import track_va as _track_va, va_phase_config as _phase_cfg
+            va_phase = _track_va(va['valence'], va['arousal'])
+            va['_phase'] = va_phase['phase']
+            va['_phase_cfg'] = _phase_cfg(va_phase['phase'])
+            if va_phase['phase'] != 'normal':
+                print(f"[VA追踪] {va_phase['phase']} v={va['valence']:.2f} a={va['arousal']:.2f} dv={va_phase['delta_v']:+.2f}")
         except Exception:
             va, va_tier = {"description": ""}, "mid"
 
@@ -1323,8 +1336,14 @@ def main():
         top_cards = []
         va_description = va.get('description', '') if va else ''
         try:
+            # 注入 VA 阶段配置
+            _phase_weights = dict(CUSTOM_WEIGHTS) if CUSTOM_WEIGHTS else {}
+            if va and va.get('_phase_cfg'):
+                _phase_weights['_phase_cfg'] = va['_phase_cfg']
             top_cards = retrieve(context_query, top_k=3, va_tier=va_tier, va_description=va_description,
-                            va_valence=va.get('valence') if va else None, weights=CUSTOM_WEIGHTS,
+                            va_valence=va.get('valence') if va else None,
+                            va_arousal=va.get('arousal') if va else None,
+                            weights=_phase_weights if _phase_weights else CUSTOM_WEIGHTS,
                             chord_bpm=va.get('chord_bpm'), chord_dynamic=va.get('chord_dynamic'),
                             chord_name=va.get('chord_name'))
             if top_cards:
@@ -1426,11 +1445,12 @@ def main():
             arb_reason = arbiter_judgment.get("reasoning", "")
 
             if arb_confidence < 0.3:
-                # 低置信度：禁止写卡，强制 AI 向用户确认
+                # 低置信度：仅阻断 待办/承诺 类写卡，深层/情感/偏好卡自由通行
                 full_context += (
                     f"【裁决者判定 — 意图极不确定（置信度 {arb_confidence:.2f}）】\n"
                     f"  理由: {arb_reason}\n"
-                    f"  本回复中你必须向用户确认意图，不得输出 propose_card 或 resolve_card。\n"
+                    f"  写卡限制：不得输出 todo/commitments/daily_life 类型的 propose_card。\n"
+                    f"  deep_talks/milestone/emotional/turning_points/preferences 类型的卡片不受此限制，按正常判断即可。\n"
                     f"  用自然的语气追问，比如\"你说的X是指Y还是Z？\"\n\n"
                 )
             elif arb_confidence >= 0.75:
@@ -1578,7 +1598,19 @@ def main():
                 "7.亲密请求→erotic | 8.笑点梗→interaction | 9.里程碑→milestone\n"
                 "10.时间锚定待办→todo（取快递、考试、生日、洗头、出门、外卖、技能测试……）\n"
                 "重要度1-10。重点关注：童年经历、未完成心愿、深层恐惧、长期孤独。\n"
+                "⚠️ deep_talks/milestone/turning_points 只能通过 <!-- propose_card: ... --> 由你主动创建，不会被自动触发。\n"
+                "当用户分享深层经历、价值观转变、人生关键节点时，你必须主动输出 propose_card。\n"
                 "用户一句话含多个独立事件时，为每个事件各写一张卡。\n"
+            )
+        # ── 暴露提醒：用户触及深层话题时，强制 AI 检查是否该建卡 ──
+        if va.get("_exposure_reminder"):
+            full_context += (
+                "【深层内容提醒】用户此轮消息触及童年/家庭/死亡/创伤/校园等深层话题。\n"
+                "请扫描现有卡片库判断：这些内容是否已有对应卡片？如果没有，你应当输出 propose_card（deep_talks/milestone）。\n"
+                "这是硬兜底提醒——即使你不确定，也请评估并给出结论。\n\n"
+            )
+        full_context += (
+            ""
                 "分类规则：有时间锚点但无承诺语气 → todo。有保证/发誓/答应语气 → commitments。\n"
                 "既有时间锚又有承诺语气（\"我保证今晚洗头\"\"周边到了一起拍开箱\"）→ 写两张：todo + commitments。\n"
                 "status_card 用于非完成的状态流转：<!-- status_card: ID|进行中 --> 或 <!-- status_card: ID|阻塞 -->\n"

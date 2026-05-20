@@ -394,11 +394,18 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
     if va_tier in ("low", "mid") and w.get('w_water', 0) > 0 and growth_bonus > 0:
         growth_bonus += w['w_water'] * 0.3
 
-    # ── ST-3: VA 同符号微加权（卡片级情绪标签增强水之共鸣） ──
+    # ── ST-3: VA 坐标距离加权（当前情绪 vs 卡片情绪签名） ──
     card_valence = card.get('valence', 0)
-    if va_valence is not None and card_valence != 0:
-        if (va_valence > 0 and card_valence > 0) or (va_valence < 0 and card_valence < 0):
-            water_smooth += 0.02
+    card_arousal = card.get('arousal', 0.5)
+    if va_valence is not None and (card_valence != 0 or card_arousal != 0.5):
+        import math as _math
+        cur_v = va_valence
+        cur_a = w.get('_va_arousal', 0.5)  # 当前唤醒度
+        # 坐标距离
+        va_dist = _math.sqrt((cur_v - card_valence)**2 + (cur_a - card_arousal)**2)
+        # 距离越近加分越多，最大 0.12，区分度足够
+        va_coord_bonus = max(0, 0.12 - va_dist * 0.08)
+        water_smooth += va_coord_bonus
 
     # ── 阶段4.2：和弦 BPM/动态加权 ──
     chord_bpm = w.get('_chord_bpm')
@@ -453,6 +460,7 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
 
 def retrieve(query: str, top_k: int = 3, weights: dict = None,
              va_tier: str = "mid", va_description: str = None, va_valence: float = None,
+             va_arousal: float = None,
              chord_bpm: int = None, chord_dynamic: str = None, chord_name: str = None) -> list:
     db_path = os.path.join(os.path.dirname(__file__), "cards.db")
 
@@ -469,6 +477,8 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
         effective_weights['_va_description'] = va_description
     if va_valence is not None:
         effective_weights['_va_valence'] = va_valence
+    if va_arousal is not None:
+        effective_weights['_va_arousal'] = va_arousal
     if chord_bpm is not None:
         effective_weights['_chord_bpm'] = chord_bpm
     if chord_dynamic is not None:
@@ -490,21 +500,50 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
             'dyn_tier': dyn_tier,
         }
 
-    if va_tier == "high":
-        # 共鸣优先：搜更宽、语义权重 ↑、关键词权重 ↓、关闭多样性
+    # ── VA 阶段配置：velocity tracker 覆盖 VA 门控 ──
+    phase_cfg = effective_weights.pop('_phase_cfg', None)
+
+    # ── 混合态检测 ──
+    COGNITIVE_KW = ['分析', '递归', 'debug', '为什么', '原因', '逻辑', '根因',
+                   '怎么', 'bug', 'code', '代码', '排查', '推导', '推理',
+                   '算', '多少', '推导', '论证', '反证', '追溯']
+    is_cognitive = any(kw in query.lower() for kw in COGNITIVE_KW)
+    mixed_mode = (va_tier == "high" and is_cognitive)
+
+    if phase_cfg:
+        # VA 阶段配置覆盖（三阶段情绪弧）
+        effective_weights['_fire_boost'] = phase_cfg.get('fire_boost', False)
+        diversity_enabled = phase_cfg.get('diversity_enabled', True)
+        effective_weights["w_water"] = w.get('w_water', 0.2) * phase_cfg.get('w_water_mult', 1.0)
+        effective_weights['_deep_boost'] = phase_cfg.get('deep_boost', False)
+        effective_weights["w_semantic"] = w.get("w_semantic", 1.0) * phase_cfg.get('semantic_mult', 1.0)
+        if phase_cfg.get('fire_boost'):
+            effective_weights['w_recency'] = w.get('w_recency', 0.3) * 1.3
+        phase_name = {k: v for k, v in phase_cfg.items() if isinstance(v, bool) and v}
+        print(f"[retriever] VA阶段覆盖: {list(phase_name.keys())}")
+    elif va_tier == "high" and not mixed_mode:
+        # 纯高唤醒：搜更宽、语义↑、关键词↓、多样性关闭、雷火放大
         effective_k = max(5, top_k)
         effective_weights["w_semantic"] = w.get("w_semantic", 1.0) * 1.5
         effective_weights["w_keyword"] = w.get("w_keyword", 1.5) * 0.5
         diversity_enabled = False
         semantic_k_mult = 5
-        # ── P2-2: 高唤醒雷/火探针放大 ──
         effective_weights['w_recency'] = w.get('w_recency', 0.3) * 1.5
         effective_weights['_fire_boost'] = True
+    elif mixed_mode:
+        # 混合态(一边哭一边递归): 火↑保持情感, 水↑分析平滑, 多样性ON, 语义温和
+        effective_weights["w_semantic"] = w.get("w_semantic", 1.0) * 1.2
+        effective_weights["w_keyword"] = w.get("w_keyword", 1.5) * 0.8
+        effective_weights['w_recency'] = w.get('w_recency', 0.3) * 1.3
+        effective_weights['_fire_boost'] = True
+        effective_weights["w_water"] = w.get('w_water', 0.2) * 1.5
+        diversity_enabled = True
+        semantic_k_mult = 4
+        print("[retriever] 混合态: 高唤醒+分析 → 火↑水↑ 多样性ON")
     elif va_tier == "low":
-        # 稳定陪伴：减少语义搜索范围、风扩散关闭、优先关键词
+        # 低唤醒：风扩散关闭、关键词优先、深度卡加成
         effective_weights["w_diffusion"] = 0
         semantic_k_mult = 2
-        # ── P1-4: 低唤醒深度卡锚定加成标记 ──
         effective_weights['_deep_boost'] = True
 
     # 加载锚定卡片集合
