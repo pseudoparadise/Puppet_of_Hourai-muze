@@ -1601,6 +1601,15 @@ def main():
                 "⚠️ deep_talks/milestone/turning_points 只能通过 <!-- propose_card: ... --> 由你主动创建，不会被自动触发。\n"
                 "当用户分享深层经历、价值观转变、人生关键节点时，你必须主动输出 propose_card。\n"
                 "用户一句话含多个独立事件时，为每个事件各写一张卡。\n"
+                "\n"
+                "【卡片内容撰写原则 — 区分字面含义与互动实质】\n"
+                "对于 interaction/erotic/emotional 类卡片，content 必须记录互动的情绪实质，而不是照抄技术表面：\n"
+                "  - 用户用代码/技术术语/抽象概念调情时（如 pip install couple、import ds_teacher、ModuleNotFoundError），\n"
+                "    这不是真实的工程任务。记录你们在玩什么梗、用什么黑话在互动，不要按字面写入。\n"
+                "  - 用户用比喻/隐喻表达情绪时，记录情绪本身，不是比喻的载体。\n"
+                "  - 简单自检：如果一张 interaction 卡的 content 读起来像一条系统运维工单，\n"
+                "    你就写错了——应该重写为「用户和DS用X梗在调情/互撩」。\n"
+                "  此原则不影响 todo/commitments/deep_talks/milestone 等事实/承诺类卡片。\n"
             )
         # ── 暴露提醒：用户触及深层话题时，强制 AI 检查是否该建卡 ──
         if va.get("_exposure_reminder"):

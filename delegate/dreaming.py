@@ -256,6 +256,15 @@ def chain_dream():
 
     if card_json.get("action") == "create":
         from delegate_tools import now_utc as _now4
+        # ── VA 估算：对今日对话做情绪估值，替代硬编码默认值 ──
+        try:
+            from emotion.va_estimator import estimate as va_estimate
+            va_result = va_estimate(digest)
+            chord_val = va_result.get("chord", "")
+            valence_val = va_result.get("valence", 0.0)
+            arousal_val = va_result.get("arousal", 0.5)
+        except Exception:
+            chord_val, valence_val, arousal_val = "", 0.0, 0.5
         card_draft = {
             "id": card_json.get("id", f"{_now4().strftime('%Y%m%d')}_auto"),
             "title": card_json.get("title", ""),
@@ -266,9 +275,9 @@ def chain_dream():
             "proposed_by": "dreaming",
             "proposed_at": _now4().isoformat(),
             "review_status": "pending",
-            "chord": "",
-            "valence": 0.0,
-            "arousal": 0.5
+            "chord": chord_val,
+            "valence": valence_val,
+            "arousal": arousal_val
         }
         _append_pending_card(card_draft)
         result["step3"] = card_draft

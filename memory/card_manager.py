@@ -49,15 +49,19 @@ class CardManager:
         btn_frame.pack(fill=tk.X, pady=5)
         ttk.Button(btn_frame, text="刷新待审列表", command=self.load_pending).pack(side=tk.LEFT, padx=5)
 
-        columns = ("title", "category", "importance", "content")
+        columns = ("title", "category", "importance", "valence", "arousal", "content")
         self.pending_tree = ttk.Treeview(self.pending_frame, columns=columns, show="headings", height=15)
         self.pending_tree.heading("title", text="标题")
         self.pending_tree.heading("category", text="分类")
         self.pending_tree.heading("importance", text="重要度")
+        self.pending_tree.heading("valence", text="效价")
+        self.pending_tree.heading("arousal", text="唤醒")
         self.pending_tree.heading("content", text="内容")
         self.pending_tree.column("title", width=120)
         self.pending_tree.column("category", width=80)
         self.pending_tree.column("importance", width=60)
+        self.pending_tree.column("valence", width=55)
+        self.pending_tree.column("arousal", width=55)
         self.pending_tree.column("content", width=400)
         self.pending_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         self.pending_tree.bind("<Double-1>", lambda e: self.show_card_detail())
@@ -92,6 +96,8 @@ class CardManager:
                 card.get("title", "无标题"),
                 card.get("category", "?"),
                 card.get("importance", "?"),
+                f"{card.get('valence', 0.0):+.1f}",
+                f"{card.get('arousal', 0.5):.1f}",
                 card.get("content", "")[:120]
             ), iid=card.get("id"))
 
@@ -236,12 +242,14 @@ class CardManager:
         ttk.Button(btn_frame, text="标记已解决", command=self.resolve_card).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="查看详情", command=self.show_card_detail).pack(side=tk.LEFT, padx=5)
 
-        columns = ("id", "title", "category", "importance", "days_remaining", "enabled", "resolved", "content")
+        columns = ("id", "title", "category", "importance", "valence", "arousal", "days_remaining", "enabled", "resolved", "content")
         self.final_tree = ttk.Treeview(self.final_frame, columns=columns, show="headings", height=12)
         self.final_tree.heading("id", text="卡片ID")
         self.final_tree.heading("title", text="标题")
         self.final_tree.heading("category", text="分类")
         self.final_tree.heading("importance", text="重要度")
+        self.final_tree.heading("valence", text="效价")
+        self.final_tree.heading("arousal", text="唤醒")
         self.final_tree.heading("days_remaining", text="剩余")
         self.final_tree.heading("enabled", text="活跃")
         self.final_tree.heading("resolved", text="已解决")
@@ -250,6 +258,8 @@ class CardManager:
         self.final_tree.column("title", width=110)
         self.final_tree.column("category", width=70)
         self.final_tree.column("importance", width=50)
+        self.final_tree.column("valence", width=55)
+        self.final_tree.column("arousal", width=55)
         self.final_tree.column("days_remaining", width=50)
         self.final_tree.column("enabled", width=40)
         self.final_tree.column("resolved", width=50)
@@ -271,6 +281,7 @@ class CardManager:
             c = conn.cursor()
             c.execute("""
                 SELECT id, title, category, importance,
+                       valence, arousal,
                        created_at, last_referenced_at, enabled_in_context, resolved,
                        COALESCE(content,'') as content
                 FROM cards WHERE review_status='final'
@@ -303,6 +314,8 @@ class CardManager:
                     row["title"],
                     row["category"],
                     row["importance"],
+                    f"{row['valence']:+.1f}" if row['valence'] is not None else "+0.0",
+                    f"{row['arousal']:.1f}" if row['arousal'] is not None else "0.5",
                     days_str,
                     "是" if row["enabled_in_context"] else "否",
                     "是" if row["resolved"] else "否",
@@ -401,17 +414,21 @@ class CardManager:
         btn_frame.pack(fill=tk.X, pady=5)
         ttk.Button(btn_frame, text="刷新休眠列表", command=self.load_dormant).pack(side=tk.LEFT, padx=5)
 
-        columns = ("id", "title", "category", "importance", "content")
+        columns = ("id", "title", "category", "importance", "valence", "arousal", "content")
         self.dormant_tree = ttk.Treeview(self.dormant_frame, columns=columns, show="headings", height=15)
         self.dormant_tree.heading("id", text="卡片ID")
         self.dormant_tree.heading("title", text="标题")
         self.dormant_tree.heading("category", text="分类")
         self.dormant_tree.heading("importance", text="重要度")
+        self.dormant_tree.heading("valence", text="效价")
+        self.dormant_tree.heading("arousal", text="唤醒")
         self.dormant_tree.heading("content", text="内容")
         self.dormant_tree.column("id", width=140)
         self.dormant_tree.column("title", width=100)
         self.dormant_tree.column("category", width=80)
         self.dormant_tree.column("importance", width=60)
+        self.dormant_tree.column("valence", width=55)
+        self.dormant_tree.column("arousal", width=55)
         self.dormant_tree.column("content", width=350)
         self.dormant_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         self.dormant_tree.bind("<Double-1>", lambda e: self.show_card_detail())
@@ -482,12 +499,15 @@ class CardManager:
         conn = sqlite3.connect(DB_PATH)
         try:
             c = conn.cursor()
-            c.execute("SELECT id, title, category, importance, content FROM cards WHERE review_status='final' AND enabled_in_context=0 ORDER BY id")
+            c.execute("SELECT id, title, category, importance, valence, arousal, content FROM cards WHERE review_status='final' AND enabled_in_context=0 ORDER BY id")
             rows = c.fetchall()
             for row in rows:
                 vals = list(row)
-                if len(vals) > 4:
-                    vals[4] = str(vals[4])[:150]
+                # 格式化 VA 值
+                vals[4] = f"{vals[4]:+.1f}" if vals[4] is not None else "+0.0"
+                vals[5] = f"{vals[5]:.1f}" if vals[5] is not None else "0.5"
+                if len(vals) > 6:
+                    vals[6] = str(vals[6])[:150]
                 self.dormant_tree.insert("", tk.END, values=vals, iid=row[0])
             self.dormant_status.config(text=f"共 {len(rows)} 张休眠卡片。")
         except Exception as e:
