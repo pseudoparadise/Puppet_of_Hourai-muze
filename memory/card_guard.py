@@ -41,17 +41,38 @@ def _cosine_similarity(vec_a, vec_b) -> float:
 
 
 def _is_semantic_dup(new_title: str, new_content: str,
-                     old_title: str, old_content: str) -> tuple[bool, float]:
+                     old_title: str, old_content: str,
+                     old_card_id: str = None) -> tuple[bool, float]:
     """
     用豆包 embedding 判断两张卡是否语义重复。
+    old_card_id 非空时从 DB 读旧卡已存 embedding（省一次调用）。
     返回 (is_dup, cosine_similarity)。
     """
     try:
+        import numpy as _np
         from encoder import embed
         new_text = new_title + " " + (new_content or "")
-        old_text = old_title + " " + (old_content or "")
         vec_new = embed(new_text)
-        vec_old = embed(old_text)
+
+        # ── 旧卡向量优先从 DB 缓存读取 ──
+        vec_old = None
+        if old_card_id:
+            try:
+                import sqlite3
+                _db = sqlite3.connect(os.path.join(PROJECT_ROOT, "memory", "cards.db"))
+                _c = _db.cursor()
+                _c.execute("SELECT embedding FROM cards WHERE id=?", (old_card_id,))
+                _row = _c.fetchone()
+                _db.close()
+                if _row and _row[0]:
+                    vec_old = _np.frombuffer(_row[0], dtype=_np.float32)
+            except Exception:
+                pass
+
+        if vec_old is None:
+            old_text = old_title + " " + (old_content or "")
+            vec_old = embed(old_text)
+
         sim = _cosine_similarity(vec_new, vec_old)
         print(f"[语义去重] 「{new_title}」 vs 「{old_title}」 cosine={sim:.3f} "
               f"threshold={EMBED_DUP_THRESHOLD}")
@@ -216,7 +237,7 @@ def check_before_write(title: str, content: str, user_input: str,
                 if oimp >= 8:
                     continue
 
-                is_dup, sim = _is_semantic_dup(title, content, otitle, ocontent)
+                is_dup, sim = _is_semantic_dup(title, content, otitle, ocontent, old_card_id=oid)
                 if not is_dup:
                     print(f"[语义去重] 「{title}」与「{otitle}」特征重叠({overlap})"
                           f"但语义不同，放行")
@@ -276,7 +297,8 @@ def check_before_write(title: str, content: str, user_input: str,
                     continue
 
                 is_dup, sim = _is_semantic_dup(title, content,
-                                               pc.get("title", ""), pc.get("content", ""))
+                                               pc.get("title", ""), pc.get("content", ""),
+                                               old_card_id=pc.get("id", ""))
                 if not is_dup:
                     print(f"[语义去重-pending] 「{title}」与「{pc.get('title','')}」"
                           f"特征重叠({overlap})但语义不同，放行")

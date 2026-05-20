@@ -8,6 +8,7 @@ __pycache__/
 config.json
 config.yaml
 chat_logs.json
+chat_logs_backup.json
 state.json
 trigger.log
 trigger_error.log
@@ -23,8 +24,15 @@ pending_cards.json
 anchor_set.json
 
 # ── 日记与滚动总结（私人内容） ──
-diary/*.md
+diary/
 rolling_summary.md
+
+# ── AI 提示词（写卡/裁决/日记 prompt） ──
+delegate/prompts/
+persona/prompt_v1.txt
+persona/prompt_v1_base.txt
+persona/backups/
+persona/miner_state.json
 
 # ── 快照与诊断文件 ──
 状态快照_*.txt
@@ -38,20 +46,4 @@ rolling_summary.md
 .idea/
 *.swp
 *.swo
-
-# ── 根目录重复文件（正版在子目录） ──
-/card_manager.py
-/create_db.py
-/dreaming.py
-/encoder.py
-/lifecycle.py
-/memory_manager.py
-/retriever.py
-/review.py
-/test_memory.py
-/va_estimator.py
-config.json 
-config.json 
-persona/prompt_v1.txt 
-persona/prompt_v1_base.txt 
-delegate/prompts/dreaming_diary.txt 
+*.swn
