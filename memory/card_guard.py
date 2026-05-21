@@ -230,6 +230,8 @@ def check_before_write(title: str, content: str, user_input: str,
 
                 if ocat in ('deep_talks', 'milestone', 'turning_points'):
                     continue
+                if otitle.startswith('口癖：') or otitle.startswith('梗：'):
+                    continue
                 old_text = (otitle + " " + (ocontent or "")).lower()
                 overlap = len(proposed_features & _extract_features(old_text))
                 if overlap < 2:
@@ -287,12 +289,16 @@ def check_before_write(title: str, content: str, user_input: str,
             removed = False
             new_pending = []
             for pc in pending:
-                ptext = (pc.get("title", "") + " " + pc.get("content", "")).lower()
+                ptitle = pc.get("title", "")
+                ptext = (ptitle + " " + pc.get("content", "")).lower()
                 overlap = len(proposed_features & _extract_features(ptext))
                 if overlap < 2:
                     new_pending.append(pc)
                     continue
                 if pc.get("importance", 5) >= 8:
+                    new_pending.append(pc)
+                    continue
+                if ptitle.startswith('口癖：') or ptitle.startswith('梗：'):
                     new_pending.append(pc)
                     continue
 

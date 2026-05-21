@@ -194,6 +194,19 @@ def get_va_tier(arousal: float) -> str:
 
 
 # ── EL-2: 虫洞跳跃 — 候选池构建（根据VA情绪和锚定集圈定语义搜索范围） ──
+def _safe_parse_ts(val):
+    """薄封装 delegate_tools.parse_time，兼容 datetime 对象和 None。"""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val
+    try:
+        from delegate_tools import parse_time
+        return parse_time(str(val))
+    except Exception:
+        return None
+
+
 def _build_candidate_pool(all_cards: list, anchor_ids: set, va_tier: str,
                           va_description: str = None, candidate_limit: int = 50) -> list:
     """
@@ -220,11 +233,10 @@ def _build_candidate_pool(all_cards: list, anchor_ids: set, va_tier: str,
             # 高唤醒：优先近7天新卡 + 日活高频卡（usage≥3）
             if card.get('created_at'):
                 try:
-                    created = datetime.fromisoformat(card['created_at'])
-                    if (now - created).days <= 7:
+                    created = _safe_parse_ts(card['created_at'])
+                    if created is not None and (now - created).days <= 7:
                         include = True
                 except Exception:
-                    print(f"[_build_candidate_pool] 日期解析失败 card_id={card.get('id', '?')}, created_at={card.get('created_at', 'None')}")
                     pass
             if not include and card.get('category') in DAILY_CATEGORIES and card.get('usage_count', 0) >= 3:
                 include = True
@@ -315,12 +327,13 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
         ref_date_str = card.get('last_referenced_at') or card.get('created_at')
         if ref_date_str:
             try:
-                ref_date = datetime.fromisoformat(ref_date_str)
-                days_ago = (datetime.now() - ref_date).days
-                if days_ago <= 7:
-                    recent_bonus = w['w_recency'] * (1 - days_ago / 7)
-                elif days_ago <= 14:
-                    recent_bonus = w['w_recency'] * 0.3  # 第二周残值
+                ref_date = _safe_parse_ts(ref_date_str)
+                if ref_date is not None:
+                    days_ago = (datetime.now() - ref_date).days
+                    if days_ago <= 7:
+                        recent_bonus = w['w_recency'] * (1 - days_ago / 7)
+                    elif days_ago <= 14:
+                        recent_bonus = w['w_recency'] * 0.3  # 第二周残值
             except:
                 pass
 

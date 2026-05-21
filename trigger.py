@@ -257,7 +257,19 @@ AI回复：{ai_reply[:200]}
             break
     return None
 
-# ── P3-2: 冷却检查（日活类10轮冷却，其他仅去重） ──
+# ── P3-2: 分类冷却配置 ──
+# cooldown > 0: N轮间隔 | 0: 无限制仅同session去重 | -1: 同session永久去重
+CATEGORY_COOLDOWN = {
+    'erotic': 15,        # 同一场景15轮从预热到色色
+    'interaction': 10,   # 防同一梗/口癖重复记录
+    'deep_talks': 5,     # 5轮沉淀，完整叙事
+    'commitments': -1,   # 永久去重：一个session一个约定只写一次
+    'todo': 5,           # 5轮基础冷却 + 额外embedding/AI/人三层去重
+    'daily_life': 10,
+    'emotional': 10,
+    'preferences': 10,
+}
+
 def _check_cooldown(written: dict, category: str, current_turn: int, cooldown: int) -> bool:
     """检查冷却状态（毒点41修复：添加语义文档）。
 
@@ -770,9 +782,12 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
 
             # ═══════════════════════════════════════════════════
             # 双事件兜底：写新卡前检索旧卡，重叠则视为完成信号
+            # deep_talks/milestone/turning_points 不参与此逻辑——它们不是待办，
+            # 不存在「旧事已完成，新信息替换」的模式。直接交给 card_guard 弹窗。
             # ═══════════════════════════════════════════════════
             blocked_by_overlap = False
-            try:
+            if category not in ('deep_talks', 'milestone', 'turning_points'):
+              try:
                 proposed_text = (title + " " + content).lower()
                 # 特征词提取（复用 mechanism B 的 _key_chars）
                 _STOP_CHARS = set('的了是在我有他个这着就和也要可会你他们来到说去为上对得大子能过下一地出道自以时年看没那天家开小成把前还但只想中里用生种起知好些间因所如然后其最她它已当两从方实更长应什')
@@ -799,8 +814,14 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                     _old_features = _extract_features(_old_text)
                     _overlap = len(proposed_features & _old_features)
                     if _overlap >= 2:  # 至少 2 个特征词重叠
+                        # 口癖/梗类卡片永远不参与 auto-resolve
+                        if _otitle.startswith('口癖：') or _otitle.startswith('梗：'):
+                            continue
                         # 安全阀：基石卡不自动 resolve
                         if _oimp and _oimp >= 8:
+                            continue
+                        # 仅 commitments/daily_life/todo 可被 auto-resolve
+                        if _ocat not in ('commitments', 'daily_life', 'todo'):
                             continue
                         from memory.memory_manager import should_auto_resolve as _sar3, resolve_card as _resolve_old
                         _allowed, _reason = _sar3(_oid, context_anchor=_parse_time_anchor(user_input))
@@ -825,7 +846,12 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                             _pfeatures = _extract_features(_ptext)
                             _poverlap = len(proposed_features & _pfeatures)
                             if _poverlap >= 2:
+                                _ptitle = _pc.get('title', '')
+                                if _ptitle.startswith('口癖：') or _ptitle.startswith('梗：'):
+                                    continue
                                 if _pc.get("importance", 5) >= 8:
+                                    continue
+                                if _pc.get('category', '') not in ('commitments', 'daily_life', 'todo'):
                                     continue
                                 print(f"[写卡拦截-pending] 新卡「{title}」与待审核卡「{_pc.get('title','')}」重叠({_poverlap})，丢弃新卡，移除旧待审核卡")
                                 blocked_by_overlap = True
@@ -837,8 +863,8 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                             print(f"[写卡拦截-pending] pending_cards.json 已更新，剩余 {len(_pending)} 张")
                     except Exception as _e3:
                         print(f"[写卡拦截-pending] 扫描跳过: {_e3}")
-            except Exception as e:
-                print(f"[写卡拦截] 检索跳过: {e}")
+              except Exception as e:
+                  print(f"[写卡拦截] 检索跳过: {e}")
 
             # ── 时间拒止通过后，card_guard embedding 语义去重 ──
             if not blocked_by_overlap:
@@ -861,19 +887,19 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                                     _p_all = [c for c in _p_all if c.get('id') != _p_conflict['old_card']['id']]
                                     from delegate_tools import atomic_write_json as _awj_p
                                     _awj_p(_pp_p, _p_all)
-                            if not session_cards_written or _check_cooldown(session_cards_written, category, current_turn, 0):
+                            if not session_cards_written or _check_cooldown(session_cards_written, category, current_turn, CATEGORY_COOLDOWN.get(category, 0)):
                                 write_pending_card(card_draft)
                                 if session_cards_written is not None:
                                     session_cards_written[category] = current_turn
                         elif action == 'keep_both':
-                            if not session_cards_written or _check_cooldown(session_cards_written, category, current_turn, 0):
+                            if not session_cards_written or _check_cooldown(session_cards_written, category, current_turn, CATEGORY_COOLDOWN.get(category, 0)):
                                 write_pending_card(card_draft)
                                 if session_cards_written is not None:
                                     session_cards_written[category] = current_turn
                         # 'discard' → blocked
                     else:
                         print(f"[写卡拦截] 已拦截: {_p_reason}")
-                elif not session_cards_written or _check_cooldown(session_cards_written, category, current_turn, 0):
+                elif not session_cards_written or _check_cooldown(session_cards_written, category, current_turn, CATEGORY_COOLDOWN.get(category, 0)):
                     write_pending_card(card_draft)
                     if session_cards_written is not None:
                         session_cards_written[category] = current_turn
@@ -1001,7 +1027,42 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 "time_anchor": _parse_time_anchor(user_input)
             }
             # ── P1-3: 同 session 同 category 去重 ──
-            cooldown = 10 if triggered_category in {'daily_life','emotional','preferences'} else 0
+            cooldown = CATEGORY_COOLDOWN.get(triggered_category, 0)
+            # ── 跨轮去重：FAISS 预检，避免同一话题反复产卡 ──
+            _auto_skip = False
+            try:
+                from encoder import embed as _embed_pre, load_index as _load_pre, search_index as _search_pre
+                import numpy as _np_pre
+                _pre_vec = _embed_pre(title + ' ' + content)
+                _pre_idx = _load_pre()
+                if _pre_idx.ntotal > 0:
+                    _pre_neighbors = _search_pre(_pre_idx, _pre_vec, k=3)
+                    if _pre_neighbors:
+                        _pre_ids = [nid for nid, _ in _pre_neighbors]
+                        import sqlite3 as _sql_pre
+                        _pre_db = _sql_pre.connect(os.path.join(PROJECT_ROOT, "memory", "cards.db"))
+                        _pre_c = _pre_db.cursor()
+                        _pre_c.execute(
+                            "SELECT id, title, embedding FROM cards WHERE id IN ({}) AND review_status='final'"
+                            .format(','.join(['?' for _ in _pre_ids])),
+                            _pre_ids
+                        )
+                        for _pid, _ptitle, _peblob in _pre_c.fetchall():
+                            if _peblob is None:
+                                continue
+                            _pevec = _np_pre.frombuffer(_peblob, dtype=_np_pre.float32)
+                            _pdot = _np_pre.dot(_pre_vec, _pevec)
+                            _pnorm = _np_pre.linalg.norm(_pre_vec) * _np_pre.linalg.norm(_pevec)
+                            _pcos = float(_pdot / _pnorm) if _pnorm > 0 else 0.0
+                            if _pcos >= 0.70:
+                                print(f"[跨轮抑制] 「{title}」与已有卡「{_ptitle}」语义重复(cos={_pcos:.3f})，跳过")
+                                _auto_skip = True
+                                break
+                        _pre_db.close()
+            except Exception:
+                pass
+            if _auto_skip:
+                continue
             # ── 写卡拦截器：auto-trigger 路径也检查 ──
             from memory.card_guard import check_before_write as _guard_check, show_conflict_popup
             _should_block, _block_reason, _conflict = _guard_check(title, content, user_input, card_draft)
@@ -1030,6 +1091,34 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 else:
                     print(f"[写卡拦截-auto] 已拦截: {_block_reason}")
             elif not session_cards_written or _check_cooldown(session_cards_written, triggered_category, current_turn, cooldown):
+                # 同轮同 category 去重：embedding 快速比对，cos>=0.7 丢弃
+                if session_cards_written and triggered_category in session_cards_written:
+                    _should_skip = False
+                    try:
+                        from encoder import embed as _embed_dedup
+                        import numpy as _np_dedup
+                        _this_text = title + ' ' + content
+                        _this_vec = _embed_dedup(_this_text)
+                        _pp_dedup = os.path.join(PROJECT_ROOT, "memory", "pending_cards.json")
+                        if os.path.exists(_pp_dedup):
+                            with open(_pp_dedup, "r", encoding="utf-8") as _pf_dedup:
+                                _pend_all = json.load(_pf_dedup)
+                            for _pc_dedup in _pend_all:
+                                if _pc_dedup.get('category') != triggered_category:
+                                    continue
+                                _pt = _pc_dedup.get('title', '') + ' ' + (_pc_dedup.get('content', '') or '')
+                                _pv = _embed_dedup(_pt)
+                                _dot = _np_dedup.dot(_this_vec, _pv)
+                                _norm = _np_dedup.linalg.norm(_this_vec) * _np_dedup.linalg.norm(_pv)
+                                _cos = float(_dot / _norm) if _norm > 0 else 0.0
+                                if _cos >= 0.70:
+                                    print(f'[同轮去重] 「{title}」与同轮卡「{_pc_dedup.get("title","?")}」语义重复(cos={_cos:.3f})，丢弃')
+                                    _should_skip = True
+                                    break
+                    except Exception:
+                        pass
+                    if _should_skip:
+                        continue
                 write_pending_card(card_draft)
                 if session_cards_written is not None:
                     session_cards_written[triggered_category] = current_turn
@@ -1399,6 +1488,41 @@ def main():
         except Exception as e:
             print(f"[用户消息] 日志跳过: {e}")
 
+        # ── /recover 命令：从 chat_log 恢复最近 N 轮对话注入 recent ──
+        if user_input.strip().lower().startswith("/recover"):
+            parts_rec = user_input.strip().split()
+            n_rounds = int(parts_rec[1]) if len(parts_rec) > 1 and parts_rec[1].isdigit() else 5
+            try:
+                rec_entries = []
+                chat_path_rec = os.path.join(PROJECT_ROOT, "chat_logs.json")
+                if os.path.exists(chat_path_rec):
+                    with open(chat_path_rec, "r", encoding="utf-8") as rf:
+                        for line in rf:
+                            try:
+                                rec_entries.append(json.loads(line.strip()))
+                            except Exception:
+                                pass
+                # 取最近 N 轮 user+ghost 配对
+                rec_pairs = []
+                rec_user = None
+                for entry in rec_entries[-n_rounds * 3:]:  # 多取一些兜底
+                    role = entry.get("role", "")
+                    content = entry.get("content", "")
+                    if role == "user":
+                        rec_user = content
+                    elif role == "ghost" and rec_user is not None:
+                        rec_pairs.append({"user": rec_user, "assistant": content})
+                        rec_user = None
+                if rec_pairs:
+                    recent.extend(rec_pairs[-n_rounds:])
+                    print(f"[恢复] 已从 chat_log 注入 {min(n_rounds, len(rec_pairs))} 轮对话到 recent")
+                else:
+                    print("[恢复] chat_log 中未找到可恢复的对话轮次")
+            except Exception as e_rec:
+                print(f"[恢复] 失败: {e_rec}")
+            print()
+            continue
+
         turn_counter += 1
         current_turn = turn_counter
 
@@ -1413,6 +1537,23 @@ def main():
             va['_phase_cfg'] = _phase_cfg(va_phase['phase'])
             if va_phase['phase'] != 'normal':
                 print(f"[VA追踪] {va_phase['phase']} v={va['valence']:.2f} a={va['arousal']:.2f} dv={va_phase['delta_v']:+.2f}")
+            # ── VA 落盘：每轮情绪坐标写入日志供复盘 ──
+            try:
+                from delegate_tools import now_utc as _va_now, fmt_time as _va_fmt
+                _va_log_path = os.path.join(PROJECT_ROOT, "memory", "va_log.jsonl")
+                _va_entry = {
+                    "timestamp": _va_fmt(_va_now()),
+                    "valence": va['valence'],
+                    "arousal": va['arousal'],
+                    "va_tier": va_tier,
+                    "phase": va_phase['phase'],
+                    "delta_v": va_phase.get('delta_v', 0),
+                    "user_input": user_input[:120],
+                }
+                with open(_va_log_path, "a", encoding="utf-8") as _vf:
+                    _vf.write(json.dumps(_va_entry, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
         except Exception:
             va, va_tier = {"description": ""}, "mid"
 
