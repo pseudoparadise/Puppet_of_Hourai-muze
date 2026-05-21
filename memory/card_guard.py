@@ -3,14 +3,14 @@ card_guard.py — 共享的写卡前置检查（拦截器 + 垃圾过滤 + embed
 供 trigger.py 的 propose_card 路径和 auto-trigger 路径共同调用。
 """
 import os, re, sqlite3, json, sys, tkinter as tk
+from shared import zh_stop_chars, zh_extract_features
+_STOP_CHARS = zh_stop_chars()  # compat
 from tkinter import messagebox
 
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-_STOP_CHARS = set('的了是在我有他个这着就和也要可会你他们来到说去为上对得大子能过下一地出道自以时年看没那天家开小成把前还但只想中里用生种起知好些间因所如然后其最她它已当两从方实长更应什')
 
 # ── embedding 语义去重阈值：cosine ≥ 此值视为同一件事 ──
 EMBED_DUP_THRESHOLD = 0.75
@@ -223,7 +223,7 @@ def check_before_write(title: str, content: str, user_input: str,
     _new_is_short_term = _is_short_term_timed(new_card_context)
 
     proposed_text = (title + " " + content).lower()
-    proposed_features = _extract_features(proposed_text)
+    proposed_features = zh_extract_features(proposed_text)
     new_ctx = new_card_context or {}
 
     # 扫 cards.db
@@ -250,7 +250,7 @@ def check_before_write(title: str, content: str, user_input: str,
                 if otitle.startswith('口癖：') or otitle.startswith('梗：'):
                     continue
                 old_text = (otitle + " " + (ocontent or "")).lower()
-                overlap = len(proposed_features & _extract_features(old_text))
+                overlap = len(proposed_features & zh_extract_features(old_text))
                 if overlap < 2:
                     continue
                 if oimp >= 8:
@@ -313,7 +313,7 @@ def check_before_write(title: str, content: str, user_input: str,
             for pc in pending:
                 ptitle = pc.get("title", "")
                 ptext = (ptitle + " " + pc.get("content", "")).lower()
-                overlap = len(proposed_features & _extract_features(ptext))
+                overlap = len(proposed_features & zh_extract_features(ptext))
                 if overlap < 2:
                     new_pending.append(pc)
                     continue

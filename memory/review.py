@@ -18,18 +18,8 @@ PENDING_PATH = os.path.join(os.path.dirname(__file__), "pending_cards.json")
 DB_PATH = os.path.join(os.path.dirname(__file__), "cards.db")
 
 def load_pending():
-    if not os.path.exists(PENDING_PATH):
-        return []
-    try:
-        with open(PENDING_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except json.JSONDecodeError as e:
-        import shutil
-        from datetime import datetime
-        backup = PENDING_PATH + ".corrupted_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-        shutil.copy2(PENDING_PATH, backup)
-        print(f"[review] 警告: pending_cards.json 损坏({e.lineno}:{e.colno})，已备份至 {os.path.basename(backup)}，重建空列表")
-        return []
+    from shared import load_json_safe
+    return load_json_safe(PENDING_PATH, default=[], label="review")
 
 def save_pending(pending_list):
     with open(PENDING_PATH, "w", encoding="utf-8") as f:

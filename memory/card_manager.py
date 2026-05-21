@@ -149,18 +149,8 @@ class CardManager:
         self.status_label.config(text=f"卡片 {card_id} 已删除。")
 
     def _load_pending_list(self):
-        if not os.path.exists(PENDING_PATH):
-            return []
-        try:
-            with open(PENDING_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except json.JSONDecodeError as e:
-            import shutil
-            from datetime import datetime
-            backup = PENDING_PATH + ".corrupted_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-            shutil.copy2(PENDING_PATH, backup)
-            print(f"[card_manager] 警告: pending_cards.json 损坏({e.lineno}:{e.colno})，已备份至 {os.path.basename(backup)}，重建空列表")
-            return []
+        from shared import load_json_safe
+        return load_json_safe(PENDING_PATH, default=[], label="card_manager")
 
     def _save_pending_list(self, pending_list):
         # ── 毒点33修复：原子写入，避免 GUI 与后台并发截断 ──

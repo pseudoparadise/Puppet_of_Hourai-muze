@@ -124,19 +124,8 @@ def _update_rolling_summary(new_summary: str, date_str: str = None):
 def _append_pending_card(card: dict):
     """将卡片草稿写入 pending_cards.json（毒点5修复 — 委托 delegate_tools.atomic_write_json）"""
     from delegate_tools import atomic_write_json
-    if os.path.exists(PENDING_CARDS_PATH):
-        try:
-            with open(PENDING_CARDS_PATH, "r", encoding="utf-8") as f:
-                pending = json.load(f)
-        except json.JSONDecodeError as e:
-            import shutil
-            from datetime import datetime
-            backup = PENDING_CARDS_PATH + ".corrupted_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-            shutil.copy2(PENDING_CARDS_PATH, backup)
-            print(f"[dreaming] ⚠ pending_cards.json 损坏({e.lineno}:{e.colno})，已备份至 {os.path.basename(backup)}，重建空列表")
-            pending = []
-    else:
-        pending = []
+    from shared import load_json_safe
+    pending = load_json_safe(PENDING_CARDS_PATH, default=[], label="dreaming")
     # ── 预存 embedding 向量，供 card_guard 去重直接比对 ──
     if '_embed_vec' not in card:
         try:

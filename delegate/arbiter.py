@@ -146,16 +146,10 @@ diary_todos (近3天四象限待办): {diary_str}"""
 def _fallback_judge(user_input, pending_cards, recent_cards,
                     has_complete_kw, hard_new_kw):
     """降级裁决：纯本地关键词 + 特征重叠，不调 API。"""
-    _STOP = set('的了是在我有他个这着就和也要会可你他们来到说去为上对得大子能过下一地出道自以时年看没那天家开小成把前还但只想中里用生种起知好些间因所如然后其最她它已当两从方实长更应什')
+    from shared import zh_stop_chars as _get_stop, zh_extract_features
+    _STOP = _get_stop()
 
-    def _features(s):
-        s = s.lower()
-        chars = set(re.findall(r'[一-鿿]', s)) - _STOP
-        for t in re.findall(r'[a-z][a-z0-9]+', s):
-            chars.add(t)
-        return chars
-
-    user_feats = _features(user_input)
+    user_feats = zh_extract_features(user_input)
 
     # ── 过期检测：用户说"还没/忘了/拖延"，匹配 pending/recent 卡，无完成信号 → overdue ──
     overdue_kw = ["还没", "忘了", "没洗", "没做", "拖延", "没拿", "还没做", "忘记"]
@@ -164,7 +158,7 @@ def _fallback_judge(user_input, pending_cards, recent_cards,
         best_id, best_score = None, 0
         for c in all_cards:
             ctext = (c.get("title", "") + " " + (c.get("content", "") or "")).lower()
-            score = len(user_feats & _features(ctext))
+            score = len(user_feats & zh_extract_features(ctext))
             if score > best_score:
                 best_id, best_score = c.get("id", ""), score
         if best_id and best_score >= 2:
@@ -180,7 +174,7 @@ def _fallback_judge(user_input, pending_cards, recent_cards,
     if not has_complete_kw:
         for pc in pending_cards:
             ptext = (pc.get("title", "") + " " + (pc.get("content", "") or "")).lower()
-            score = len(user_feats & _features(ptext))
+            score = len(user_feats & zh_extract_features(ptext))
             if score >= 4:  # 高重叠 → 同一事件，用户在补充信息
                 return {
                     "judgment": "update",
@@ -196,7 +190,7 @@ def _fallback_judge(user_input, pending_cards, recent_cards,
         for c in all_cards:
             cid = c.get("id", "")
             ctext = (c.get("title", "") + " " + (c.get("content", "") or "")).lower()
-            score = len(user_feats & _features(ctext))
+            score = len(user_feats & zh_extract_features(ctext))
             if score > best_score:
                 best_id, best_score = cid, score
         if best_id and best_score >= 2:
@@ -222,7 +216,7 @@ def _fallback_judge(user_input, pending_cards, recent_cards,
         # 检查是否有轻微重叠
         for pc in pending_cards:
             ptext = (pc.get("title", "") + " " + (pc.get("content", "") or "")).lower()
-            if len(user_feats & _features(ptext)) >= 1:
+            if len(user_feats & zh_extract_features(ptext)) >= 1:
                 return {
                     "judgment": "ambiguous",
                     "confidence": 0.5,

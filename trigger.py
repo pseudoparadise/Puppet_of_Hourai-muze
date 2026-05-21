@@ -172,17 +172,8 @@ def detect_refs_by_keywords(reply: str, cards: list) -> list:
 def write_pending_card(card_draft: dict):
     from delegate_tools import atomic_write_json
     pending_path = os.path.join(PROJECT_ROOT, "memory", "pending_cards.json")
-    pending = []
-    if os.path.exists(pending_path):
-        try:
-            with open(pending_path, "r", encoding="utf-8") as f:
-                pending = json.load(f)
-        except json.JSONDecodeError as e:
-            import shutil
-            backup = pending_path + ".corrupted_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-            shutil.copy2(pending_path, backup)
-            print(f"[卡片提议] ⚠ pending_cards.json 损坏({e.lineno}:{e.colno})，已备份至 {os.path.basename(backup)}，重建空列表")
-            pending = []
+    from shared import load_json_safe as _load_safe
+    pending = _load_safe(pending_path, default=[], label="卡片提议")
     # ── 预存 embedding 向量：写入时即调 embed，供 card_guard 去重直接比对 ──
     if '_embed_vec' not in card_draft:
         try:
@@ -808,15 +799,8 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
             if category not in ('deep_talks', 'milestone', 'turning_points'):
               try:
                 proposed_text = (title + " " + content).lower()
-                # 特征词提取（复用 mechanism B 的 _key_chars）
-                _STOP_CHARS = set('的了是在我有他个这着就和也要可会你他们来到说去为上对得大子能过下一地出道自以时年看没那天家开小成把前还但只想中里用生种起知好些间因所如然后其最她它已当两从方实更长应什')
-                def _extract_features(s):
-                    s = s.lower()
-                    chars = set(re.findall(r'[一-鿿]', s)) - _STOP_CHARS
-                    for t in re.findall(r'[a-z][a-z0-9]+', s):
-                        chars.add(t)
-                    return chars
-                proposed_features = _extract_features(proposed_text)
+                from shared import zh_extract_features
+                proposed_features = zh_extract_features(proposed_text)
 
                 # 扫未解决卡片
                 _odb = os.path.join(PROJECT_ROOT, "memory", "cards.db")
@@ -830,7 +814,7 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                     if _ocat in ('deep_talks', 'milestone', 'turning_points'):
                         continue
                     _old_text = (_otitle + " " + (_ocontent or "")).lower()
-                    _old_features = _extract_features(_old_text)
+                    _old_features = zh_extract_features(_old_text)
                     _overlap = len(proposed_features & _old_features)
                     if _overlap >= 2:  # 至少 2 个特征词重叠
                         # 口癖/梗类卡片永远不参与 auto-resolve
@@ -876,7 +860,7 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                                 blocked_by_overlap = True
                                 _pending_removed = True
                         if _pending_removed:
-                            _pending = [_pc for _pc in _pending if _pc.get("title", "") != title or len(_extract_features((_pc.get("title","")+" "+_pc.get("content","")).lower()) & proposed_features) < 2]
+                            _pending = [_pc for _pc in _pending if _pc.get("title", "") != title or len(zh_extract_features((_pc.get("title","")+" "+_pc.get("content","")).lower()) & proposed_features) < 2]
                             from delegate_tools import atomic_write_json as _awj3
                             _awj3(_pp, _pending)
                             print(f"[写卡拦截-pending] pending_cards.json 已更新，剩余 {len(_pending)} 张")
@@ -1169,13 +1153,7 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                         _kw_overlap = len(_new_kws & _old_kws)
                         # 需要≥2个关键词重叠，或1个重叠+标题/内容特征重叠≥3
                         import re as _re_pc
-                        _STOP3 = set('的了是在我有他个这着就和也要会可你他们来到说去为上对得大子能过下一地出道自以时年看没那天家开小成把前还但只想中里用生种起知好些间因所如然后其最她它已当两从方实长更应什')
-                        def _feat3(s):
-                            s = s.lower()
-                            chars = set(_re_pc.findall(r'[一-鿿]', s)) - _STOP3
-                            for t in _re_pc.findall(r'[a-z][a-z0-9]+', s):
-                                chars.add(t)
-                            return chars
+                        from shared import zh_stop_chars as _gst3, zh_extract_features as _feat3
                         _title_overlap = len(_feat3(title) & _feat3(_ptitle))
                         if _kw_overlap >= 2 or (_kw_overlap >= 1 and _title_overlap >= 3):
                             from memory.memory_manager import should_auto_resolve as _sar2, resolve_card as _resolve_old
