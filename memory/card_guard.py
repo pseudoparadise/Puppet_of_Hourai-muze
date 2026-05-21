@@ -42,11 +42,11 @@ def _cosine_similarity(vec_a, vec_b) -> float:
 
 def _is_semantic_dup(new_title: str, new_content: str,
                      old_title: str, old_content: str,
-                     old_card_id: str = None) -> tuple[bool, float]:
+                     old_card_id: str = None,
+                     old_vec = None) -> tuple[bool, float]:
     """
-    用豆包 embedding 判断两张卡是否语义重复。
-    old_card_id 非空时从 DB 读旧卡已存 embedding（省一次调用）。
-    返回 (is_dup, cosine_similarity)。
+    用豆包 embedding 判断两张卡是否语义重复。返回 (is_dup, cosine_similarity)。
+    旧卡向量优先级：old_vec（预存） > DB 缓存 > embed(old_text)。
     """
     try:
         import numpy as _np
@@ -54,9 +54,11 @@ def _is_semantic_dup(new_title: str, new_content: str,
         new_text = new_title + " " + (new_content or "")
         vec_new = embed(new_text)
 
-        # ── 旧卡向量优先从 DB 缓存读取 ──
+        # ── 旧卡向量：预存 > DB > 实时 embed ──
         vec_old = None
-        if old_card_id:
+        if old_vec is not None:
+            vec_old = _np.array(old_vec, dtype=_np.float32)
+        elif old_card_id:
             try:
                 import sqlite3
                 _db = sqlite3.connect(os.path.join(PROJECT_ROOT, "memory", "cards.db"))
@@ -205,6 +207,21 @@ def check_before_write(title: str, content: str, user_input: str,
     if is_garbage_title(title):
         return True, f"垃圾标题拦截: 「{title}」", None
 
+    # ── 短期定时待办：不同时间点的同一动作不应语义去重 ──
+    def _is_short_term_timed(new_ctx_dict):
+        tdate = (new_ctx_dict or {}).get('target_date', '')
+        if not tdate:
+            return False
+        try:
+            from datetime import datetime as _dt_st, timedelta as _td_st
+            target_dt = _dt_st.fromisoformat(tdate)
+            if (_dt_st.now() + _td_st(hours=24)) >= target_dt:
+                return True
+        except Exception:
+            pass
+        return False
+    _new_is_short_term = _is_short_term_timed(new_card_context)
+
     proposed_text = (title + " " + content).lower()
     proposed_features = _extract_features(proposed_text)
     new_ctx = new_card_context or {}
@@ -238,6 +255,11 @@ def check_before_write(title: str, content: str, user_input: str,
                     continue
                 if oimp >= 8:
                     continue
+                # 短期定时待办：不同时间锚点的不做语义去重
+                if _new_is_short_term:
+                    old_tdate = row['target_date'] or ''
+                    if old_tdate and old_tdate != (new_ctx or {}).get('target_date', ''):
+                        continue
 
                 is_dup, sim = _is_semantic_dup(title, content, otitle, ocontent, old_card_id=oid)
                 if not is_dup:
@@ -301,10 +323,17 @@ def check_before_write(title: str, content: str, user_input: str,
                 if ptitle.startswith('口癖：') or ptitle.startswith('梗：'):
                     new_pending.append(pc)
                     continue
+                # 短期定时待办：不同时间锚点的不做语义去重
+                if _new_is_short_term:
+                    old_tdate = pc.get('target_date', '') or ''
+                    if old_tdate and old_tdate != (new_ctx or {}).get('target_date', ''):
+                        new_pending.append(pc)
+                        continue
 
                 is_dup, sim = _is_semantic_dup(title, content,
                                                pc.get("title", ""), pc.get("content", ""),
-                                               old_card_id=pc.get("id", ""))
+                                               old_card_id=pc.get("id", ""),
+                                               old_vec=pc.get('_embed_vec'))
                 if not is_dup:
                     print(f"[语义去重-pending] 「{title}」与「{pc.get('title','')}」"
                           f"特征重叠({overlap})但语义不同，放行")

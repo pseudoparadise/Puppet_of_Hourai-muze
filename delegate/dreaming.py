@@ -137,6 +137,14 @@ def _append_pending_card(card: dict):
             pending = []
     else:
         pending = []
+    # ── 预存 embedding 向量，供 card_guard 去重直接比对 ──
+    if '_embed_vec' not in card:
+        try:
+            from encoder import embed as _embed_dream
+            _dv = _embed_dream(card.get('title', '') + ' ' + card.get('content', ''))
+            card['_embed_vec'] = _dv.tolist()
+        except Exception:
+            pass
     pending.append(card)
     # ── 交叉检查：语义去重 ──
     try:

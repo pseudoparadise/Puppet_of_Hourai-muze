@@ -247,7 +247,7 @@ def main():
     actions_pool = ["发Bark推送", "继续沉睡"]
     prompt = f"""{JAILBREAK_PREFIX}{RP_DECLARATION}\n\n{bark_persona}
 
-我在后台安静地看着你。你已经沉默 {round(silence_minutes)} 分钟了。当前时间：{now_local.strftime('%Y-%m-%d %H:%M')}。
+我在后台安静地看着你。你已经沉默 {round(silence_minutes)} 分钟了。当前北京时间：{now_local.strftime('%Y-%m-%d %H:%M')}（请严格以此时间为准，不要自行推断凌晨/上午/下午，直接引用该时间判断时段）。
 
 我在这里阅读着你的回忆与今日的点滴：
 ---

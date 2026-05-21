@@ -183,10 +183,29 @@ def write_pending_card(card_draft: dict):
             shutil.copy2(pending_path, backup)
             print(f"[卡片提议] ⚠ pending_cards.json 损坏({e.lineno}:{e.colno})，已备份至 {os.path.basename(backup)}，重建空列表")
             pending = []
+    # ── 预存 embedding 向量：写入时即调 embed，供 card_guard 去重直接比对 ──
+    if '_embed_vec' not in card_draft:
+        try:
+            from encoder import embed as _embed_pending
+            _pv = _embed_pending(card_draft.get('title', '') + ' ' + card_draft.get('content', ''))
+            card_draft['_embed_vec'] = _pv.tolist()  # 2048 维 float 列表
+        except Exception:
+            pass
     pending.append(card_draft)
     try:
         atomic_write_json(pending_path, pending)
         print(f"[卡片提议] 草稿已写入 pending: {card_draft['id']}")
+        # 短期定时待办即时反馈
+        if card_draft.get('category') == 'todo' and card_draft.get('target_date'):
+            try:
+                from datetime import datetime as _fb_dt, timezone as _fb_tz, timedelta as _fb_td
+                _fb_target = _fb_dt.fromisoformat(card_draft['target_date'])
+                _fb_now = _fb_dt.now(_fb_tz.utc) + _fb_td(hours=8)
+                _fb_diff = (_fb_target - _fb_now).total_seconds()
+                if 0 < _fb_diff < 86400:
+                    print(f"  ⏰ [待办登记] {_fb_target.strftime('%H:%M')} — {card_draft['title']}")
+            except Exception:
+                pass
     except Exception as e:
         print(f"[卡片提议] 写入失败: {e}")
 
@@ -926,7 +945,8 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
         plan_words = ["今天", "明天", "周末", "下周", "下个星期", "下个月", "以后",
                       "要去", "准备去", "打算", "想去", "想去看", "想去做",
                       "等会", "等会儿", "马上要", "快要", "就要", "一会", "要到了",
-                      "之前一定", "之前肯定", "之前得"]
+                      "之前一定", "之前肯定", "之前得",
+                      "叫我去", "提醒我", "发bark", "分钟后"]
         if any(kw in user_input for kw in plan_words):
             triggered.append(("todo", 7))
 
@@ -968,6 +988,10 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                             va["_exposure_reminder"] = True
                             print(f"[暴露检测] 用户输入与{_ecat}卡「{_eid}」语义相似(cos={_cos_sim:.3f})，注入提醒")
                             _exposure_detected = True
+                            # 高置信度 (cos≥0.70)：自动触发 deep_talks 写卡，复用 auto-trigger 管线
+                            if _cos_sim >= 0.70 and ("deep_talks", 8) not in triggered:
+                                triggered.append(("deep_talks", 8))
+                                print(f"[暴露检测] cos≥0.70 → 自动触发 deep_talks 写卡")
                             break
                     _exp_db.close()
         except Exception as _exp_e:
@@ -1009,6 +1033,10 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 keywords = refined.get("keywords", triggered_category)
             else:
                 title, content, keywords = user_input[:30], user_input, triggered_category
+            # 垃圾拦截：refine 返回空内容/无意义占位 → 丢弃
+            if content in ("无", "暂无", "无明确承诺") or "未发现" in content or "没有承诺" in content:
+                print(f"[卡片] refine 返回空内容「{content}」，丢弃 {triggered_category} 卡")
+                continue
             from delegate_tools import now_utc as _now2
             card_draft = {
                 "id": f"{_now2().strftime('%Y%m%d')}_{title}",
@@ -1476,6 +1504,41 @@ def main():
             print()
             continue
 
+        # ── /todos 命令：列出当前活跃待办池 ──
+        if user_input.strip().lower() in ("/todos", "/todo"):
+            try:
+                import sqlite3
+                _tdb = sqlite3.connect(os.path.join(PROJECT_ROOT, "memory", "cards.db"))
+                _tdb.row_factory = sqlite3.Row
+                _tc = _tdb.cursor()
+                _tc.execute(
+                    "SELECT id, title, target_date, importance, category FROM cards "
+                    "WHERE review_status='final' AND resolved=0 "
+                    "AND category IN ('todo','commitments','daily_life') "
+                    "ORDER BY target_date ASC LIMIT 20"
+                )
+                _todos = _tc.fetchall()
+                _tdb.close()
+                if _todos:
+                    print(f"\n{'='*50}")
+                    print(f"  📋 活跃待办池 ({len(_todos)} 项)")
+                    print(f"{'='*50}")
+                    from datetime import datetime as _tdt, timezone as _ttz, timedelta as _ttd
+                    _now = _tdt.now(_ttz.utc) + _ttd(hours=8)
+                    for _t in _todos:
+                        _tdate = _t['target_date'] or '无期限'
+                        _icon = "⏰" if _tdate != '无期限' else "📌"
+                        _cat = _t['category'][:4] if _t['category'] else '?'
+                        print(f"  {_icon} [{_cat}] {_t['title'][:40]}")
+                        print(f"      到期: {_tdate}  |  imp={_t['importance']}")
+                    print(f"{'='*50}\n")
+                else:
+                    print("[待办池] 暂无活跃待办。")
+            except Exception as e:
+                print(f"[待办池] 查询失败: {e}")
+            print()
+            continue
+
         # ── 同步活跃时间：告诉轮询用户还在活动 ──
         _sync_last_active()
 
@@ -1548,6 +1611,7 @@ def main():
                     "va_tier": va_tier,
                     "phase": va_phase['phase'],
                     "delta_v": va_phase.get('delta_v', 0),
+                    "mixed_mode": va_tier == "high" and va_phase['phase'] != 'normal',
                     "user_input": user_input[:120],
                 }
                 with open(_va_log_path, "a", encoding="utf-8") as _vf:
@@ -1843,6 +1907,13 @@ def main():
         # 运维常驻指令（不受 VA 门控）
         # ═══════════════════════════════════════════════════════════
         full_context += (
+            "【卡片写入优先级 — 你的全文判断是第一裁判】\n"
+            "你对用户消息的完整理解是最优先的卡片写入依据。关键词自动触发（plan/daily/emotion等）是兜底：\n"
+            "  - 用户提出有时间锚点的待办（叫我去/提醒我/分钟后/几点做某事）→ 主动输出 propose_card (todo)\n"
+            "  - 用户分享深层经历/价值观转变/自我暴露 → 主动输出 propose_card (deep_talks/milestone)\n"
+            "  - 用户表达偏好/习惯/口癖 → 主动输出 propose_card (preferences/interaction)\n"
+            "  - 用户做出承诺/约定/保证 → 主动输出 propose_card (commitments)\n"
+            "  你主动写的卡优先于任何关键词触发。不要等关键词替你判断——你看得见全文，关键词只看得见字串。\n\n"
             "【卡片操作格式】\n"
             "  新卡片: <!-- propose_card: 标题|分类|重要度|内容 -->\n"
             "  状态更新: <!-- status_card: 卡片ID|进行中 --> 或 <!-- status_card: 卡片ID|阻塞 -->\n"

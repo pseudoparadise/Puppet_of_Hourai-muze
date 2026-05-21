@@ -66,6 +66,99 @@ def main():
         except Exception as e:
             _log_event("diary_error", {"error": str(e)[:200]})
 
+    # ── 待办提醒：扫描 todo/commitments 卡，定时推送 ──
+    REMINDED_PATH = os.path.join(PROJECT_ROOT, "memory", "reminded_todos.json")
+    REMINDER_COOLDOWN = 60  # 同一张卡至少间隔 60 分钟再提醒
+
+    def _check_todo_reminders(now_local):
+        """扫描到期待办，Bark 推送提醒。返回提醒数量。"""
+        import sqlite3, json as _json
+        from datetime import datetime as _dt, timedelta as _td
+        db_path = os.path.join(PROJECT_ROOT, "memory", "cards.db")
+        if not os.path.exists(db_path):
+            return 0
+        # 加载已提醒记录
+        reminded = {}
+        if os.path.exists(REMINDED_PATH):
+            try:
+                with open(REMINDED_PATH, "r", encoding="utf-8") as _rf:
+                    reminded = _json.load(_rf)
+            except Exception:
+                pass
+        today_str = now_local.strftime("%Y-%m-%d")
+        now_minutes = now_local.hour * 60 + now_local.minute
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute(
+            "SELECT id, title, content, target_date, created_at FROM cards "
+            "WHERE review_status='final' AND resolved=0 "
+            "AND category IN ('todo','commitments','daily_life') "
+            "ORDER BY created_at DESC LIMIT 20"
+        )
+        pushed = 0
+        for row in c.fetchall():
+            cid = row['id']
+            ctitle = row['title']
+            tdate = row['target_date'] or ""
+            # 跳过已提醒且未过冷却的
+            if cid in reminded:
+                last_ts = _dt.fromisoformat(reminded[cid])
+                if (now_local - last_ts).total_seconds() < REMINDER_COOLDOWN * 60:
+                    continue
+            # 判断是否该提醒
+            should_remind = False
+            remind_reason = ""
+            # 今天到期的带时间锚点
+            if tdate.startswith(today_str) and " " in tdate:
+                try:
+                    target_time = _dt.fromisoformat(tdate)
+                    target_minutes = target_time.hour * 60 + target_time.minute
+                    if 0 <= target_minutes - now_minutes <= 30:
+                        should_remind = True
+                        remind_reason = f"{target_time.strftime('%H:%M')} 到期"
+                except Exception:
+                    pass
+            # 今天到期的纯日期（全天待办，早9点提醒）
+            elif tdate == today_str:
+                if 8 <= now_local.hour <= 10:
+                    should_remind = True
+                    remind_reason = f"今天待办"
+            # 即将到期（明天）
+            elif tdate:
+                try:
+                    target_dt = _dt.fromisoformat(tdate)
+                    if (target_dt - now_local).days <= 1 and now_local.hour >= 20:
+                        should_remind = True
+                        remind_reason = f"明天 {target_dt.strftime('%H:%M')} 到期"
+                except Exception:
+                    pass
+            if not should_remind:
+                continue
+            # 发送 Bark 推送
+            bark_key = config["global"].get("bark_device_key", "")
+            if bark_key and bark_key != "你的BarkKey填这里":
+                import requests as _req
+                msg = f"⏰ {ctitle} — {remind_reason}"
+                try:
+                    _req.get(f"https://api.day.app/{bark_key}/{msg}", timeout=10)
+                    pushed += 1
+                    reminded[cid] = now_local.isoformat()
+                    print(f"[待办提醒] {ctitle} — {remind_reason}")
+                    _log_event("todo_reminder", {"card_id": cid, "title": ctitle[:40]})
+                except Exception as e:
+                    print(f"[待办提醒] 推送失败: {e}")
+        conn.close()
+        # 清理过期提醒记录
+        reminded = {k: v for k, v in reminded.items()
+                    if (now_local - _dt.fromisoformat(v)).total_seconds() < REMINDER_COOLDOWN * 60 * 2}
+        try:
+            with open(REMINDED_PATH, "w", encoding="utf-8") as _wf:
+                _json.dump(reminded, _wf, ensure_ascii=False)
+        except Exception:
+            pass
+        return pushed
+
     # ── 计时器 ──
     last_heartbeat = time.time()
     last_diary_time = time.time()  # 毒点12：时间驱动日记
@@ -155,6 +248,11 @@ def main():
             except Exception as e:
                 _log_event("sweep_error", {"error": str(e)[:200]})
             last_sweep_time = now_ts
+
+        # ── 待办提醒扫描 ──
+        from datetime import datetime as _dt_remind, timezone as _tz_remind, timedelta as _td_remind
+        _bj_remind = _dt_remind.now(_tz_remind.utc) + _td_remind(hours=8)
+        _check_todo_reminders(_bj_remind)
 
         # 倒计时
         for i in range(INTERVAL_MINUTES * 60, 0, -1):
