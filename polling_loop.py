@@ -171,6 +171,7 @@ def main():
 
     while True:
         cycle_count += 1
+        now_ts = time.time()
 
         try:
             print(f"\n{'='*40}")
@@ -184,8 +185,6 @@ def main():
             print(f"[DSphantom轮询守护] 异常: {e}")
             traceback.print_exc()
             _log_event("polling_crash", {"error": str(e)[:200]})
-
-        now_ts = time.time()
 
         # ── 毒点17修复：心跳日志（每30分钟） ──
         if now_ts - last_heartbeat > HEARTBEAT_INTERVAL:
@@ -254,14 +253,15 @@ def main():
         _bj_remind = _dt_remind.now(_tz_remind.utc) + _td_remind(hours=8)
         _check_todo_reminders(_bj_remind)
 
-        # 倒计时
-        for i in range(INTERVAL_MINUTES * 60, 0, -1):
-            try:
-                time.sleep(1)
-            except KeyboardInterrupt:
-                print("\n[DSphantom轮询守护] 已停止。")
-                _log_event("polling_stop", {"reason": "user_interrupt"})
-                return
+        # 倒计时：消除累积漂移，精确 5 分钟间隔
+        elapsed = time.time() - now_ts
+        remaining = max(0, INTERVAL_MINUTES * 60 - elapsed)
+        try:
+            time.sleep(remaining)
+        except KeyboardInterrupt:
+            print("\n[DSphantom轮询守护] 已停止。")
+            _log_event("polling_stop", {"reason": "user_interrupt"})
+            return
         print()
 
 
