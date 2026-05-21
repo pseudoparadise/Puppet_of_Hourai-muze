@@ -22,8 +22,8 @@ def load_pending():
     return load_json_safe(PENDING_PATH, default=[], label="review")
 
 def save_pending(pending_list):
-    with open(PENDING_PATH, "w", encoding="utf-8") as f:
-        json.dump(pending_list, f, ensure_ascii=False, indent=2)
+    from delegate_tools import atomic_write_json
+    atomic_write_json(PENDING_PATH, pending_list)
 
 def approve_card(card):
     """通过审核：写入数据库，生成向量，加入FAISS索引"""

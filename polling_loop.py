@@ -153,8 +153,8 @@ def main():
         reminded = {k: v for k, v in reminded.items()
                     if (now_local - _dt.fromisoformat(v)).total_seconds() < REMINDER_COOLDOWN * 60 * 2}
         try:
-            with open(REMINDED_PATH, "w", encoding="utf-8") as _wf:
-                _json.dump(reminded, _wf, ensure_ascii=False)
+            from delegate_tools import atomic_write_json as _awj_rem
+            _awj_rem(REMINDED_PATH, reminded)
         except Exception:
             pass
         return pushed

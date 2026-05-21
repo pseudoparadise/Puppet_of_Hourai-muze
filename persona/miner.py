@@ -97,8 +97,8 @@ def update_persona(entries: list[tuple[str, str]]) -> bool:
         print("[miner] 近3天日记全部为空，保留现有 prompt_v1.txt 不覆盖")
         return False
 
-    with open(PROMPT_PATH, "w", encoding="utf-8") as f:
-        f.write(final)
+    from delegate_tools import atomic_write_text
+    atomic_write_text(PROMPT_PATH, final)
     print(f"[miner] prompt_v1.txt 已更新（{len(entries)} 天日记: {', '.join(d for d, _ in entries)}）")
 
     if os.path.exists(STATE_PATH):
@@ -111,8 +111,8 @@ def update_persona(entries: list[tuple[str, str]]) -> bool:
     state["last_dates_covered"] = [d for d, _ in entries]
     state["total_analyses"] = state.get("total_analyses", 0) + 1
 
-    with open(STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+    from delegate_tools import atomic_write_json
+    atomic_write_json(STATE_PATH, state)
     print(f"[miner] 状态已更新 (第 {state['total_analyses']} 次)")
 
     return True

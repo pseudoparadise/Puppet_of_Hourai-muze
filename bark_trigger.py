@@ -350,8 +350,8 @@ def main():
     _log_cycle(config, now, silence_minutes, source, f"{state_label}(p={probability})", decision, bark_sent)
     print("日志已写入。")
 
-    with open(os.path.join(PROJECT_ROOT, "state.json"), "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+    from delegate_tools import atomic_write_json
+    atomic_write_json(os.path.join(PROJECT_ROOT, "state.json"), state)
 
     print("bark_trigger.py 执行完毕。")
 

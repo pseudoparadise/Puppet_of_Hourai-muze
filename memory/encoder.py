@@ -46,8 +46,16 @@ def _load_id_map():
     return {"str_to_int": {}, "int_to_str": {}, "next_int": 1}
 
 def _save_id_map(id_map):
-    with open(ID_MAP_PATH, "w", encoding="utf-8") as f:
-        json.dump(id_map, f, ensure_ascii=False, indent=2)
+    import tempfile, shutil
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".json", prefix="atomic_idmap_", dir=os.path.dirname(ID_MAP_PATH))
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            json.dump(id_map, f, ensure_ascii=False, indent=2)
+        shutil.move(tmp_path, ID_MAP_PATH)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
 
 def _register_id(id_map, str_id: str) -> int:
     """注册字符串ID，返回对应的 int64 ID"""
@@ -184,8 +192,16 @@ def save_index(index: faiss.Index):
     api_key = _get_api_key()
     fingerprint = hashlib.sha256(api_key.encode()).hexdigest()[:8]
     meta = {"dim": DIM, "model": "doubao-embedding-vision-250615", "key_fingerprint": fingerprint}
-    with open(MODEL_META_PATH, "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
+    import tempfile as _tmp_m, shutil as _sh_m
+    _fd_m, _tp_m = _tmp_m.mkstemp(suffix=".json", prefix="atomic_meta_", dir=os.path.dirname(MODEL_META_PATH))
+    try:
+        with os.fdopen(_fd_m, "w", encoding="utf-8") as _f_m:
+            json.dump(meta, _f_m, ensure_ascii=False, indent=2)
+        _sh_m.move(_tp_m, MODEL_META_PATH)
+    except Exception:
+        if os.path.exists(_tp_m):
+            os.unlink(_tp_m)
+        raise
 
 def load_index() -> faiss.Index:
     # ── P2-4: 检查模型版本兼容性 ──
