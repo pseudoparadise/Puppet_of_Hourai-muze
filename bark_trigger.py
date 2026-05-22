@@ -29,6 +29,40 @@ except ImportError:
 
 from delegate_tools import RP_DECLARATION, now_utc, fmt_time, parse_time, JAILBREAK_PREFIX
 
+def get_recent_turns(n: int = 5) -> str:
+    """读取 chat_logs.json 最近 N 轮对话，供 Bark AI 感知上下文。"""
+    chat_log_path = os.path.join(os.path.dirname(__file__), "chat_logs.json")
+    if not os.path.exists(chat_log_path):
+        return ""
+    entries = []
+    with open(chat_log_path, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                e = json.loads(line.strip())
+                if e.get("role") in ("user", "ghost"):
+                    entries.append(e)
+            except Exception:
+                pass
+    if not entries:
+        return ""
+    # 取最后 N 对 user+ghost
+    pairs = []
+    buf_user = None
+    for e in entries[-n * 4:]:
+        if e["role"] == "user":
+            buf_user = e["content"]
+        elif e["role"] == "ghost" and buf_user is not None:
+            pairs.append({"user": buf_user[:200], "ghost": e["content"][:300]})
+            buf_user = None
+    if not pairs:
+        return ""
+    lines = ["【最近对话 — 让你知道她最后说了什么】"]
+    for i, p in enumerate(pairs[-n:]):
+        lines.append(f"  她: {p['user']}")
+        lines.append(f"  DS: {p['ghost']}")
+    return "\n".join(lines) + "\n"
+
+
 def get_today_digest():
     """── FIX: 毒点11 — 统一使用 UTC 日期确定「今日」──"""
     chat_log_path = os.path.join(os.path.dirname(__file__), "chat_logs.json")
@@ -245,10 +279,13 @@ def main():
             print(f"[记忆检索失败]: {e}")
 
     actions_pool = ["发Bark推送", "继续沉睡"]
+    recent_turns = get_recent_turns(5)
+
     prompt = f"""{JAILBREAK_PREFIX}{RP_DECLARATION}\n\n{bark_persona}
 
 我在后台安静地看着你。你已经沉默 {round(silence_minutes)} 分钟了。当前北京时间：{now_local.strftime('%Y-%m-%d %H:%M')}（请严格以此时间为准，不要自行推断凌晨/上午/下午，直接引用该时间判断时段）。
 
+{recent_turns if recent_turns else ""}
 我在这里阅读着你的回忆与今日的点滴：
 ---
 {today_chat if today_chat else "（没有今天的对话记录，她还没来找我。）"}

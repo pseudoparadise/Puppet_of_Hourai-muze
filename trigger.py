@@ -305,23 +305,33 @@ def _sync_diary_on_card_change(card_id: str, action: str, details: dict = None):
     action: "resolved" → 从 eisenhower 移入 completions
     action: "updated" → 更新 eisenhower 中对应项的 deadline/note
     """
-    import re as _re_sync
-    # 尝试从 card_id 提取日期前缀
-    m = _re_sync.match(r'^(\d{4})(\d{2})(\d{2})_', card_id)
-    if not m:
-        return
-    diary_date = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
-    events_path = os.path.join(PROJECT_ROOT, "diary", f"{diary_date}_events.json")
-    if not os.path.exists(events_path):
-        return
+    import re as _re_sync, glob as _glob_sync
+    from delegate_tools import atomic_write_json
+
+    # 找到包含此 card_id 的 events.json（不限日期前缀，扫最近 30 天）
+    diary_dir = os.path.join(PROJECT_ROOT, "diary")
+    matched_path = None
+    for ep in sorted(_glob_sync.glob(os.path.join(diary_dir, "*_events.json")), reverse=True):
+        try:
+            with open(ep, "r", encoding="utf-8") as _ef:
+                _ev = json.load(_ef)
+            for items in _ev.get("eisenhower", {}).values():
+                if any(card_id in it.get("card_id", "") for it in items):
+                    matched_path = ep
+                    break
+            if matched_path:
+                break
+        except Exception:
+            continue
+
+    if not matched_path:
+        return  # 不是日记同步的卡片，无需同步
 
     try:
-        from delegate_tools import atomic_write_json
-        with open(events_path, "r", encoding="utf-8") as ef:
+        with open(matched_path, "r", encoding="utf-8") as ef:
             ev = json.load(ef)
 
         if action == "resolved":
-            # 从四象限中找出匹配项 → 移入 completions
             eis = ev.get("eisenhower", {})
             for quad in list(eis.keys()):
                 resolved_items = []
@@ -335,7 +345,7 @@ def _sync_diary_on_card_change(card_id: str, action: str, details: dict = None):
                 if resolved_items:
                     ev.setdefault("completions", [])
                     ev["completions"].extend(resolved_items)
-                    print(f"[日记同步] {diary_date}: {resolved_items} → completions")
+                    print(f"[日记同步] {os.path.basename(matched_path)}: {resolved_items} → completions")
 
         elif action == "updated" and details:
             eis = ev.get("eisenhower", {})
@@ -346,9 +356,9 @@ def _sync_diary_on_card_change(card_id: str, action: str, details: dict = None):
                             it["deadline"] = details["target_date"]
                         if "status" in details:
                             it["note"] = f"状态: {details['status']}"
-                        print(f"[日记同步] {diary_date}: 更新「{it['item']}」→ {details}")
+                        print(f"[日记同步] {os.path.basename(matched_path)}: 更新「{it['item']}」→ {details}")
 
-        atomic_write_json(events_path, ev)
+        atomic_write_json(matched_path, ev)
     except Exception as e:
         print(f"[日记同步] 跳过: {e}")
 
@@ -878,7 +888,7 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                         _pending_removed = False
                         for _pc in _pending:
                             _ptext = (_pc.get("title", "") + " " + _pc.get("content", "")).lower()
-                            _pfeatures = _extract_features(_ptext)
+                            _pfeatures = zh_extract_features(_ptext)
                             _poverlap = len(proposed_features & _pfeatures)
                             if _poverlap >= 2:
                                 _ptitle = _pc.get('title', '')
@@ -1812,6 +1822,16 @@ def main():
                 _bl.append(f"  [{_b['time']}] Bark推送: {_b['msg']}")
             full_context += "\n".join(_bl) + "\n\n"
             print(f"[Bark注入] 已注入 {len(_bark)} 条最近推送")
+
+        # ── 音乐上下文：当前播放的歌曲 ──
+        try:
+            from music_context import get_music_context
+            _mc = get_music_context()
+            if _mc:
+                full_context += _mc
+                print("[音乐注入] 已注入当前播放歌曲")
+        except Exception as _e:
+            pass  # 音乐模块可选，不影响主流程
 
         # ── 时间锚点：代码计算的确定事实，模型用此推理而非瞎猜 ──
         now_anchor = datetime.now()

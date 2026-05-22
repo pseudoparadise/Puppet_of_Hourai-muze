@@ -34,6 +34,9 @@ persona/prompt_v1_base.txt
 persona/backups/
 persona/miner_state.json
 
+# ── 音乐状态缓存 ──
+.music_state.json
+
 # ── 快照与诊断文件 ──
 状态快照_*.txt
 查看状态.bat

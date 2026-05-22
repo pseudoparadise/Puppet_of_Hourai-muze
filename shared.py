@@ -127,7 +127,8 @@ def record_bark_push(msg: str):
 def is_garbage_card(title: str, content: str) -> str:
     """检测占位/空卡片。返回空字符串=通过，否则返回拦截原因。"""
     _garbage = {"无明确承诺", "暂无计划", "没什么", "不知道", "无", "暂无", "未发现", "无承诺",
-                "未在对话中承诺", "无明确事项", "无任何承诺"}
+                "未在对话中承诺", "无明确事项", "无任何承诺", "无待办事项", "无待办", "无需",
+                "无特别事项", "无新事项"}
     if not title or not title.strip():
         return "空标题"
     if not content or not content.strip():

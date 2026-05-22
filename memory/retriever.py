@@ -477,6 +477,19 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
              chord_bpm: int = None, chord_dynamic: str = None, chord_name: str = None) -> list:
     db_path = os.path.join(os.path.dirname(__file__), "cards.db")
 
+    # ── 硬编码召回：特定完整短语 → 强制召回对应卡片，无视评分 ──
+    FORCED_RECALL = {
+        "20260521_0148_深度求索打飞机口癖": [
+            "每天对着DS的api返回草稿打飞机算不算深度求索",
+        ],
+    }
+    forced_ids = set()
+    query_lower = query.lower()
+    for fid, triggers in FORCED_RECALL.items():
+        if any(t.lower() in query_lower for t in triggers):
+            forced_ids.add(fid)
+            print(f"[强制召回] 触发关键词 → 锁定卡片 {fid}")
+
     # ── VA 唤醒度三层分档：调整检索策略 ──
     # ── 以 SCORING_CONFIG 为基底合并 weights，确保 w_keyword 等必要键始终存在 ──
     w = dict(SCORING_CONFIG)
@@ -658,6 +671,30 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
     for c in semantic_hits:
         if c["id"] not in seen:
             seen[c["id"]] = c
+
+    # ── 硬编码召回：触发关键词 → 强制置顶对应卡片，无视评分 ──
+    for fid in forced_ids:
+        if fid not in seen:
+            try:
+                conn = sqlite3.connect(db_path)
+                conn.row_factory = sqlite3.Row
+                cc = conn.cursor()
+                cc.execute(
+                    "SELECT id, title, content, keywords, importance, category "
+                    "FROM cards WHERE id=? AND review_status='final'",
+                    (fid,)
+                )
+                row = cc.fetchone()
+                conn.close()
+                if row:
+                    forced_card = dict(row)
+                    forced_card["score"] = 99.0
+                    forced_card["hit_count"] = 1
+                    forced_card["distance"] = 0.0
+                    seen[fid] = forced_card
+                    print(f"[强制召回] {fid} 已置顶注入结果")
+            except Exception:
+                pass
 
     merged = sorted(seen.values(), key=lambda x: x["score"], reverse=True)
     pool_size = max(len(merged), 1)
