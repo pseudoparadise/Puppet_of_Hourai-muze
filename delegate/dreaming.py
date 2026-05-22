@@ -118,11 +118,17 @@ def _update_rolling_summary(new_summary: str, date_str: str = None):
     # 只保留最近 7 条
     segments = segments[-7:]
 
-    with open(ROLLING_SUMMARY_PATH, "w", encoding="utf-8") as f:
-        f.write("\n\n".join(s.strip() for s in segments).strip() + "\n")
+    from delegate_tools import atomic_write_text
+    atomic_write_text(ROLLING_SUMMARY_PATH, "\n\n".join(s.strip() for s in segments).strip() + "\n")
 
 def _append_pending_card(card: dict):
     """将卡片草稿写入 pending_cards.json（毒点5修复 — 委托 delegate_tools.atomic_write_json）"""
+    from shared import is_garbage_card
+    reason = is_garbage_card(card.get("title", ""), card.get("content", ""))
+    if reason:
+        print(f"[dreaming] 拦截: {reason}")
+        return
+
     from delegate_tools import atomic_write_json
     from shared import load_json_safe
     pending = load_json_safe(PENDING_CARDS_PATH, default=[], label="dreaming")
@@ -174,17 +180,8 @@ def chain_dream(target_date: str = None):
     print(f"[dreaming] Step1 日记: {diary_raw[:100]}...")
 
     # 解析 AI 输出的 JSON 日记格式
-    diary_json = None
-    try:
-        diary_json = json.loads(diary_raw)
-    except:
-        import re as _re
-        m = _re.search(r'\{.*\}', diary_raw, re.DOTALL)
-        if m:
-            try:
-                diary_json = json.loads(m.group())
-            except:
-                pass
+    from shared import llm_to_json
+    diary_json = llm_to_json(diary_raw)
 
     if diary_json:
         # 落盘可读 markdown
@@ -276,18 +273,15 @@ def chain_dream(target_date: str = None):
     step3_context = f"今日总结：\n{summary}\n\n完整对话摘要：\n{digest}"
     card_raw = delegate(card_prompt, step3_context)
     print(f"[dreaming] Step3 提议: {card_raw}")
-
+    # ── 日记生成后同步：将 events.json 中的四象限待办写入 cards.db ──
     try:
-        card_json = json.loads(card_raw)
-    except:
-        json_match = re.search(r'\{.*\}', card_raw, re.DOTALL)
-        if json_match:
-            try:
-                card_json = json.loads(json_match.group())
-            except:
-                card_json = {"action": "skip"}
-        else:
-            card_json = {"action": "skip"}
+        from memory.memory_manager import sync_diary_todos_to_cards
+        sync_diary_todos_to_cards(days_back=7)
+    except Exception as e_sync:
+        print(f"[dreaming] 日记同步待办跳过: {e_sync}")
+
+    from shared import llm_to_json
+    card_json = llm_to_json(card_raw, default={"action": "skip"})
 
     if card_json.get("action") == "create":
         from delegate_tools import now_utc as _now4

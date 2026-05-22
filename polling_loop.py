@@ -66,6 +66,23 @@ def main():
         except Exception as e:
             _log_event("diary_error", {"error": str(e)[:200]})
 
+    # ── 追补礦工：启动时检查，如果上次蒸馏超过24h，立即跑一次 ──
+    try:
+        miner_state_path = os.path.join(PROJECT_ROOT, "persona", "miner_state.json")
+        if os.path.exists(miner_state_path):
+            with open(miner_state_path, "r", encoding="utf-8") as _msf:
+                _ms = json.load(_msf)
+            _last_date = _ms.get("last_analysis_date", "")
+            from datetime import datetime as _dt_ms, timedelta as _td_ms
+            _today_ms = _dt_ms.now().strftime("%Y-%m-%d")
+            if _last_date != _today_ms:
+                print(f"[礦工] 启动追补：上次蒸馏 {_last_date}，立即蒸馏...")
+                _log_event("miner_scheduled", {"reason": "startup_catchup"})
+                from persona.miner import main as miner_main
+                miner_main()
+    except Exception as _me:
+        _log_event("miner_error", {"error": str(_me)[:200]})
+
     # ── 待办提醒：扫描 todo/commitments 卡，定时推送 ──
     REMINDED_PATH = os.path.join(PROJECT_ROOT, "memory", "reminded_todos.json")
     REMINDER_COOLDOWN = 60  # 同一张卡至少间隔 60 分钟再提醒
@@ -97,7 +114,13 @@ def main():
             "ORDER BY created_at DESC LIMIT 20"
         )
         pushed = 0
-        for row in c.fetchall():
+        rows = c.fetchall()
+        # 每轮输出待办池概览
+        if rows:
+            from shared import trace as _tr_scan
+            card_list = [f"{r['title'][:20]}({r['target_date'] or '无日期'})" for r in rows[:5]]
+            _tr_scan("bark_pool", f"扫描{len(rows)}张待办: {', '.join(card_list)}")
+        for row in rows:
             cid = row['id']
             ctitle = row['title']
             tdate = row['target_date'] or ""
@@ -114,9 +137,12 @@ def main():
                 try:
                     target_time = _dt.fromisoformat(tdate)
                     target_minutes = target_time.hour * 60 + target_time.minute
-                    if 0 <= target_minutes - now_minutes <= 30:
+                    diff = target_minutes - now_minutes
+                    if 0 <= diff <= 30:
                         should_remind = True
                         remind_reason = f"{target_time.strftime('%H:%M')} 到期"
+                        from shared import trace
+                        trace("bark_scan", f"命中「{ctitle}」→ {target_time.strftime('%H:%M')} (diff={diff}min)")
                 except Exception:
                     pass
             # 今天到期的纯日期（全天待办，早9点提醒）
@@ -124,6 +150,8 @@ def main():
                 if 8 <= now_local.hour <= 10:
                     should_remind = True
                     remind_reason = f"今天待办"
+                    from shared import trace
+                    trace("bark_scan", f"全天待办「{ctitle}」→ 早间提醒")
             # 即将到期（明天）
             elif tdate:
                 try:
@@ -131,6 +159,8 @@ def main():
                     if (target_dt - now_local).days <= 1 and now_local.hour >= 20:
                         should_remind = True
                         remind_reason = f"明天 {target_dt.strftime('%H:%M')} 到期"
+                        from shared import trace
+                        trace("bark_scan", f"即将到期「{ctitle}」→ 晚间提醒")
                 except Exception:
                     pass
             if not should_remind:
@@ -146,9 +176,75 @@ def main():
                     reminded[cid] = now_local.isoformat()
                     print(f"[待办提醒] {ctitle} — {remind_reason}")
                     _log_event("todo_reminder", {"card_id": cid, "title": ctitle[:40]})
+                    from shared import record_bark_push
+                    record_bark_push(msg)
                 except Exception as e:
                     print(f"[待办提醒] 推送失败: {e}")
         conn.close()
+
+        # ── pending 扫描：待审核卡也有 target_date，同样推到 Bark ──
+        pending_path = os.path.join(PROJECT_ROOT, "memory", "pending_cards.json")
+        if os.path.exists(pending_path):
+            try:
+                with open(pending_path, "r", encoding="utf-8") as _pf:
+                    _pendings = _json.load(_pf)
+                for _pc in _pendings:
+                    _pcat = _pc.get("category", "")
+                    if _pcat not in ('todo', 'commitments', 'daily_life'):
+                        continue
+                    _ptdate = _pc.get("target_date", "") or ""
+                    if not _ptdate:
+                        continue
+                    _pcid = _pc.get("id", "")
+                    # 冷却检查
+                    if _pcid in reminded:
+                        _plast = _dt.fromisoformat(reminded[_pcid])
+                        if (now_local - _plast).total_seconds() < REMINDER_COOLDOWN * 60:
+                            continue
+                    from shared import trace as _tr_p
+                    _tr_p("bark_pending", f"扫描 {_pc.get('title','?')[:30]} tdate={_ptdate}")
+                    _pshould = False
+                    _preason = ""
+                    # 带时间的今天到期
+                    if _ptdate.startswith(today_str) and " " in _ptdate:
+                        try:
+                            _ptime = _dt.fromisoformat(_ptdate)
+                            _pdiff = (_ptime.hour * 60 + _ptime.minute) - now_minutes
+                            if 0 <= _pdiff <= 30:
+                                _pshould = True
+                                _preason = f"{_ptime.strftime('%H:%M')} 到期"
+                        except Exception:
+                            pass
+                    elif _ptdate == today_str:
+                        if 8 <= now_local.hour <= 10:
+                            _pshould = True
+                            _preason = "今天待办"
+                    elif _ptdate:
+                        try:
+                            _ptdt = _dt.fromisoformat(_ptdate)
+                            if (_ptdt - now_local).days <= 1 and now_local.hour >= 20:
+                                _pshould = True
+                                _preason = f"明天 {_ptdt.strftime('%H:%M')} 到期"
+                        except Exception:
+                            pass
+                    if not _pshould:
+                        continue
+                    if bark_key and bark_key != "你的BarkKey填这里":
+                        import requests as _req_p
+                        try:
+                            _pmsg = f"⏰ [待审核] {_pc.get('title','?')} — {_preason}"
+                            _req_p.get(f"https://api.day.app/{bark_key}/{_pmsg}", timeout=10)
+                            pushed += 1
+                            reminded[_pcid] = now_local.isoformat()
+                            print(f"[待办提醒-pending] {_pc.get('title','?')} — {_preason}")
+                            _log_event("todo_reminder", {"card_id": _pcid, "title": str(_pc.get('title',''))[:40], "source": "pending"})
+                            from shared import record_bark_push
+                            record_bark_push(_pmsg)
+                        except Exception:
+                            pass
+            except Exception as _pe:
+                print(f"[待办提醒-pending] 扫描跳过: {_pe}")
+
         # 清理过期提醒记录
         reminded = {k: v for k, v in reminded.items()
                     if (now_local - _dt.fromisoformat(v)).total_seconds() < REMINDER_COOLDOWN * 60 * 2}
@@ -213,6 +309,26 @@ def main():
             except Exception as e:
                 _log_event("diary_error", {"error": str(e)[:200]})
                 # 失败不更新 _last_diary_date，让后续周期重试
+
+        # ── 兜底检查：每小时一次，如果昨天日记仍缺失（非午夜窗口错过），追补 ──
+        CATCHUP_INTERVAL = 3600  # 1小时
+        last_catchup = getattr(main, '_last_catchup_ts', 0)
+        if now_ts - last_catchup > CATCHUP_INTERVAL:
+            main._last_catchup_ts = now_ts  # type: ignore
+            if bj_hour >= 1:  # 过了凌晨1点还没日记 = 错过了
+                from datetime import datetime as _dt_cu, timedelta as _td_cu
+                _bj_cu = _dt_cu.now() + _td_cu(hours=8)
+                _yday_cu = (_bj_cu - _td_cu(days=1)).strftime("%Y-%m-%d")
+                _diary_cu = os.path.join(PROJECT_ROOT, "diary", f"{_yday_cu}.md")
+                if not os.path.exists(_diary_cu):
+                    print(f"[兜底] 昨日日记 {_yday_cu} 仍缺失，追补...")
+                    _log_event("diary_scheduled", {"reason": "hourly_catchup", "date": _yday_cu})
+                    try:
+                        chain_dream(_yday_cu)
+                        from persona.miner import main as _miner_cu
+                        _miner_cu()
+                    except Exception as e:
+                        _log_event("diary_error", {"error": str(e)[:200]})
 
         # ── 长期优化四：深渊审计（每6小时） ──
         if now_ts - last_audit_time > AUDIT_INTERVAL:

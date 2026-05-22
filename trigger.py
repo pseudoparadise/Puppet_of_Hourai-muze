@@ -139,16 +139,13 @@ def _parse_chord(raw: str) -> tuple:
 def _sync_last_active(chord: str = None):
     """更新 state.json。修正1：合并 chord 写入，避免双写竞争。"""
     from delegate_tools import now_utc, fmt_time
-    from delegate_tools import atomic_write_json
+    from shared import load_state, save_state
     try:
-        state = {}
-        if os.path.exists(STATE_PATH):
-            with open(STATE_PATH, "r", encoding="utf-8") as f:
-                state = json.load(f)
+        state = load_state()
         state["last_user_message_time"] = fmt_time(now_utc())
         if chord is not None:
             state["last_chord"] = chord
-        atomic_write_json(STATE_PATH, state)
+        save_state(state)
     except Exception as e:
         print(f"[状态同步异常]: {e}")
 
@@ -170,6 +167,12 @@ def detect_refs_by_keywords(reply: str, cards: list) -> list:
 
 # ── FIX: 写入待审核卡片（毒点5修复 — 委托 delegate_tools.atomic_write_json） ──
 def write_pending_card(card_draft: dict):
+    from shared import is_garbage_card
+    reason = is_garbage_card(card_draft.get("title", ""), card_draft.get("content", ""))
+    if reason:
+        print(f"[卡片提议] 拦截: {reason}")
+        return
+
     from delegate_tools import atomic_write_json
     pending_path = os.path.join(PROJECT_ROOT, "memory", "pending_cards.json")
     from shared import load_json_safe as _load_safe
@@ -186,6 +189,9 @@ def write_pending_card(card_draft: dict):
     try:
         atomic_write_json(pending_path, pending)
         print(f"[卡片提议] 草稿已写入 pending: {card_draft['id']}")
+        if card_draft.get('target_date'):
+            from shared import status_event
+            status_event("待办登记", f"{card_draft['title']} → {card_draft['target_date']} [{card_draft.get('category','?')}]", "⏰")
         # 短期定时待办即时反馈
         if card_draft.get('category') == 'todo' and card_draft.get('target_date'):
             try:
@@ -244,15 +250,10 @@ AI回复：{ai_reply[:200]}
             )
             if resp.status_code == 200:
                 raw = resp.json()["choices"][0]["message"]["content"]
-                try:
-                    return json.loads(raw)
-                except json.JSONDecodeError:
-                    match = re.search(r'\{.*\}', raw, re.DOTALL)
-                    if match:
-                        try:
-                            return json.loads(match.group())
-                        except json.JSONDecodeError:
-                            pass
+                from shared import llm_to_json
+                result = llm_to_json(raw)
+                if result is not None:
+                    return result
                 return None
             elif resp.status_code >= 500:
                 if attempt < max_retries:
@@ -469,66 +470,88 @@ def _parse_time_anchor(text: str) -> dict:
 
 
 def _parse_target_date(text: str):
-    """从中文文本解析目标日期。返回 'YYYY-MM-DD' 或 None。降级兼容旧调用。"""
+    """从中文文本解析目标日期时间。返回 'YYYY-MM-DD' 或 'YYYY-MM-DD HH:MM' 或 None。
+    优先级：精确日期 > 相对偏移 > 纯时间。"""
+    from datetime import datetime, timedelta
+    import re as _re_td
+
+    today = datetime.now()
+    date_str = None
+    time_str = None
+
+    # ── 1. 精确日期：复用 _parse_time_anchor ──
     anchor = _parse_time_anchor(text)
-    return anchor.get("date")
+    date_str = anchor.get("date")
 
-    # 1. 下个月N号/日
-    m = _re.search(r'下个?月(\d{1,2})[号日]', text)
+    # ── 2. 相对天偏移：N天后 / 明天后 / 后天 / 明天 ──
+    if not date_str:
+        m = _re_td.search(r'(\d+)\s*天[之以]?后', text)
+        if m:
+            delta = int(m.group(1))
+            date_str = (today + timedelta(days=delta)).strftime('%Y-%m-%d')
+        elif _re_td.search(r'明天之后|明天后', text):
+            date_str = (today + timedelta(days=1)).strftime('%Y-%m-%d')
+        elif _re_td.search(r'后天', text):
+            date_str = (today + timedelta(days=2)).strftime('%Y-%m-%d')
+        elif _re_td.search(r'大后天', text):
+            date_str = (today + timedelta(days=3)).strftime('%Y-%m-%d')
+        elif _re_td.search(r'明天', text):
+            date_str = (today + timedelta(days=1)).strftime('%Y-%m-%d')
+
+    # ── 3. 提取时间 ──
+    # 相对时间偏移：半小时后 → now + 30min；N分钟后/小时后 → now + N*min/N*hour
+    m = _re_td.search(r'(\d+)\s*分[钟鐘]?\s*后', text)
     if m:
-        d = int(m.group(1))
-        next_month = today.month % 12 + 1
-        year = today.year if next_month > today.month else today.year + 1
-        try:
-            return datetime(year, next_month, d).strftime('%Y-%m-%d')
-        except ValueError:
-            return None
+        dt = today + timedelta(minutes=int(m.group(1)))
+        date_str = dt.strftime('%Y-%m-%d')
+        time_str = dt.strftime('%H:%M')
+    elif _re_td.search(r'半小?时\s*后', text):
+        dt = today + timedelta(minutes=30)
+        date_str = dt.strftime('%Y-%m-%d')
+        time_str = dt.strftime('%H:%M')
+    elif _re_td.search(r'(\d+)\s*[小个]?时\s*后', text):
+        m2 = _re_td.search(r'(\d+)\s*[小个]?时\s*后', text)
+        if m2:
+            dt = today + timedelta(hours=int(m2.group(1)))
+            date_str = dt.strftime('%Y-%m-%d')
+            time_str = dt.strftime('%H:%M')
+    else:
+        # 精确时间：N点 / N:N / N：N / N点N分 / 下午N点 / 晚上N点
+        hour, minute = None, 0
+        m = _re_td.search(r'(\d{1,2})[：:](\d{2})', text)
+        if m:
+            hour, minute = int(m.group(1)), int(m.group(2))
+        else:
+            m = _re_td.search(r'(\d{1,2})点(?:(\d{1,2})分?)?', text)
+            if m:
+                hour = int(m.group(1))
+                minute = int(m.group(2)) if m.group(2) else 0
+        if hour is not None:
+            # 处理下午/晚上/凌晨
+            if _re_td.search(r'下午|午后', text) and hour < 12:
+                hour += 12
+            elif _re_td.search(r'晚上|今晚|夜里', text) and hour < 12:
+                hour += 12
+            elif _re_td.search(r'凌晨', text) and hour == 12:
+                hour = 0
+            time_str = f"{hour:02d}:{minute:02d}"
+            if not date_str:
+                date_str = today.strftime('%Y-%m-%d')
+            # 如果解析出的时间在今天已经过去 >1h，自动推到明天
+            # 凌晨/上午/中午时间 + 当前下午 → 明天
+            now_hour = today.hour
+            now_min = today.minute
+            target_minutes = hour * 60 + minute
+            current_minutes = now_hour * 60 + now_min
+            if date_str == today.strftime('%Y-%m-%d') and (target_minutes + 60) < current_minutes:
+                date_str = (today + timedelta(days=1)).strftime('%Y-%m-%d')
 
-    # 2. N月N号/日（精确日期）
-    m = _re.search(r'(\d{1,2})月(\d{1,2})[号日]', text)
-    if m:
-        mo, d = int(m.group(1)), int(m.group(2))
-        year = today.year if mo >= today.month else today.year + 1
-        try:
-            return datetime(year, mo, d).strftime('%Y-%m-%d')
-        except ValueError:
-            return None
-
-    # 3. 今晚 / 今天晚上 / 今夜 → 今天
-    if _re.search(r'今晚|今天晚上|今夜', text):
-        return today.strftime('%Y-%m-%d')
-
-    # 4. 今年N月下旬/中旬/上旬
-    m = _re.search(r'今年(\d{1,2})月(上旬|中旬|下旬)', text)
-    if m:
-        mo, period = int(m.group(1)), m.group(2)
-        day_map = {'上旬': 5, '中旬': 15, '下旬': 25}
-        d = day_map.get(period, 15)
-        try:
-            return datetime(today.year, mo, d).strftime('%Y-%m-%d')
-        except ValueError:
-            return None
-
-    # 5. N月下旬/中旬/上旬（省略"今年"）
-    m = _re.search(r'(\d{1,2})月(上旬|中旬|下旬)', text)
-    if m:
-        mo, period = int(m.group(1)), m.group(2)
-        day_map = {'上旬': 5, '中旬': 15, '下旬': 25}
-        d = day_map.get(period, 15)
-        year = today.year if mo >= today.month else today.year + 1
-        try:
-            return datetime(year, mo, d).strftime('%Y-%m-%d')
-        except ValueError:
-            return None
-
-    # 6. 明天/后天/大后天（仅当出现在时间约束上下文中，非后果描述）
-    rel = {'明天': 1, '后天': 2, '大后天': 3}
-    for kw, delta in rel.items():
-        # 只有在"之前/以内/一定要"等约束词附近才视为 deadline
-        if _re.search(rf'{kw}.*(之前|以内|一定|必须|得)', text) or _re.search(rf'(之前|以内).*{kw}', text):
-            return (today + timedelta(days=delta)).strftime('%Y-%m-%d')
-
-    return None
+    # ── 4. 组合返回 ──
+    result = f"{date_str} {time_str}" if (date_str and time_str) else date_str
+    if result:
+        from shared import status_event
+        status_event("parse_date", f"'{text[:60]}' → {result}")
+    return result
 
 # ── 后处理 ──
 def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply: str, session_cards_written: dict = None, current_turn: int = 0, va: dict = None):
@@ -558,7 +581,7 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
 
     # ── 提取 AI 计算的目标日期标记 <!-- target_date: YYYY-MM-DD --> ──
     target_date_from_ai = None
-    td_match = re.search(r'<!--\s*target_date:\s*(\d{4}-\d{2}-\d{2})\s*-->', raw_reply, re.IGNORECASE)
+    td_match = re.search(r'<!--\s*target_date:\s*(\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2})?)\s*-->', raw_reply, re.IGNORECASE)
     if td_match:
         target_date_from_ai = td_match.group(1)
         display_reply = re.sub(r'<!--\s*target_date:.*?\s*-->', '', display_reply, flags=re.IGNORECASE).strip()
@@ -756,6 +779,8 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
 
     propose_match = re.search(r'<!--\s*propose_card:\s*(.*?)\s*-->', raw_reply, re.IGNORECASE)
     if propose_match:
+        from shared import status_event
+        status_event("写卡", f"AI提议: {propose_match.group(1)[:120]}")
         display_reply = re.sub(r'<!--\s*propose_card:.*?\s*-->', '', display_reply, flags=re.IGNORECASE).strip()
         parts = [p.strip() for p in propose_match.group(1).split('|')]
         if len(parts) >= 4:
@@ -817,22 +842,29 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                     _old_features = zh_extract_features(_old_text)
                     _overlap = len(proposed_features & _old_features)
                     if _overlap >= 2:  # 至少 2 个特征词重叠
+                        from shared import status_event
+                        status_event("dedup_overlap", f"新「{title}」vs 旧「{_otitle}」({_ocat}) 重叠={_overlap}")
                         # 口癖/梗类卡片永远不参与 auto-resolve
                         if _otitle.startswith('口癖：') or _otitle.startswith('梗：'):
+                            status_event("dedup_skip", f"口癖/梗卡不参与: {_otitle}")
                             continue
                         # 安全阀：基石卡不自动 resolve
                         if _oimp and _oimp >= 8:
+                            status_event("dedup_skip", f"基石卡(imp={_oimp})不resolve: {_otitle}")
                             continue
                         # 仅 commitments/daily_life/todo 可被 auto-resolve
                         if _ocat not in ('commitments', 'daily_life', 'todo'):
+                            status_event("dedup_skip", f"分类{_ocat}不参与auto-resolve")
                             continue
                         from memory.memory_manager import should_auto_resolve as _sar3, resolve_card as _resolve_old
                         _allowed, _reason = _sar3(_oid, context_anchor=_parse_time_anchor(user_input))
                         if not _allowed:
                             print(f"[写卡拦截] 时间拒止 {_oid}: {_reason}，跳过")
+                            status_event("dedup_blocked", f"时间拒止 {_oid}: {_reason}")
                             continue
                         if _resolve_old(_oid):
                             print(f"[写卡拦截] 新卡「{title}」与旧卡「{_otitle}」特征重叠({_overlap})，自动 resolve 旧卡，丢弃新卡")
+                            status_event("dedup_resolved", f"旧卡{_oid}({_otitle})已resolve，新卡丢弃")
                             blocked_by_overlap = True
                             resolved_ids.add(_oid)
                             _sync_diary_on_card_change(_oid, "resolved")
@@ -871,6 +903,8 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
 
             # ── 时间拒止通过后，card_guard embedding 语义去重 ──
             if not blocked_by_overlap:
+                from shared import status_event
+                status_event("card_write", f"「{title}」[{category}] 通过特征重叠检查，进入embedding去重")
                 from memory.card_guard import check_before_write as _guard_propose, show_conflict_popup as _popup_propose
                 _p_blocked, _p_reason, _p_conflict = _guard_propose(title, content, user_input, card_draft)
                 if _p_blocked:
@@ -1215,6 +1249,26 @@ def _build_messages(system_ctx, recent, user_input, max_turns=5):
 def main():
     global CHAT_MODEL
     print("DS老师 在呢，打字聊天，输入 q 退出\n")
+
+    # ── 启动自检：追补昨日缺失的日记 + 蒸馏 ──
+    try:
+        from datetime import datetime as _dt_chk, timedelta as _td_chk
+        _bj_chk = _dt_chk.now() + _td_chk(hours=8)
+        _yday = (_bj_chk - _td_chk(days=1)).strftime("%Y-%m-%d")
+        _diary_chk = os.path.join(PROJECT_ROOT, "diary", f"{_yday}.md")
+        if not os.path.exists(_diary_chk):
+            print(f"[启动自检] 昨日日记 {_yday} 缺失，正在追补...")
+            from delegate.dreaming import chain_dream
+            chain_dream(_yday)
+            print(f"[启动自检] 追补完成，同步日记待办 + 蒸馏...")
+            from memory.memory_manager import sync_diary_todos_to_cards
+            sync_diary_todos_to_cards(days_back=7)
+            from persona.miner import main as _miner_chk
+            _miner_chk()
+            print(f"[启动自检] 全部追补完成。")
+    except Exception as _chk_e:
+        print(f"[启动自检] 跳过: {_chk_e}")
+
     recent = []
     chat_log_path = os.path.join(PROJECT_ROOT, "chat_logs.json")
     # ── P3-2: 当前 session 已写入 card category → 上次写入轮数 ──
@@ -1482,10 +1536,40 @@ def main():
             print()
             continue
 
+        # ── /diary 命令：诊断日记链状态 ──
+        if user_input.strip().lower() == "/diary":
+            from datetime import datetime as _dd_dt, timedelta as _dd_td, timezone as _dd_tz
+            diary_dir = os.path.join(PROJECT_ROOT, "diary")
+            print(f"\n{'='*50}")
+            print(f"  日记链状态")
+            print(f"{'='*50}")
+            miner_path = os.path.join(PROJECT_ROOT, "persona", "miner_state.json")
+            if os.path.exists(miner_path):
+                with open(miner_path, "r", encoding="utf-8") as _mf:
+                    _ms = json.load(_mf)
+                print(f"  礦工最后运行: {_ms.get('last_analysis_date','?')} (共{_ms.get('total_analyses',0)}次)")
+                print(f"  覆盖日期: {_ms.get('last_dates_covered',[])}")
+            prompt_path = os.path.join(PROJECT_ROOT, "persona", "prompt_v1.txt")
+            if os.path.exists(prompt_path):
+                with open(prompt_path, "r", encoding="utf-8") as _pf:
+                    _pc = _pf.read()
+                _days = [l for l in _pc.split('\n') if l.startswith('## [')]
+                print(f"  prompt_v1.txt: {len(_days)} 天 ({', '.join(l[4:14] for l in _days)})")
+            print(f"  ---")
+            for days_back in range(7):
+                d = (_dd_dt.now(_dd_tz.utc) + _dd_td(hours=8) - _dd_td(days=days_back)).strftime("%Y-%m-%d")
+                md = os.path.join(diary_dir, f"{d}.md")
+                ev = os.path.join(diary_dir, f"{d}_events.json")
+                md_ok = "Y" if os.path.exists(md) else "N"
+                ev_ok = "Y" if os.path.exists(ev) else "N"
+                marker = " <-- 今天" if days_back == 0 else (" <-- 昨天" if days_back == 1 else "")
+                print(f"  {d}: diary={md_ok} events={ev_ok}{marker}")
+            print(f"{'='*50}\n")
+            continue
+
         # ── /todos 命令：列出当前活跃待办池 ──
         if user_input.strip().lower() in ("/todos", "/todo"):
             try:
-                import sqlite3
                 _tdb = sqlite3.connect(os.path.join(PROJECT_ROOT, "memory", "cards.db"))
                 _tdb.row_factory = sqlite3.Row
                 _tc = _tdb.cursor()
@@ -1576,6 +1660,8 @@ def main():
             va_phase = _track_va(va['valence'], va['arousal'])
             va['_phase'] = va_phase['phase']
             va['_phase_cfg'] = _phase_cfg(va_phase['phase'])
+            from shared import status_event
+            status_event("VA", f"{va_phase['phase']} v={va['valence']:.2f} a={va['arousal']:.2f}", "💭")
             if va_phase['phase'] != 'normal':
                 print(f"[VA追踪] {va_phase['phase']} v={va['valence']:.2f} a={va['arousal']:.2f} dv={va_phase['delta_v']:+.2f}")
             # ── VA 落盘：每轮情绪坐标写入日志供复盘 ──
@@ -1703,12 +1789,29 @@ def main():
                   f"confidence={arbiter_judgment.get('confidence', 0):.2f} "
                   f"action={arbiter_judgment.get('suggested_action')} "
                   f"targets={arbiter_judgment.get('target_card_ids', [])}")
+            from shared import status_event
+            _arb_j = arbiter_judgment.get('judgment', '?')
+            _arb_c = arbiter_judgment.get('confidence', 0)
+            _arb_icon = {'complete': '✅', 'new': '🆕', 'update': '📝', 'overdue': '⏰', 'ambiguous': '❓'}.get(_arb_j, '•')
+            status_event("裁决", f"{_arb_j}({_arb_c:.0%})→{arbiter_judgment.get('suggested_action','')}", _arb_icon)
         except Exception as arb_e:
             print(f"[裁决者] 调用失败，降级跳过: {arb_e}")
+            from shared import status_event
+            status_event("裁决", "降级跳过", "⚠️")
 
         # ── 提示词组装：破甲前缀 → 角色扮演声明 → 人格 → 运维指令 → 上下文（毒点22修复） ──
         from delegate_tools import JAILBREAK_PREFIX
         full_context = JAILBREAK_PREFIX + RP_DECLARATION + "\n\n" + PERSONA + "\n\n"
+
+        # ── 最近 Bark 推送：放在人格下方，确保 AI 第一时间看到 ──
+        from shared import get_recent_bark
+        _bark = get_recent_bark()
+        if _bark:
+            _bl = ["【系统最近推送到她手机的消息 — 她可能会来吐槽，请接住】"]
+            for _b in _bark[-2:]:
+                _bl.append(f"  [{_b['time']}] Bark推送: {_b['msg']}")
+            full_context += "\n".join(_bl) + "\n\n"
+            print(f"[Bark注入] 已注入 {len(_bark)} 条最近推送")
 
         # ── 时间锚点：代码计算的确定事实，模型用此推理而非瞎猜 ──
         now_anchor = datetime.now()
@@ -1897,7 +2000,7 @@ def main():
             "  状态更新: <!-- status_card: 卡片ID|进行中 --> 或 <!-- status_card: 卡片ID|阻塞 -->\n"
             "  标记完成: <!-- resolve_card: 卡片ID -->\n"
             "  引用记忆: <!-- ref:ID1,ID2 -->\n"
-            "  目标日期: <!-- target_date: YYYY-MM-DD -->\n\n"
+            "  目标日期: <!-- target_date: YYYY-MM-DD HH:MM --> (有时间锚点时须包含时间，如 2026-05-22 14:50)\n\n"
         )
 
         # ── VA 瘦身：高唤醒模式跳过写卡标准，但分类校准和操作格式保留 ──
@@ -2062,6 +2165,11 @@ def main():
         if cot:
             print(f"\x1b[2m[💭] {cot}\x1b[0m")
             print("─" * 50)
+        from shared import flush_status, status_event
+        status_event("回合", f"#{turn_counter} {datetime.now().strftime('%H:%M:%S')}", "🔄")
+        panel = flush_status()
+        if panel:
+            print(panel)
         print(f"DSphantom: {display_reply}\n")
         recent.append({"user": user_input, "assistant": display_reply})
 

@@ -133,8 +133,14 @@ def main():
         print(f"[miner]   压缩 {date_str} ({len(narrative)} 字)...")
         try:
             compressed = compress_narrative(date_str, narrative)
-            print(f"[miner]     → {compressed[:80]}...")
-            compressed_entries.append((date_str, compressed))
+            # 空内容降级：API 可能返回空字符串，此时用截断原文
+            if not compressed or not compressed.strip():
+                print(f"[miner]     ✗ 压缩返回空内容，使用截断降级")
+                fallback = narrative[:200] + "..." if len(narrative) > 200 else narrative
+                compressed_entries.append((date_str, fallback))
+            else:
+                print(f"[miner]     → {compressed[:80]}...")
+                compressed_entries.append((date_str, compressed))
         except Exception as e:
             print(f"[miner]     ✗ 压缩失败: {e}，使用截断降级")
             fallback = narrative[:200] + "..." if len(narrative) > 200 else narrative

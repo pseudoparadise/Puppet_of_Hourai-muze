@@ -48,16 +48,10 @@ def estimate(text: str, max_retries: int = 2) -> dict:
             resp = requests.post(api_url, headers=headers, json=payload, timeout=15)
             if resp.status_code == 200:
                 raw = resp.json()["choices"][0]["message"]["content"]
-                # ── FIX: 处理截断JSON ──
-                try:
-                    result = json.loads(raw)
-                except json.JSONDecodeError:
-                    import re
-                    match = re.search(r'\{.*\}', raw, re.DOTALL)
-                    if match:
-                        result = json.loads(match.group())
-                    else:
-                        raise
+                from shared import llm_to_json
+                result = llm_to_json(raw)
+                if result is None:
+                    raise ValueError(f"无法解析 VA 估测器输出: {raw[:100]}")
 
                 v_raw = float(result.get("valence", 5))
                 a_raw = float(result.get("arousal", 5))

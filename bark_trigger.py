@@ -158,8 +158,8 @@ def main():
     with open(os.path.join(PROJECT_ROOT, "config.json"), "r", encoding="utf-8") as f:
         config = json.load(f)
     BARK_MODEL = config["global"].get("model", "deepseek-v4-flash")
-    with open(os.path.join(PROJECT_ROOT, "state.json"), "r", encoding="utf-8") as f:
-        state = json.load(f)
+    from shared import load_state
+    state = load_state()
 
     now = now_utc()
     beijing_tz = timezone(timedelta(hours=8))
@@ -302,14 +302,8 @@ def main():
             reply = resp.json()["choices"][0]["message"]["content"]
             print(f"DeepSeek 返回: {reply}")
 
-            try:
-                decision = json.loads(reply)
-            except:
-                json_match = re.search(r'\{.*\}', reply, re.DOTALL)
-                if json_match:
-                    decision = json.loads(json_match.group())
-                else:
-                    decision = {"action": "未知", "bark_message": reply[:100], "reason": "解析失败"}
+            from shared import llm_to_json
+            decision = llm_to_json(reply, default={"action": "未知", "bark_message": reply[:100], "reason": "解析失败"})
 
             print(f"\n决策: {decision.get('action')}")
             print(f"原因: {decision.get('reason')}")
@@ -332,6 +326,9 @@ def main():
                     bark_resp = requests.get(bark_url, timeout=10)
                     print(f"Bark 推送结果: {bark_resp.status_code}")
                     bark_sent = (bark_resp.status_code == 200)
+                    if bark_sent:
+                        from shared import record_bark_push
+                        record_bark_push(msg)
                 except Exception as e:
                     print(f"Bark 推送失败: {e}")
             elif msg:
@@ -350,8 +347,8 @@ def main():
     _log_cycle(config, now, silence_minutes, source, f"{state_label}(p={probability})", decision, bark_sent)
     print("日志已写入。")
 
-    from delegate_tools import atomic_write_json
-    atomic_write_json(os.path.join(PROJECT_ROOT, "state.json"), state)
+    from shared import save_state
+    save_state(state)
 
     print("bark_trigger.py 执行完毕。")
 

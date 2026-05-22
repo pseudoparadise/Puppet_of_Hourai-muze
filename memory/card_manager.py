@@ -91,7 +91,12 @@ class CardManager:
             self.status_label.config(text=f"读取 pending 文件出错: {e}")
             return
 
+        seen_iids = set()
         for card in pending:
+            iid = card.get("id", f"unknown_{len(seen_iids)}")
+            if iid in seen_iids:
+                iid = f"{iid}_{len(seen_iids)}"
+            seen_iids.add(iid)
             self.pending_tree.insert("", tk.END, values=(
                 card.get("title", "无标题"),
                 card.get("category", "?"),
@@ -99,7 +104,7 @@ class CardManager:
                 f"{card.get('valence', 0.0):+.1f}",
                 f"{card.get('arousal', 0.5):.1f}",
                 card.get("content", "")[:120]
-            ), iid=card.get("id"))
+            ), iid=iid)
 
         self.status_label.config(text=f"共 {len(pending)} 张待审核卡片。")
 

@@ -11,7 +11,7 @@ from tkinter import ttk, messagebox
 
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from memory.memory_manager import get_todo_list, resolve_card
+from memory.memory_manager import get_todo_list, resolve_card, get_pending_todos
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "cards.db")
 
@@ -34,8 +34,13 @@ class TodoManager:
         toolbar = ttk.Frame(root)
         toolbar.pack(fill=tk.X, padx=5, pady=5)
         ttk.Button(toolbar, text="刷新", command=self.load_todos).pack(side=tk.LEFT, padx=3)
+        ttk.Button(toolbar, text="📥 同步日记待办", command=self.sync_diary).pack(side=tk.LEFT, padx=3)
         ttk.Button(toolbar, text="标记完成", command=self.resolve_selected).pack(side=tk.LEFT, padx=3)
         ttk.Button(toolbar, text="查看卡片详情", command=self.show_card_detail).pack(side=tk.LEFT, padx=3)
+        # 自动刷新
+        self.auto_refresh = tk.BooleanVar(value=False)
+        ttk.Checkbutton(toolbar, text="30s自动刷新", variable=self.auto_refresh,
+                        command=self._toggle_auto_refresh).pack(side=tk.LEFT, padx=10)
 
         # 象限筛选
         ttk.Label(toolbar, text="  象限:").pack(side=tk.LEFT, padx=(15, 3))
@@ -52,21 +57,25 @@ class TodoManager:
         self.status_label.pack(side=tk.RIGHT, padx=10)
 
         # Treeview
-        columns = ("quadrant", "title", "category", "deadline", "importance", "chord")
+        columns = ("quadrant", "title", "status", "source", "category", "deadline", "importance", "chord")
         self.tree = ttk.Treeview(root, columns=columns, show="headings", selectmode="browse")
         self.tree.heading("quadrant", text="象限", command=lambda: self.sort_by("quadrant"))
         self.tree.heading("title", text="标题", command=lambda: self.sort_by("title"))
+        self.tree.heading("status", text="状态", command=lambda: self.sort_by("status"))
+        self.tree.heading("source", text="来源", command=lambda: self.sort_by("source"))
         self.tree.heading("category", text="分类", command=lambda: self.sort_by("category"))
         self.tree.heading("deadline", text="到期", command=lambda: self.sort_by("deadline"))
         self.tree.heading("importance", text="重要度", command=lambda: self.sort_by("importance"))
         self.tree.heading("chord", text="和弦", command=lambda: self.sort_by("chord"))
 
-        self.tree.column("quadrant", width=100)
-        self.tree.column("title", width=280)
-        self.tree.column("category", width=90)
-        self.tree.column("deadline", width=90)
-        self.tree.column("importance", width=60)
-        self.tree.column("chord", width=140)
+        self.tree.column("quadrant", width=85)
+        self.tree.column("title", width=220)
+        self.tree.column("status", width=55)
+        self.tree.column("source", width=45)
+        self.tree.column("category", width=70)
+        self.tree.column("deadline", width=85)
+        self.tree.column("importance", width=50)
+        self.tree.column("chord", width=120)
 
         self.tree.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
@@ -81,7 +90,13 @@ class TodoManager:
         self.load_todos()
 
     def load_todos(self):
-        self.todos = get_todo_list()
+        # 合并 final + pending 待办
+        final_todos = get_todo_list()
+        for t in final_todos:
+            t['status'] = ''
+        pending_todos = get_pending_todos()
+        self.todos = pending_todos + final_todos
+
         quad_filter = self.quad_filter.get()
         self.tree.delete(*self.tree.get_children())
 
@@ -92,24 +107,54 @@ class TodoManager:
         self.todos = with_deadline + without_deadline
 
         shown = 0
+        pending_shown = 0
         for t in self.todos:
             if quad_filter != "全部" and t['quadrant'] != quad_filter:
                 continue
             td = t['target_date'] if t['target_date'] else "—"
             ch = t['chord'] if t['chord'] else "—"
-            values = (t['quadrant'], t['title'], t['category'], td, t['importance'], ch)
+            source = "📅" if t.get('synced_from') == 'diary' else "💬"
+            status = "⏳待审核" if t.get('status') == 'pending' else ""
+            values = (t['quadrant'], t['title'], status, source, t['category'], td, t['importance'], ch)
             item = self.tree.insert("", tk.END, values=values)
-            # 象限配色
-            bg, fg = QUAD_COLORS.get(t['quadrant'], ("#ffffff", "#000000"))
-            self.tree.tag_configure(t['quadrant'], background=bg, foreground=fg)
-            self.tree.item(item, tags=(t['quadrant'],))
+            # 配色：pending 用浅黄色
+            if t.get('status') == 'pending':
+                self.tree.tag_configure('pending', background='#fffacd', foreground='#cc8800')
+                self.tree.item(item, tags=('pending',))
+                pending_shown += 1
+            else:
+                bg, fg = QUAD_COLORS.get(t['quadrant'], ("#ffffff", "#000000"))
+                self.tree.tag_configure(t['quadrant'], background=bg, foreground=fg)
+                self.tree.item(item, tags=(t['quadrant'],))
             shown += 1
 
         self.status_label.config(
-            text=f"{shown}/{len(self.todos)} 项待办"
-            if quad_filter != "全部"
-            else f"{len(self.todos)} 项待办  |  /todos 命令也可查看"
+            text=f"{shown} 项 (⏳{pending_shown}待审核)"
+            if quad_filter == "全部"
+            else f"{shown}/{len(self.todos)} 项"
         )
+
+    def sync_diary(self):
+        """同步日记事件中的待办到卡片库。"""
+        try:
+            from memory.memory_manager import sync_diary_todos_to_cards
+            n = sync_diary_todos_to_cards(days_back=30)
+            self.status_label.config(text=f"同步完成：新增 {n} 张待办卡片")
+            self.load_todos()
+        except Exception as e:
+            self.status_label.config(text=f"同步失败: {e}")
+
+    def _toggle_auto_refresh(self):
+        """启用/停用 30 秒自动刷新。"""
+        if self.auto_refresh.get():
+            self._auto_refresh_loop()
+
+    def _auto_refresh_loop(self):
+        """自动刷新循环：每 30 秒 reload + sync。"""
+        if not self.auto_refresh.get():
+            return
+        self.load_todos()
+        self.root.after(30000, self._auto_refresh_loop)
 
     def resolve_selected(self):
         sel = self.tree.selection()
@@ -174,6 +219,8 @@ class TodoManager:
         col_map = {
             "quadrant": "quadrant",
             "title": "title",
+            "status": "status",
+            "source": "source",
             "category": "category",
             "deadline": "target_date",
             "importance": "importance",
@@ -194,10 +241,16 @@ class TodoManager:
                 continue
             td = t['target_date'] if t['target_date'] else "—"
             ch = t['chord'] if t['chord'] else "—"
-            values = (t['quadrant'], t['title'], t['category'], td, t['importance'], ch)
+            source = "📅" if t.get('synced_from') == 'diary' else "💬"
+            status = "⏳待审核" if t.get('status') == 'pending' else ""
+            values = (t['quadrant'], t['title'], status, source, t['category'], td, t['importance'], ch)
             item = self.tree.insert("", tk.END, values=values)
-            self.tree.tag_configure(t['quadrant'], background=QUAD_COLORS[t['quadrant']][0])
-            self.tree.item(item, tags=(t['quadrant'],))
+            if t.get('status') == 'pending':
+                self.tree.tag_configure('pending', background='#fffacd', foreground='#cc8800')
+                self.tree.item(item, tags=('pending',))
+            else:
+                self.tree.tag_configure(t['quadrant'], background=QUAD_COLORS[t['quadrant']][0])
+                self.tree.item(item, tags=(t['quadrant'],))
 
 
 if __name__ == "__main__":

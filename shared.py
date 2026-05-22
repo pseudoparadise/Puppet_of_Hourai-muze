@@ -42,12 +42,12 @@ def llm_to_json(raw: str, default=None):
         return default
     try:
         return json.loads(raw)
-    except json.JSONDecodeError:
+    except Exception:
         m = re.search(r'\{.*\}', raw, re.DOTALL)
         if m:
             try:
                 return json.loads(m.group())
-            except json.JSONDecodeError:
+            except Exception:
                 pass
     return default
 
@@ -111,3 +111,122 @@ def invalidate_config_cache():
     """强制下次 load_config() 重新读取文件。"""
     global _config_cache
     _config_cache = None
+
+
+def record_bark_push(msg: str):
+    """记录最近 N 条 Bark 推送消息到 state.json，供 trigger 注入主 AI prompt。"""
+    state = load_state()
+    recent = state.get("recent_bark", [])
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    bj_now = (_dt.now(_tz.utc) + _td(hours=8)).strftime('%m-%d %H:%M')
+    recent.append({"time": bj_now, "msg": msg})
+    state["recent_bark"] = recent[-5:]  # 只保留最近 5 条
+    save_state(state)
+
+
+def is_garbage_card(title: str, content: str) -> str:
+    """检测占位/空卡片。返回空字符串=通过，否则返回拦截原因。"""
+    _garbage = {"无明确承诺", "暂无计划", "没什么", "不知道", "无", "暂无", "未发现", "无承诺",
+                "未在对话中承诺", "无明确事项", "无任何承诺"}
+    if not title or not title.strip():
+        return "空标题"
+    if not content or not content.strip():
+        return "空内容"
+    if title.strip() in _garbage or content.strip() in _garbage:
+        return f"占位标题: {title}"
+    if "未在对话中" in content or "没有承诺" in content:
+        return f"空内容模式: {content[:40]}"
+    return ""
+
+
+def get_recent_bark() -> list:
+    """读取最近 Bark 推送记录（北京时间）。state.json 为空时降级扫 trigger.log。"""
+    recent = load_state().get("recent_bark", [])
+    if recent:
+        return recent
+    # 降级：从 trigger.log 提取最近 2 条成功推送，UTC → 北京时间
+    import json as _j, os as _os
+    from datetime import datetime as _dt2, timedelta as _td2, timezone as _tz2
+    log_path = _os.path.join(PROJECT_ROOT, "trigger.log")
+    if not _os.path.exists(log_path):
+        return []
+    try:
+        with open(log_path, "r", encoding="utf-8") as _f:
+            lines = _f.readlines()
+        found = []
+        for line in reversed(lines):
+            try:
+                e = _j.loads(line.strip())
+            except Exception:
+                continue
+            if e.get("bark_sent") and e.get("bark_message", "").strip():
+                # UTC → 北京时间
+                raw_ts = e.get("timestamp", "")
+                try:
+                    utc_dt = _dt2.fromisoformat(raw_ts.replace("+0000", "+00:00"))
+                    bj_dt = utc_dt.astimezone(_tz2(_td2(hours=8)))
+                    time_str = bj_dt.strftime('%m-%d %H:%M')
+                except Exception:
+                    time_str = raw_ts[:16].replace("T", " ")
+                found.append({
+                    "time": time_str,
+                    "msg": e["bark_message"][:100]
+                })
+                if len(found) >= 2:
+                    break
+        found.reverse()
+        return found
+    except Exception:
+        return []
+
+
+# ═══════════════════════════════════════════════════════════════
+# 7. 追踪日志（统一断点，grep [TRACE] 即可）
+# ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════
+# 回合状态面板：收集每轮事件，统一显示
+# ═══════════════════════════════════════════════════════════════
+
+_round_events = []
+
+def status_event(tag: str, detail: str, icon: str = "•"):
+    """记录回合内事件，供 flush_status() 统一显示。"""
+    from datetime import datetime as _dt
+    _round_events.append((tag, detail, icon))
+    # 同时落盘到 trigger.log
+    try:
+        log_path = os.path.join(PROJECT_ROOT, "trigger.log")
+        with open(log_path, "a", encoding="utf-8") as _tf:
+            _tf.write(json.dumps({"timestamp": _dt.now().isoformat(), "event": "round_event", "tag": tag, "detail": detail}, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+def flush_status() -> str:
+    """输出当前回合的状态面板，清空事件缓存。"""
+    if not _round_events:
+        return ""
+    width = 56
+    lines = [f"┌{'─' * width}┐"]
+    for tag, detail, icon in _round_events:
+        header = f"{icon} {tag}"
+        content = detail[:width - len(header) - 3]
+        lines.append(f"│ {header}: {content.ljust(width - len(header) - 2)}│")
+    lines.append(f"└{'─' * width}┘")
+    _round_events.clear()
+    return "\n".join(lines)
+
+
+def trace(tag: str, detail: str = ""):
+    """独立追踪：直接打印 + 落盘。不进入回合状态面板。
+    供 polling_loop / 后台进程使用。"""
+    from datetime import datetime as _dt
+    ts = _dt.now().strftime('%H:%M:%S.%f')[:12]
+    msg = f"[TRACE {ts} {tag}] {detail}"
+    print(msg)
+    try:
+        log_path = os.path.join(PROJECT_ROOT, "trigger.log")
+        with open(log_path, "a", encoding="utf-8") as _tf:
+            _tf.write(json.dumps({"timestamp": _dt.now().isoformat(), "event": "trace", "tag": tag, "detail": detail}, ensure_ascii=False) + "\n")
+    except Exception:
+        pass

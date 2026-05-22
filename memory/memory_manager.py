@@ -254,7 +254,7 @@ def get_todo_list() -> list:
     try:
         c = conn.cursor()
         c.execute("""
-            SELECT id, title, category, importance, target_date, chord, valence, arousal, resolved
+            SELECT id, title, category, importance, target_date, chord, valence, arousal, resolved, COALESCE(synced_from,'') as synced_from
             FROM cards
             WHERE review_status='final' AND resolved=0
               AND (target_date IS NOT NULL AND target_date != ''
@@ -266,7 +266,7 @@ def get_todo_list() -> list:
         rows = c.fetchall()
         todos = []
         for row in rows:
-            cid, title, cat, imp, td, chord, val, aro, res = row
+            cid, title, cat, imp, td, chord, val, aro, res, synced_from = row
             # 艾森豪威尔分类
             now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
             if imp >= 8:
@@ -293,6 +293,7 @@ def get_todo_list() -> list:
                 "importance": imp, "target_date": td or "",
                 "chord": chord or "", "valence": val, "arousal": aro,
                 "quadrant": quad, "resolved": bool(res),
+                "synced_from": synced_from or "",
             })
         return todos
     except Exception as e:
@@ -300,6 +301,71 @@ def get_todo_list() -> list:
         return []
     finally:
         conn.close()
+
+
+def get_pending_todos() -> list:
+    """读取 pending_cards.json 中有 target_date 的待办卡片（尚未审核通过）。
+    返回格式与 get_todo_list() 一致，额外包含 status='pending'。"""
+    import json as _json, os as _os3
+    from datetime import datetime as _dt_pend
+    pending_path = os.path.join(os.path.dirname(__file__), "pending_cards.json")
+    if not os.path.exists(pending_path):
+        return []
+    try:
+        with _os3.open(pending_path, "r", encoding="utf-8") as f:
+            pending = _json.load(f)
+    except Exception:
+        return []
+
+    todos = []
+    for pc in pending:
+        cat = pc.get("category", "")
+        if cat not in ('todo', 'commitments', 'daily_life'):
+            continue
+        td = pc.get("target_date", "")
+        imp = pc.get("importance", 5)
+        # 艾森豪威尔分类
+        now_str = _dt_pend.now().strftime('%Y-%m-%d')
+        if imp >= 8:
+            quad = "重要不紧急"
+        elif td and td < now_str:
+            quad = "重要且紧急"
+        elif cat == 'todo':
+            if td:
+                try:
+                    import re as _re_q
+                    m = _re_q.match(r'(\d{4}-\d{2}-\d{2})', td)
+                    if m:
+                        days_left = (_dt_pend.strptime(m.group(1), '%Y-%m-%d') - _dt_pend.now()).days
+                        quad = "重要且紧急" if days_left <= 7 else "重要不紧急"
+                    else:
+                        quad = "重要不紧急"
+                except Exception:
+                    quad = "不重要但紧急"
+            else:
+                quad = "不重要但紧急"
+        elif cat == 'daily_life':
+            quad = "不重要但紧急" if td else "不重要不紧急"
+        elif cat == 'commitments':
+            quad = "重要不紧急" if imp >= 7 else "不重要但紧急"
+        else:
+            quad = "不重要不紧急"
+
+        todos.append({
+            "id": pc.get("id", ""),
+            "title": pc.get("title", ""),
+            "category": cat,
+            "importance": imp,
+            "target_date": td or "",
+            "chord": pc.get("chord", "") or "",
+            "valence": pc.get("valence", 0.0),
+            "arousal": pc.get("arousal", 0.5),
+            "quadrant": quad,
+            "resolved": False,
+            "synced_from": "",
+            "status": "pending",
+        })
+    return todos
 
 
 def run_audit():
@@ -730,6 +796,106 @@ def update_anchor_set():
         return []
     finally:
         conn.close()
+
+def sync_diary_todos_to_cards(days_back: int = 30) -> int:
+    """
+    扫描近 N 天日记 events.json 的艾森豪威尔四象限，
+    将 card_id='无' 的条目同步为 cards.db 中的卡片。
+    返回创建的卡片数量。已有 card_id 的条目自动跳过。
+    """
+    from datetime import datetime as _dt, timedelta as _td
+    import json as _json
+
+    diary_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "diary")
+    if not os.path.exists(diary_dir):
+        return 0
+
+    conn = sqlite3.connect(DB_PATH)
+    # 确保 synced_from 列存在
+    try:
+        conn.execute("ALTER TABLE cards ADD COLUMN synced_from TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+    created = 0
+
+    try:
+        for days_back_i in range(days_back, 0, -1):
+            d = (_dt.now() - _td(days=days_back_i)).strftime("%Y-%m-%d")
+            ep = os.path.join(diary_dir, f"{d}_events.json")
+            if not os.path.exists(ep):
+                continue
+
+            with open(ep, "r", encoding="utf-8") as f:
+                ev = _json.load(f)
+
+            eis = ev.get("eisenhower", {})
+            events_modified = False
+
+            for quad_key, items in eis.items():
+                for it in items:
+                    card_id = it.get("card_id", "无")
+                    if card_id and card_id != "无":
+                        continue  # 已同步过
+
+                    item_text = it.get("item", "")
+                    deadline = it.get("deadline", "")
+                    note = it.get("note", "")
+
+                    if not item_text or len(item_text) < 2:
+                        continue
+
+                    # 确定 card_id：日期_标题
+                    cid = f"{d.replace('-', '')}_{item_text[:20]}"
+                    # 检查是否已存在
+                    c = conn.cursor()
+                    c.execute("SELECT id FROM cards WHERE id=?", (cid,))
+                    if c.fetchone():
+                        it["card_id"] = cid
+                        events_modified = True
+                        continue
+
+                    # 确定分类和重要度
+                    cat = "todo"
+                    imp = 7
+                    if quad_key == "important_urgent":
+                        cat, imp = "todo", 8
+                    elif quad_key == "important_not_urgent":
+                        cat, imp = "commitments", 7
+                    elif quad_key == "not_important_urgent":
+                        cat, imp = "todo", 5
+                    elif quad_key == "not_important_not_urgent":
+                        cat, imp = "daily_life", 3
+
+                    content = f"{item_text}。" + (f"备注: {note}" if note else "")
+                    target_date = deadline if deadline else None
+
+                    try:
+                        conn.execute("""
+                            INSERT INTO cards (id, title, content, keywords, importance,
+                                category, review_status, enabled_in_context, target_date, synced_from)
+                            VALUES (?, ?, ?, ?, ?, ?, 'final', 1, ?, 'diary')
+                        """, (cid, item_text[:40], content[:200], item_text, imp, cat, target_date))
+                        conn.commit()
+                        it["card_id"] = cid
+                        events_modified = True
+                        created += 1
+                        print(f"[日记同步] {d} 「{item_text}」→ card:{cid} [{cat}] imp={imp}")
+                    except sqlite3.IntegrityError:
+                        # 重复 ID — 卡片已被其他方式创建
+                        it["card_id"] = cid
+                        events_modified = True
+
+            if events_modified:
+                from delegate_tools import atomic_write_json
+                atomic_write_json(ep, ev)
+                print(f"[日记同步] {d}_events.json 已更新 card_id 链接")
+    finally:
+        conn.close()
+
+    if created > 0:
+        print(f"[日记同步] 共新建 {created} 张待办卡片")
+    return created
+
 
 if __name__ == "__main__":
     run_audit()

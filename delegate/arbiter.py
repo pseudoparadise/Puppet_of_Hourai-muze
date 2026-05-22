@@ -116,14 +116,10 @@ diary_todos (近3天四象限待办): {diary_str}"""
 
         if resp.status_code == 200:
             raw = resp.json()["choices"][0]["message"]["content"]
-            try:
-                result = json.loads(raw)
-            except json.JSONDecodeError:
-                m = re.search(r'\{.*\}', raw, re.DOTALL)
-                if m:
-                    result = json.loads(m.group())
-                else:
-                    raise ValueError(f"无法解析裁决者输出: {raw[:100]}")
+            from shared import llm_to_json
+            result = llm_to_json(raw)
+            if result is None:
+                raise ValueError(f"无法解析裁决者输出: {raw[:100]}")
 
             # 校验必要字段
             result.setdefault("judgment", "ambiguous")
