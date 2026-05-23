@@ -61,6 +61,13 @@ def main():
     save_index(index)
     print(f"\n完成: {success} 成功, {fail} 失败, {len(missing)} 总计")
 
+    # 全量重建 link graph
+    try:
+        from linker import rebuild_all_links as _rebuild
+        _rebuild()
+    except Exception as _le:
+        print(f"[link] 重建跳过: {_le}")
+
     # 验证
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()

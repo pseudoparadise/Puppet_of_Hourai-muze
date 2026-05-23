@@ -83,6 +83,31 @@ def main():
     except Exception as _me:
         _log_event("miner_error", {"error": str(_me)[:200]})
 
+    # ── 启动自检：老卡 link 回填（link 表为空时自动重建） ──
+    try:
+        from memory.linker import ensure_link_table
+        ensure_link_table()
+        import sqlite3 as _l_sql
+        _ldb = _l_sql.connect(os.path.join(PROJECT_ROOT, "memory", "cards.db"))
+        _lcur = _ldb.cursor()
+        _lcur.execute("SELECT COUNT(*) FROM card_links")
+        _link_count = _lcur.fetchone()[0]
+        _lcur.execute("SELECT COUNT(*) FROM cards WHERE review_status='final' AND embedding IS NOT NULL")
+        _vec_count = _lcur.fetchone()[0]
+        _ldb.close()
+        if _link_count == 0 and _vec_count >= 2:
+            print(f"[link回填] link 表为空 ({_vec_count} 张有向量卡片)，正在重建...")
+            _log_event("link_rebuild_start", {"vec_count": _vec_count})
+            from memory.linker import rebuild_all_links
+            _built = rebuild_all_links()
+            _log_event("link_rebuild_done", {"edges": _built})
+            print(f"[link回填] 完成: {_built} 条边")
+        else:
+            print(f"[link回填] 已就绪: {_link_count} 条边 ({_vec_count} 张向量卡片)")
+    except Exception as _le:
+        print(f"[link回填] 跳过: {_le}")
+        _log_event("link_rebuild_error", {"error": str(_le)[:200]})
+
     # ── 待办提醒：扫描 todo/commitments 卡，定时推送 ──
     REMINDED_PATH = os.path.join(PROJECT_ROOT, "memory", "reminded_todos.json")
     REMINDER_COOLDOWN = 60  # 同一张卡至少间隔 60 分钟再提醒

@@ -211,6 +211,13 @@ class CardManager:
 
             # ── 毒点26修复：所有操作成功后最后 commit ──
             conn.commit()
+
+            # 为新卡片建 link 边
+            try:
+                from .linker import build_links as _build_links
+                _build_links(card["id"], vec)
+            except Exception as _le:
+                print(f"[link] 建边跳过: {_le}")
         except Exception:
             conn.rollback()
             raise
@@ -238,12 +245,13 @@ class CardManager:
         ttk.Button(btn_frame, text="查看详情", command=self.show_card_detail).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="回填向量", command=self.backfill_embeddings).pack(side=tk.LEFT, padx=5)
 
-        columns = ("id", "title", "category", "importance", "valence", "arousal", "days_remaining", "enabled", "resolved", "vec", "content")
+        columns = ("id", "title", "category", "importance", "links", "valence", "arousal", "days_remaining", "enabled", "resolved", "vec", "content")
         self.final_tree = ttk.Treeview(self.final_frame, columns=columns, show="headings", height=12)
         self.final_tree.heading("id", text="卡片ID")
         self.final_tree.heading("title", text="标题")
         self.final_tree.heading("category", text="分类")
         self.final_tree.heading("importance", text="重要度")
+        self.final_tree.heading("links", text="link")
         self.final_tree.heading("valence", text="效价")
         self.final_tree.heading("arousal", text="唤醒")
         self.final_tree.heading("days_remaining", text="剩余")
@@ -255,6 +263,7 @@ class CardManager:
         self.final_tree.column("title", width=110)
         self.final_tree.column("category", width=70)
         self.final_tree.column("importance", width=50)
+        self.final_tree.column("links", width=40)
         self.final_tree.column("valence", width=55)
         self.final_tree.column("arousal", width=55)
         self.final_tree.column("days_remaining", width=50)
@@ -289,6 +298,20 @@ class CardManager:
             rows = c.fetchall()
             from datetime import datetime, timezone as _tz
             now = datetime.now(_tz.utc).replace(tzinfo=None)
+
+            # 批量加载 link 计数
+            link_counts = {}
+            try:
+                _lc = conn.execute("""
+                    SELECT card_id, COUNT(*) as cnt FROM (
+                        SELECT card_id_a as card_id FROM card_links
+                        UNION ALL SELECT card_id_b FROM card_links
+                    ) GROUP BY card_id
+                """).fetchall()
+                link_counts = {r["card_id"]: r["cnt"] for r in _lc}
+            except Exception:
+                pass
+
             shown = 0
             for row in rows:
                 if cat_filter_val != "全部" and row["category"] != cat_filter_val:
@@ -308,11 +331,13 @@ class CardManager:
                     remaining = max(0, 30 - elapsed)
                     days_str = f"{remaining}天" if remaining > 0 else "已过期"
 
+                _lcnt = link_counts.get(row["id"], 0)
                 self.final_tree.insert("", tk.END, values=(
                     row["id"],
                     row["title"],
                     row["category"],
                     row["importance"],
+                    str(_lcnt),
                     f"{row['valence']:+.1f}" if row['valence'] is not None else "+0.0",
                     f"{row['arousal']:.1f}" if row['arousal'] is not None else "0.5",
                     days_str,
@@ -374,12 +399,33 @@ class CardManager:
                 c = conn.cursor()
                 c.execute("SELECT content, keywords FROM cards WHERE id=?", (card_id,))
                 row = c.fetchone()
-                conn.close()
                 if row:
                     detail += "\n\n--- 完整内容 ---\n" + str(row[0])
                     detail += "\n\n关键词: " + str(row[1] or "")
-            except:
+                # 查询 link 邻居
+                try:
+                    lc = conn.execute(
+                        "SELECT card_id_b, similarity FROM card_links WHERE card_id_a=? "
+                        "UNION ALL SELECT card_id_a, similarity FROM card_links WHERE card_id_b=? "
+                        "ORDER BY similarity DESC",
+                        (card_id, card_id)
+                    ).fetchall()
+                    if lc:
+                        detail += "\n\n--- 关联卡片 ---"
+                        for lid, lsim in lc:
+                            nc = conn.cursor()
+                            nc.execute("SELECT title FROM cards WHERE id=?", (lid,))
+                            nr = nc.fetchone()
+                            label = nr[0][:30] if nr else lid
+                            detail += f"\n  {label}  (cos={lsim:.3f})"
+                    else:
+                        detail += "\n\n(无关联卡片)"
+                except Exception:
+                    pass
+            except Exception:
                 pass
+            finally:
+                conn.close()
         
         messagebox.showinfo("卡片详情", detail)
 

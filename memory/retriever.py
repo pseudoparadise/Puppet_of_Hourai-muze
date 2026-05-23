@@ -715,6 +715,65 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
     # 重排
     merged.sort(key=lambda x: x["score"], reverse=True)
 
+    # ── link 扩散：沿 link 边走一跳，邻居卡衰减权重加入候选池 ──
+    LINK_DECAY = 0.60
+    _expand_from = [c for c in merged[:5] if c.get("score", 0) > 0]
+    _diffused_cards = []  # 记录扩散详情供 console 输出
+    if _expand_from:
+        try:
+            from .linker import get_linked_with_similarity as _get_linked, LINK_THRESHOLD as _LINK_MIN
+            _neighbor_ids = set()
+            _neighbor_sims = {}
+            _neighbor_sources = {}  # nid → source card title
+            for _card in _expand_from:
+                for _nid, _nsim in _get_linked(_card["id"]):
+                    if _nid not in seen:
+                        if _nid not in _neighbor_ids or _nsim > _neighbor_sims.get(_nid, 0):
+                            _neighbor_sims[_nid] = _nsim
+                            _neighbor_sources[_nid] = _card.get("title", _card["id"])[:20]
+                        _neighbor_ids.add(_nid)
+
+            if _neighbor_ids:
+                _conn_link = sqlite3.connect(db_path)
+                _conn_link.row_factory = sqlite3.Row
+                _clink = _conn_link.cursor()
+                _placeholders = ",".join(["?" for _ in _neighbor_ids])
+                _clink.execute(
+                    f"SELECT id, keywords, importance, category, content, title, "
+                    f"created_at, last_referenced_at, usage_count "
+                    f"FROM cards WHERE id IN ({_placeholders}) "
+                    f"AND review_status='final' AND enabled_in_context=1",
+                    list(_neighbor_ids)
+                )
+                _linked = 0
+                for _row in _clink.fetchall():
+                    _ncard = dict(_row)
+                    _ncard["hit_count"] = 0
+                    _ncard["distance"] = 1.5
+                    _base_score = _score_card(_ncard, 0, 1.5, effective_weights, anchor_ids, va_tier)
+                    _nsim = _neighbor_sims.get(_ncard["id"], _LINK_MIN)
+                    _ncard["score"] = _base_score * LINK_DECAY * (0.7 + 0.3 * _nsim)
+                    _ncard["_link_diffused"] = True
+                    merged.append(_ncard)
+                    seen[_ncard["id"]] = _ncard
+                    _linked += 1
+                    _diffused_cards.append((
+                        _ncard["title"][:25],
+                        _neighbor_sources.get(_ncard["id"], "?"),
+                        _nsim,
+                        round(_ncard["score"], 3)
+                    ))
+                _conn_link.close()
+                if _linked:
+                    print(f"[link扩散] {_linked} 张邻居卡注入候选池 (decay={LINK_DECAY})")
+                    for _dt, _ds, _dsim, _dscore in _diffused_cards:
+                        print(f"  ↳ 「{_dt}」← {_ds}  (link_cos={_dsim:.3f} score={_dscore})")
+        except Exception as _ld_e:
+            print(f"[link扩散] 跳过: {_ld_e}")
+
+    # 重排（含 link 扩散邻居）
+    merged.sort(key=lambda x: x["score"], reverse=True)
+
     result = []
     categories_used = set()
 

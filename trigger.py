@@ -1283,6 +1283,27 @@ def main():
     except Exception as _chk_e:
         print(f"[启动自检] 跳过: {_chk_e}")
 
+    # ── 启动自检：老卡 link 回填（link 表为空时自动重建） ──
+    try:
+        from memory.linker import ensure_link_table
+        ensure_link_table()
+        _ldb = sqlite3.connect(os.path.join(PROJECT_ROOT, "memory", "cards.db"))
+        _lcur = _ldb.cursor()
+        _lcur.execute("SELECT COUNT(*) FROM card_links")
+        _link_count = _lcur.fetchone()[0]
+        _lcur.execute("SELECT COUNT(*) FROM cards WHERE review_status='final' AND embedding IS NOT NULL")
+        _vec_count = _lcur.fetchone()[0]
+        _ldb.close()
+        if _link_count == 0 and _vec_count >= 2:
+            print(f"[link回填] link 表为空 ({_vec_count} 张有向量卡片)，正在重建...")
+            from memory.linker import rebuild_all_links
+            _built = rebuild_all_links()
+            print(f"[link回填] 完成: {_built} 条边")
+        else:
+            print(f"[link回填] 已就绪: {_link_count} 条边 ({_vec_count} 张向量卡片)")
+    except Exception as _le:
+        print(f"[link回填] 跳过: {_le}")
+
     recent = []
     chat_log_path = os.path.join(PROJECT_ROOT, "chat_logs.json")
     # ── P3-2: 当前 session 已写入 card category → 上次写入轮数 ──
