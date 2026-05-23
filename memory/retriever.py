@@ -640,6 +640,7 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
             query_vec = getattr(retrieve, '_cached_query_vec', None)
             if query_vec is None:
                 query_vec = embed(query)
+                retrieve._cached_query_vec = query_vec
             index = load_index()
             if index.ntotal > 0:
                 candidates = search_index(index, query_vec, k=min(10, max(effective_k * semantic_k_mult, 5)))

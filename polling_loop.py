@@ -91,6 +91,8 @@ def main():
         """扫描到期待办，Bark 推送提醒。返回提醒数量。"""
         import sqlite3, json as _json
         from datetime import datetime as _dt, timedelta as _td
+        with open(os.path.join(PROJECT_ROOT, "config.json"), "r", encoding="utf-8") as _f:
+            config = json.load(_f)
         db_path = os.path.join(PROJECT_ROOT, "memory", "cards.db")
         if not os.path.exists(db_path):
             return 0

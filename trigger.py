@@ -689,7 +689,9 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
         try:
             from encoder import embed as _embed_cpl, load_index as _load_idx_cpl, search_index as _search_cpl
             import numpy as _np_cpl
-            _cpl_vec = _embed_cpl(user_input)
+            _cpl_vec = getattr(retrieve, '_cached_query_vec', None)
+            if _cpl_vec is None:
+                _cpl_vec = _embed_cpl(user_input)
             _cpl_idx = _load_idx_cpl()
             if _cpl_idx.ntotal > 0:
                 _cpl_neighbors = _search_cpl(_cpl_idx, _cpl_vec, k=10)
@@ -988,7 +990,9 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
         _exposure_detected = False
         try:
             from encoder import embed as _embed_exp, load_index as _load_idx_exp, search_index as _search_exp
-            _exp_vec = _embed_exp(user_input)
+            _exp_vec = getattr(retrieve, '_cached_query_vec', None)
+            if _exp_vec is None:
+                _exp_vec = _embed_exp(user_input)
             _exp_idx = _load_idx_exp()
             if _exp_idx.ntotal > 0:
                 _exp_neighbors = _search_exp(_exp_idx, _exp_vec, k=5)

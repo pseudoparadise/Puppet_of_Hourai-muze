@@ -15,7 +15,32 @@ STATE_FILE = os.path.join(PROJECT_ROOT, ".music_state.json")
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("content-length", 0))
-        body = self.rfile.read(length).decode("utf-8")
+        raw = self.rfile.read(length)
+
+        # /stopped 不需要 body
+        if self.path == "/stopped":
+            try:
+                os.remove(STATE_FILE)
+            except:
+                pass
+            print(">> 播放停止")
+            self._reply(200, {"ok": True})
+            return
+
+        if not raw:
+            self._reply(400, {"error": "empty body"})
+            return
+
+        body = None
+        for enc in ["utf-8", "gbk", "gb2312"]:
+            try:
+                body = raw.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        if body is None:
+            self._reply(400, {"error": "decode failed"})
+            return
         try:
             data = json.loads(body)
         except json.JSONDecodeError:
@@ -37,16 +62,9 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 with open(STATE_FILE, "w", encoding="utf-8") as f:
                     json.dump(state, f, ensure_ascii=False, indent=2)
-                print(f"▶ {state.get('song_name','?')} — {state.get('artist','?')}")
+                print(f">> {state.get('song_name','?')} -- {state.get('artist','?')}")
             except Exception as e:
                 print(f"写文件失败: {e}", file=sys.stderr)
-            self._reply(200, {"ok": True})
-        elif self.path == "/stopped":
-            try:
-                os.remove(STATE_FILE)
-            except:
-                pass
-            print("■ 播放停止")
             self._reply(200, {"ok": True})
         else:
             self._reply(404, {"error": "not found"})
@@ -80,3 +98,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n已退出")
         server.shutdown()
+ 
