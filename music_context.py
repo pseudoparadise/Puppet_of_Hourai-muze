@@ -66,9 +66,11 @@ def get_music_context() -> str:
             return f"【此刻她正在听的音乐 — 你可以自然提及，但不要刻意】\n  状态: {cli.get('message', '播放中')}\n\n"
         return ""
 
-    lines = ["【此刻她正在听的音乐 — 你可以自然提及，但不要刻意】"]
-    lines.append(f"  歌曲: {state.get('song_name', '未知')}")
-    lines.append(f"  歌手: {state.get('artist', '未知')}")
+    lines = ["【此刻她正在听的音乐 — 仅当前一首，你可以自然提及，但不要刻意，不要编造其他歌曲】"]
+    song = state.get('song_name', '未知').strip()
+    artist = state.get('artist', '').strip()
+    lines.append(f"  歌曲: {song if song else '未知'}")
+    lines.append(f"  歌手: {artist if artist else '未知'}")
     album = state.get("album", "")
     if album:
         lines.append(f"  专辑: {album}")

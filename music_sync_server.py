@@ -48,12 +48,17 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/nowplaying":
+            raw_name = data.get("song_name", data.get("title", ""))
+            # 清洗 ▶ 等播放图标前缀
+            clean_name = re.sub(r'^[\s▶▷►♫♪🎵🎶🎧🔊🔉🔈🎤🎼🎹🥁🎸🎺🎻📻🎙🎚🎛]+', '', raw_name).strip()
+            raw_artist = data.get("artist", "")
+            clean_artist = raw_artist.strip().rstrip(" -–—")
             state = {
                 "playing": data.get("playing", True),
                 "paused": data.get("paused", False),
                 "track_id": data.get("track_id", ""),
-                "song_name": data.get("song_name", data.get("title", "")),
-                "artist": data.get("artist", ""),
+                "song_name": clean_name or raw_name,
+                "artist": clean_artist,
                 "album": data.get("album", ""),
                 "album_pic": data.get("album_pic", ""),
                 "duration_formatted": data.get("duration_formatted", ""),
@@ -84,6 +89,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("access-control-allow-origin", "*")
         self.send_header("access-control-allow-methods", "POST, OPTIONS")
         self.send_header("access-control-allow-headers", "content-type")
+        self.send_header("access-control-allow-private-network", "true")
 
     def log_message(self, fmt, *args):
         pass  # 安静模式

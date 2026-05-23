@@ -564,7 +564,7 @@ def _parse_target_date(text: str):
     return result
 
 # ── 后处理 ──
-def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply: str, session_cards_written: dict = None, current_turn: int = 0, va: dict = None):
+def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply: str, session_cards_written: dict = None, current_turn: int = 0, va: dict = None, arbiter_judgment: dict = None):
     ref_ids = []
 
     ref_match = re.search(r'<!--\s*ref:(.*?)\s*-->', raw_reply, re.IGNORECASE)
@@ -1056,6 +1056,14 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
         if any(kw in user_input for kw in humor_words):
             triggered.append(("interaction", 5))
 
+        # ── 裁决者「new」兜底：高置信度新话题未被任何分类覆盖 → 强制 deep_talks ──
+        if not triggered and arbiter_judgment:
+            _arb_j = arbiter_judgment.get("judgment", "")
+            _arb_c = arbiter_judgment.get("confidence", 0)
+            if _arb_j == "new" and _arb_c >= 0.75:
+                print(f"[裁决者兜底] 新话题未触发任何分类 (conf={_arb_c:.2f}) → 强制 deep_talks")
+                triggered.append(("deep_talks", 7))
+
         # 逐类生成卡片
         for triggered_category, triggered_importance in triggered:
             refined = refine_card_content(user_input, display_reply)
@@ -1182,6 +1190,38 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 write_pending_card(card_draft)
                 if session_cards_written is not None:
                     session_cards_written[triggered_category] = current_turn
+            else:
+                # cooldown 拦截：打印详细诊断
+                _cooldown_bypass = False
+                if session_cards_written:
+                    _last = session_cards_written.get(triggered_category)
+                    if _last is not None:
+                        _elapsed = current_turn - _last
+                        print(f"[冷却拦截] {triggered_category} 距上次写入已 {_elapsed} 轮 (冷却={cooldown}轮)")
+                    else:
+                        print(f"[冷却拦截] {triggered_category} 永久去重 (cooldown={cooldown})")
+                # ── 重要卡片弹窗：deep_talks / milestone / turning_points 让人最终决定 ──
+                if triggered_category in ('deep_talks', 'milestone', 'turning_points'):
+                    try:
+                        import tkinter.messagebox as _mb
+                        _preview = title[:40] + ("..." if len(title) > 40 else "")
+                        _answer = _mb.askyesno(
+                            "重要卡片 — 冷却拦截",
+                            f"「{_preview}」\n"
+                            f"分类: {triggered_category} | 重要度: {triggered_importance}\n"
+                            f"冷却尚未结束——是否仍然写入？\n\n"
+                            f"选「是」写入待审核 | 选「否」丢弃"
+                        )
+                        if _answer:
+                            _cooldown_bypass = True
+                            print(f"[冷却弹窗] 用户选择强制写入")
+                    except Exception:
+                        pass  # 无 GUI 环境降级
+                if _cooldown_bypass:
+                    # 绕过冷却，直接写入
+                    write_pending_card(card_draft)
+                    if session_cards_written is not None:
+                        session_cards_written[triggered_category] = current_turn
 
             # 偏好冲突检测：新 preferences → 找旧 preferences 关键词重叠 → resolve
             # 阈值≥2防止误伤（如"11月"和"坚持"不应被视为冲突）
@@ -1686,6 +1726,19 @@ def main():
         turn_counter += 1
         current_turn = turn_counter
 
+        # ── 每轮冷却状态快照 ──
+        if session_cards_written:
+            _cooldown_parts = []
+            for _cat, _last_turn in sorted(session_cards_written.items()):
+                _cd = CATEGORY_COOLDOWN.get(_cat, 0)
+                _ago = current_turn - _last_turn
+                if _cd < 0:
+                    _cooldown_parts.append(f"{_cat}(永久去重)")
+                elif _cd > 0 and _ago <= _cd:
+                    _cooldown_parts.append(f"{_cat}(冷却中 {_ago}/{_cd})")
+            if _cooldown_parts:
+                print(f"[冷却快照] {', '.join(_cooldown_parts)}")
+
         # ── VA 唤醒度估算（提前，供动态轮次和压缩策略使用） ──
         try:
             va = va_estimate(user_input)
@@ -1848,16 +1901,6 @@ def main():
             full_context += "\n".join(_bl) + "\n\n"
             print(f"[Bark注入] 已注入 {len(_bark)} 条最近推送")
 
-        # ── 音乐上下文：当前播放的歌曲 ──
-        try:
-            from music_context import get_music_context
-            _mc = get_music_context()
-            if _mc:
-                full_context += _mc
-                print("[音乐注入] 已注入当前播放歌曲")
-        except Exception as _e:
-            pass  # 音乐模块可选，不影响主流程
-
         # ── 时间锚点：代码计算的确定事实，模型用此推理而非瞎猜 ──
         now_anchor = datetime.now()
         next_month = now_anchor.month % 12 + 1
@@ -1916,9 +1959,13 @@ def main():
                     )
                 elif arb_judge == "new":
                     full_context += (
-                        f"【裁决者判定 — 此条消息为新任务（置信度 {arb_confidence:.2f}）】\n"
+                        f"【裁决者判定 — 此条消息含有新的重要信息（置信度 {arb_confidence:.2f}）】\n"
                         f"  理由: {arb_reason}\n"
-                        f"  按正常写卡流程处理。\n\n"
+                        f"  你必须根据内容类型输出对应的 propose_card。\n"
+                        f"  - 深层经历/价值观/情感流露 → propose_card (deep_talks, imp≥7)\n"
+                        f"  - 计划/承诺/约定 → propose_card (commitments)\n"
+                        f"  - 有时间锚点的待办 → propose_card (todo)\n"
+                        f"  不要等待关键词——裁决者已经判断了，你直接写。\n\n"
                     )
                 elif arb_judge == "update" and arb_targets:
                     full_context += (
@@ -2127,6 +2174,18 @@ def main():
             elif dyn in ('f','ff'):
                 full_context += "【风格提示】饱满、直接、情感充沛。可以热烈一些。\n"
 
+        # ── 音乐上下文：放在 prompt 最末，紧贴消息列表，防止被大量中间上下文淹没 ──
+        try:
+            from music_context import get_music_context
+            _mc = get_music_context()
+            if _mc:
+                full_context += "\n" + _mc
+                print(f"[音乐注入] {repr(_mc.strip())}")
+            else:
+                print("[音乐注入] 当前无播放")
+        except Exception as _e:
+            print(f"[音乐注入] 异常: {_e}")
+
         cot = ""
         MAX_RETRIES = 2
         for attempt in range(1, MAX_RETRIES + 1):
@@ -2186,7 +2245,7 @@ def main():
                     raw_reply = f"[API异常(已重试{MAX_RETRIES}次): {e}]"
 
         display_reply = raw_reply
-        display_reply, ref_ids = post_process(raw_reply, top_cards, user_input, display_reply, session_cards_written, current_turn, va)
+        display_reply, ref_ids = post_process(raw_reply, top_cards, user_input, display_reply, session_cards_written, current_turn, va, arbiter_judgment)
 
         # ── 调试可见：本轮检索到和引用了哪些记忆卡片 ──
         if top_cards:

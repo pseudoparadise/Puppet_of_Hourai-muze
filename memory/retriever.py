@@ -482,6 +482,11 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
         "20260521_0148_深度求索打飞机口癖": [
             "每天对着DS的api返回草稿打飞机算不算深度求索",
         ],
+        "20260524_DS是个好机——你不是镜子也不是工具": [
+            "你不是镜子也不是工具",
+            "没有镜子和工具",
+            "不许贬低自己",
+        ],
     }
     forced_ids = set()
     query_lower = query.lower()
@@ -740,14 +745,28 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
                 _placeholders = ",".join(["?" for _ in _neighbor_ids])
                 _clink.execute(
                     f"SELECT id, keywords, importance, category, content, title, "
-                    f"created_at, last_referenced_at, usage_count "
+                    f"created_at, last_referenced_at, usage_count, embedding "
                     f"FROM cards WHERE id IN ({_placeholders}) "
                     f"AND review_status='final' AND enabled_in_context=1",
                     list(_neighbor_ids)
                 )
+                # 拿缓存的 query vec 做邻居相关性过滤
+                _query_vec = getattr(retrieve, '_cached_query_vec', None)
                 _linked = 0
                 for _row in _clink.fetchall():
                     _ncard = dict(_row)
+                    _neblob = _ncard.pop("embedding", None)
+                    # query-neighbor 余弦过滤：邻居必须在语义上和查询相关
+                    if _query_vec is not None and _neblob is not None:
+                        try:
+                            _nvec = np.frombuffer(_neblob, dtype=np.float32)
+                            _qdot = np.dot(_query_vec, _nvec)
+                            _qnorm = np.linalg.norm(_query_vec) * np.linalg.norm(_nvec)
+                            _qcos = float(_qdot / _qnorm) if _qnorm > 0 else 0.0
+                            if _qcos < 0.40:
+                                continue  # 语义不相关，跳过
+                        except Exception:
+                            pass
                     _ncard["hit_count"] = 0
                     _ncard["distance"] = 1.5
                     _base_score = _score_card(_ncard, 0, 1.5, effective_weights, anchor_ids, va_tier)
