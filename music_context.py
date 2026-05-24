@@ -78,6 +78,33 @@ def get_music_context() -> str:
     if dur:
         lines.append(f"  时长: {dur}")
 
+    lyrics = state.get("lyrics", [])
+    if lyrics:
+        # 根据播放进度滚动：找到当前时间对应的歌词位置
+        started = state.get("started_at", "")
+        elapsed = 0
+        if started:
+            try:
+                from datetime import datetime, timezone, timedelta
+                tz_bj = timezone(timedelta(hours=8))
+                start_dt = datetime.fromisoformat(started)
+                elapsed = (datetime.now(timezone.utc) - start_dt).total_seconds()
+            except Exception:
+                pass
+
+        # 找到 elapsed 秒后最近的 3 句歌词
+        idx = 0
+        for i, l in enumerate(lyrics):
+            if l.get("seconds", 0) <= elapsed:
+                idx = i
+        window = lyrics[idx:idx+3]
+        if len(window) < 3:
+            window = lyrics[max(0, idx-2):idx+1]
+
+        lines.append("  当前歌词:")
+        for line in window:
+            lines.append(f"    [{line.get('time', '?')}] {line.get('text', '')}")
+
     return "\n".join(lines) + "\n\n"
 
 

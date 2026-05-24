@@ -1,23 +1,114 @@
 """
-music_sync_server.py — 接收浏览器传来的网易云播放状态，写入 .music_state.json
-启动: python music_sync_server.py
-端口: 8766，仅监听 localhost
+music_sync_server.py — 接收浏览器推送的播放状态，抓歌词，写入 .music_state.json
 """
 import json
 import os
-import sys
 import re
+import subprocess
+import sys
+import shutil
+import time as _time
+from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(PROJECT_ROOT, ".music_state.json")
 
+def _find_neteasecli():
+    found = shutil.which("neteasecli")
+    if found:
+        return found
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        for name in ["neteasecli.exe", "neteasecli.cmd", "neteasecli"]:
+            p = os.path.join(d, name)
+            if os.path.exists(p):
+                return p
+    return "neteasecli"
+
+NETEASECLI = _find_neteasecli()
+
+def _run(*args, timeout=15):
+    try:
+        r = subprocess.run(
+            [NETEASECLI, "--pretty"] + list(args),
+            capture_output=True, text=True, encoding="utf-8", timeout=timeout,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        )
+        if r.returncode == 0:
+            return json.loads(r.stdout)
+    except Exception:
+        pass
+    return None
+
+def fetch_lyrics(song_name, artist):
+    """用 neteasecli 搜歌 → 返回 (track_id, lyrics, corrected_name, corrected_artist)"""
+    if not song_name:
+        return None, [], song_name, artist
+
+    query = song_name
+    if artist:
+        query = song_name + " " + artist
+    result = _run("search", "track", query, "--limit", "1")
+    if not result or not result.get("data", {}).get("tracks"):
+        return None, [], song_name, artist
+
+    track = result["data"]["tracks"][0]
+    track_id = track["id"]
+    corrected_name = track.get("name", song_name)
+    corrected_artist = ", ".join(a["name"] for a in track.get("artists", [])) if track.get("artists") else artist
+
+    # 获取歌词... (rest of function)
+
+    # 获取歌词 — 优先翻译版 (tlyric)，其次原版 (lrc)
+    lyric_result = _run("track", "lyric", str(track_id))
+    lyrics = []
+    if lyric_result and lyric_result.get("data"):
+        ld = lyric_result["data"]
+        raw = ld.get("tlyric", "") or ld.get("lrc", "") or ld.get("lyric", "")
+
+        # 解析 [mm:ss.xx] 时间戳格式
+        timed = []
+        for line in raw.split("\n"):
+            m = re.match(r'\[(\d+):(\d+)(?:[.:](\d+))?\](.*)', line)
+            if m:
+                mins, secs, text = m.group(1), m.group(2), m.group(4).strip()
+                # 过滤 meta 行 (作词/作曲/编曲/by:)
+                if text and not re.match(r'^(作词|作曲|编曲|混音|制作|by[:：])', text):
+                    timed.append({
+                        "seconds": int(mins)*60 + int(secs),
+                        "time": f"{mins}:{secs}",
+                        "text": text,
+                    })
+
+        if timed:
+            lyrics = timed
+        else:
+            # 无时间戳的纯文本歌词
+            text_lines = [l.strip() for l in raw.replace("\\n", "\n").split("\n")
+                          if l.strip()
+                          and not re.match(r'^(作词|作曲|编曲|混音|制作|by[:：])', l.strip())
+                          and not l.strip().startswith("(") and not l.strip().startswith("（")]
+            for i, text in enumerate(text_lines[:12]):
+                lyrics.append({
+                    "seconds": i * 5,
+                    "time": f"0:{i*5:02d}",
+                    "text": text,
+                })
+
+    return str(track_id), lyrics, corrected_name, corrected_artist
+
+
+# 跨请求状态：记录当前歌曲和开始时间，用于歌词滚动
+_current_song = None
+_started_at = None
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
+        global _current_song, _started_at
         length = int(self.headers.get("content-length", 0))
         raw = self.rfile.read(length)
 
-        # /stopped 不需要 body
         if self.path == "/stopped":
             try:
                 os.remove(STATE_FILE)
@@ -48,28 +139,51 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/nowplaying":
+            global _current_song, _started_at
+
             raw_name = data.get("song_name", data.get("title", ""))
-            # 清洗 ▶ 等播放图标前缀
-            clean_name = re.sub(r'^[\s▶▷►♫♪🎵🎶🎧🔊🔉🔈🎤🎼🎹🥁🎸🎺🎻📻🎙🎚🎛]+', '', raw_name).strip()
-            raw_artist = data.get("artist", "")
-            clean_artist = raw_artist.strip().rstrip(" -–—")
+            clean_name = re.sub(r'^[\s▶▷►♫♪🎵🎶🎧🔊🔉🔈🎤🎼🎹]+', '', raw_name).strip()
+            raw_artist = data.get("artist", "").strip().rstrip(" -–—")
+            track_id = data.get("track_id", "")
+
+            # 检测切歌：歌名变了就重置开始时间
+            song_key = f"{clean_name}|{raw_artist}"
+            now_ts = datetime.now(timezone.utc).isoformat()
+            if song_key != _current_song:
+                _current_song = song_key
+                _started_at = now_ts
+
+            # 搜歌词 + 补全歌手信息
+            lyrics = []
+            if not track_id:
+                tid, lyrics, corrected_name, corrected_artist = fetch_lyrics(clean_name, raw_artist)
+                if tid:
+                    track_id = tid
+                if corrected_name:
+                    clean_name = corrected_name
+                if corrected_artist:
+                    raw_artist = corrected_artist
+
             state = {
-                "playing": data.get("playing", True),
-                "paused": data.get("paused", False),
-                "track_id": data.get("track_id", ""),
+                "playing": True,
+                "paused": False,
+                "track_id": track_id,
                 "song_name": clean_name or raw_name,
-                "artist": clean_artist,
+                "artist": raw_artist,
                 "album": data.get("album", ""),
                 "album_pic": data.get("album_pic", ""),
                 "duration_formatted": data.get("duration_formatted", ""),
+                "lyrics": lyrics,
+                "started_at": _started_at,
                 "source": "web",
             }
             try:
                 with open(STATE_FILE, "w", encoding="utf-8") as f:
                     json.dump(state, f, ensure_ascii=False, indent=2)
-                print(f">> {state.get('song_name','?')} -- {state.get('artist','?')}")
+                lyric_count = len(lyrics)
+                print(f">> {state.get('song_name','?')} -- {state.get('artist','?')} [{lyric_count} lyrics]")
             except Exception as e:
-                print(f"写文件失败: {e}", file=sys.stderr)
+                print(f"write error: {e}", file=sys.stderr)
             self._reply(200, {"ok": True})
         else:
             self._reply(404, {"error": "not found"})
@@ -92,16 +206,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("access-control-allow-private-network", "true")
 
     def log_message(self, fmt, *args):
-        pass  # 安静模式
+        pass
 
 if __name__ == "__main__":
     port = 8766
     server = HTTPServer(("127.0.0.1", port), Handler)
-    print(f"音乐同步服务已启动 → http://127.0.0.1:{port}")
-    print("等待浏览器推送切歌...\n")
+    print(f"[music sync] http://127.0.0.1:{port}")
+    print(f"[music sync] neteasecli: {NETEASECLI}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\n已退出")
+        print("\nstopped")
         server.shutdown()
- 
