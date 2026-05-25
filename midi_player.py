@@ -115,6 +115,7 @@ def play_midi(path: str, transpose: int = 0):
     ticks_per_beat = mid.ticks_per_beat or 480
     events = []
 
+    # 合并所有轨道到统一时间线（多轨同时播放）
     for track in mid.tracks:
         abs_time = 0
         for msg in track:

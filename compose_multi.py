@@ -1,7 +1,7 @@
 """
 compose_multi.py — 多声部简谱 → 多轨 MIDI
-输入格式（三行一个声部，每行一小节，每拍空格分隔）:
-  python compose_multi.py 歌名 BPM < 谱面.txt
+用法: python compose_multi.py 歌名 BPM 谱面.txt
+      或 cat 谱面.txt | python compose_multi.py 歌名 BPM
 """
 import sys
 import os
@@ -101,13 +101,20 @@ def make_midi(voices: list, bpm: int, path: str):
 
 def main():
     if len(sys.argv) < 2:
-        print(__doc__)
+        print("用法: python compose_multi.py 歌名 BPM [谱面文件]")
+        print("      若不指定文件，从 stdin 读取")
         sys.exit(1)
 
     song_name = sys.argv[1]
     bpm = int(sys.argv[2]) if len(sys.argv) > 2 else 120
 
-    text = sys.stdin.read().strip()
+    # 读谱面（管道输入或文件重定向）
+    if len(sys.argv) > 3:
+        with open(sys.argv[3], "r", encoding="utf-8") as f:
+            text = f.read().strip()
+    else:
+        sys.stdin.reconfigure(encoding='utf-8')
+        text = sys.stdin.read().strip()
     if not text:
         print("用法: python compose_multi.py 歌名 BPM < 谱面.txt")
         sys.exit(1)
@@ -136,10 +143,10 @@ def main():
         elif current == 'low':
             low_lines.append(line)
 
-    # 设置各声部八度
-    high_voice = parse_voice(high_lines, base_octave=5)  # 高声部: C5 基准
-    mid_voice = parse_voice(mid_lines, base_octave=4)     # 中声部: C4 基准
-    low_voice = parse_voice(low_lines, base_octave=3)     # 低声部: C3 基准 (会超出键域，但 MIDI 可生成)
+    # 统一 C4 基准，上标 ' 管八度 (1'=C5, 1''=C6)
+    high_voice = parse_voice(high_lines, base_octave=4)
+    mid_voice = parse_voice(mid_lines, base_octave=4)
+    low_voice = parse_voice(low_lines, base_octave=4)
 
     voices = [high_voice, mid_voice, low_voice]
     path = os.path.join(MIDI_DIR, f"{song_name}.mid")
