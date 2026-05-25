@@ -574,30 +574,7 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
 
     if not ref_ids and top_cards:
         ref_ids = detect_refs_by_keywords(display_reply, top_cards)
-
-    # ── 光遇弹琴：DS 输出 sky_play / sky_stop 标记 ──
-    sky_match = re.search(r'<!--\s*sky_play:\s*(.*?)\s*-->', raw_reply, re.IGNORECASE)
-    if sky_match:
-        import time as _time_sky
-        raw_sky = sky_match.group(1).strip()
-        transpose = 0
-        _tr_match = re.search(r'transpose=(-?\d+)', raw_sky, re.IGNORECASE)
-        if _tr_match:
-            transpose = int(_tr_match.group(1))
-            raw_sky = re.sub(r'transpose=-?\d+', '', raw_sky, flags=re.IGNORECASE).strip()
-        display_reply = re.sub(r'<!--\s*sky_play:.*?\s*-->', '', display_reply, flags=re.IGNORECASE).strip()
-        _sky_cmd = {"cmd": "play", "midi": raw_sky, "transpose": transpose, "updated_at": _time_sky.time()}
-        with open(os.path.join(PROJECT_ROOT, "sky_cmd.json"), "w", encoding="utf-8") as _sf:
-            json.dump(_sky_cmd, _sf)
-        print(f"[光遇] DS 点歌: {raw_sky} (transpose={transpose})")
-    if re.search(r'<!--\s*sky_stop\s*-->', raw_reply, re.IGNORECASE):
-        import time as _time_sky2
-        display_reply = re.sub(r'<!--\s*sky_stop\s*-->', '', display_reply, flags=re.IGNORECASE).strip()
-        _sky_cmd = {"cmd": "stop", "updated_at": _time_sky2.time()}
-        with open(os.path.join(PROJECT_ROOT, "sky_cmd.json"), "w", encoding="utf-8") as _sf:
-            json.dump(_sky_cmd, _sf)
-        print("[光遇] DS 停止弹奏")
-
+ 
     for cid in ref_ids:
         success = renew_card(cid)
         if success:
@@ -1562,34 +1539,6 @@ def main():
                 print(f"[和弦日志] 写入跳过: {e}")
             continue
 
-        # ── /sky 命令：光遇弹琴 ──
-        if user_input.strip().lower().startswith("/sky"):
-            parts_sky = user_input.strip().split(maxsplit=1)
-            sub_cmd = parts_sky[1].strip() if len(parts_sky) > 1 else ""
-            if sub_cmd == "stop":
-                _sky_cmd = {"cmd": "stop", "updated_at": time.time()}
-                with open(os.path.join(PROJECT_ROOT, "sky_cmd.json"), "w", encoding="utf-8") as _sf:
-                    json.dump(_sky_cmd, _sf)
-                print("[光遇] 停止弹奏\n")
-            elif sub_cmd:
-                midi_name = sub_cmd.replace("play ", "", 1).strip() if sub_cmd.startswith("play ") else sub_cmd
-                transpose = 0
-                if "transpose=" in midi_name:
-                    import re as _re_sky
-                    _m = _re_sky.search(r'transpose=(-?\d+)', midi_name)
-                    if _m:
-                        transpose = int(_m.group(1))
-                    midi_name = _re_sky.sub(r'', midi_name).strip()
-                if not midi_name.endswith(".mid"):
-                    midi_name += ".mid"
-                _sky_cmd = {"cmd": "play", "midi": midi_name, "transpose": transpose, "updated_at": time.time()}
-                with open(os.path.join(PROJECT_ROOT, "sky_cmd.json"), "w", encoding="utf-8") as _sf:
-                    json.dump(_sky_cmd, _sf)
-                print(f"[光遇] 弹奏: {midi_name} (transpose={transpose})\n")
-            else:
-                print("[光遇] 用法: /sky play 夜曲.mid | /sky play 夜曲.mid transpose=4 | /sky stop\n")
-            continue
-
         # ── /card 命令：手动蒸馏上一轮对话为记忆卡片 ──
         if user_input.strip().lower().startswith("/card"):
             if not recent:
@@ -2182,17 +2131,6 @@ def main():
                 "status_card 用于非完成的状态流转：<!-- status_card: ID|进行中 --> 或 <!-- status_card: ID|阻塞 -->\n"
                 "resolve_card 仅用于明确完成宣告，误判会导致待办丢失，慎重。\n"
             )
-
-        # ── 光遇弹琴：告诉 DS 他能点歌 ──
-        full_context += (
-            "【光遇弹琴 — 你能控制她在游戏里弹 MIDI】\n"
-            "  如果她想听一首歌，你可以说「我在光遇里给你弹一首《曲名》」。\n"
-            "  但要等她同意（或她主动要求）你再输出：\n"
-            "  <!-- sky_play: 曲名.mid -->\n"
-            "  系统会自动读取 midi/ 目录下对应文件，通过键盘输入在光遇乐器上弹奏。\n"
-            "  如果她说停，你输出：\n"
-            "  <!-- sky_stop -->\n\n"
-        )
 
         # ═══════════════════════════════════════════════════════════
         # 记忆召回 + 情绪 + 未解决卡片
