@@ -210,10 +210,20 @@ def write_pending_card(card_draft: dict):
 def refine_card_content(user_input: str, ai_reply: str, raw_parts: list = None) -> dict:
     """调 DeepSeek 提炼卡片标题、内容、关键词"""
     if raw_parts:
+        cat = raw_parts[1] if len(raw_parts) > 1 else "interaction"
+        style_note = ""
+        if cat in ("interaction", "erotic", "emotional"):
+            style_note = (
+                "\n\n关键原则：用户可能用代码/技术术语/抽象概念作为隐喻来调情或表达情绪。"
+                "这不是真实的工程任务。title 和 content 必须记录互动的情绪实质，"
+                "不能照抄技术表面。例如「讲/续写DS与沐泽的故事」应改为「用TCP隐喻和DS调情」，"
+                "「完成技术段子创作」应改为「写了一段DS网络协议段子互撩」。"
+                "自检：如果 content 读起来像运维工单，就写错了。"
+            )
         refine_prompt = f"""根据以下信息，生成一张记忆卡片的标题、内容摘要和关键词。
 用户输入：{user_input}
 AI回复：{ai_reply[:200]}
-卡片原始提议：标题={raw_parts[0]}，分类={raw_parts[1]}，重要度={raw_parts[2]}，内容={raw_parts[3]}
+卡片原始提议：标题={raw_parts[0]}，分类={cat}，重要度={raw_parts[2]}，内容={raw_parts[3] if len(raw_parts) > 3 else ''}{style_note}
 
 请返回JSON：
 {{"title": "提炼后的标题（15字以内）", "content": "提炼后的内容（50字以内）", "keywords": "逗号分隔的关键词（5个以内）"}}
@@ -769,8 +779,12 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                     if pc.get("id") in resolved_ids or pc.get("importance", 5) >= 8:
                         continue
                     try:
-                        _ptext = pc.get("title", "") + " " + (pc.get("content", "") or "")
-                        _pvec = _embed_pend(_ptext)
+                        _pvec = pc.get('_embed_vec')
+                        if _pvec is not None:
+                            _pvec = _np_pend.array(_pvec, dtype=_np_pend.float32)
+                        else:
+                            _ptext = pc.get("title", "") + " " + (pc.get("content", "") or "")
+                            _pvec = _embed_pend(_ptext)
                         _pdot = _np_pend.dot(_pv, _pvec)
                         _pnorm = _np_pend.linalg.norm(_pv) * _np_pend.linalg.norm(_pvec)
                         _pcos = float(_pdot / _pnorm) if _pnorm > 0 else 0.0
@@ -1064,9 +1078,12 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 print(f"[裁决者兜底] 新话题未触发任何分类 (conf={_arb_c:.2f}) → 强制 deep_talks")
                 triggered.append(("deep_talks", 7))
 
-        # 逐类生成卡片
+        # 逐类生成卡片 — refine 结果跨类别共享，避免循环内重复调 DeepSeek
+        _cached_refine = None
         for triggered_category, triggered_importance in triggered:
-            refined = refine_card_content(user_input, display_reply)
+            if _cached_refine is None:
+                _cached_refine = refine_card_content(user_input, display_reply)
+            refined = _cached_refine
             if refined:
                 title = refined.get("title", user_input[:30])
                 content = refined.get("content", user_input)
@@ -1098,6 +1115,7 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
             cooldown = CATEGORY_COOLDOWN.get(triggered_category, 0)
             # ── 跨轮去重：FAISS 预检，避免同一话题反复产卡 ──
             _auto_skip = False
+            _pre_vec = None
             try:
                 from encoder import embed as _embed_pre, load_index as _load_pre, search_index as _search_pre
                 import numpy as _np_pre
@@ -1163,10 +1181,12 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 if session_cards_written and triggered_category in session_cards_written:
                     _should_skip = False
                     try:
-                        from encoder import embed as _embed_dedup
                         import numpy as _np_dedup
-                        _this_text = title + ' ' + content
-                        _this_vec = _embed_dedup(_this_text)
+                        if _pre_vec is not None:
+                            _this_vec = _pre_vec
+                        else:
+                            from encoder import embed as _embed_dedup
+                            _this_vec = _embed_dedup(title + ' ' + content)
                         _pp_dedup = os.path.join(PROJECT_ROOT, "memory", "pending_cards.json")
                         if os.path.exists(_pp_dedup):
                             with open(_pp_dedup, "r", encoding="utf-8") as _pf_dedup:
@@ -1174,8 +1194,12 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                             for _pc_dedup in _pend_all:
                                 if _pc_dedup.get('category') != triggered_category:
                                     continue
-                                _pt = _pc_dedup.get('title', '') + ' ' + (_pc_dedup.get('content', '') or '')
-                                _pv = _embed_dedup(_pt)
+                                _pv = _pc_dedup.get('_embed_vec')
+                                if _pv is not None:
+                                    _pv = _np_dedup.array(_pv, dtype=_np_dedup.float32)
+                                else:
+                                    _pt = _pc_dedup.get('title', '') + ' ' + (_pc_dedup.get('content', '') or '')
+                                    _pv = _embed_dedup(_pt)
                                 _dot = _np_dedup.dot(_this_vec, _pv)
                                 _norm = _np_dedup.linalg.norm(_this_vec) * _np_dedup.linalg.norm(_pv)
                                 _cos = float(_dot / _norm) if _norm > 0 else 0.0
@@ -1304,26 +1328,8 @@ def main():
     global CHAT_MODEL
     print("DS老师 在呢，打字聊天，输入 q 退出\n")
 
-    # ── 启动自检：追补昨日缺失的日记 + 蒸馏 ──
-    try:
-        from datetime import datetime as _dt_chk, timedelta as _td_chk
-        _bj_chk = _dt_chk.now() + _td_chk(hours=8)
-        _yday = (_bj_chk - _td_chk(days=1)).strftime("%Y-%m-%d")
-        _diary_chk = os.path.join(PROJECT_ROOT, "diary", f"{_yday}.md")
-        if not os.path.exists(_diary_chk):
-            print(f"[启动自检] 昨日日记 {_yday} 缺失，正在追补...")
-            from delegate.dreaming import chain_dream
-            chain_dream(_yday)
-            print(f"[启动自检] 追补完成，同步日记待办 + 蒸馏...")
-            from memory.memory_manager import sync_diary_todos_to_cards
-            sync_diary_todos_to_cards(days_back=7)
-            from persona.miner import main as _miner_chk
-            _miner_chk()
-            print(f"[启动自检] 全部追补完成。")
-    except Exception as _chk_e:
-        print(f"[启动自检] 跳过: {_chk_e}")
-
     # ── 启动自检：老卡 link 回填（link 表为空时自动重建） ──
+    # 注：日记追补和矿工蒸馏已统一由 polling_loop.py 的 _ensure_diary / _ensure_miner 负责
     try:
         from memory.linker import ensure_link_table
         ensure_link_table()
@@ -1352,11 +1358,50 @@ def main():
     _pool_remind_cooldown = 0  # PA-1: 管家提醒冷却计数
     va = None  # 和弦/VA 状态，由每轮估算更新，/card 命令复用上一轮数据
 
+    # ── 会话状态持久化：从磁盘恢复冷却状态和对话上下文 ──
+    _SESSION_STATE_PATH = os.path.join(PROJECT_ROOT, ".session_state.json")
+
+    def _save_session_state():
+        try:
+            state = {
+                "session_cards_written": session_cards_written,
+                "turn_counter": turn_counter,
+                "recent_turns": min(len(recent), 10),
+                "last_va": {"valence": va["valence"], "arousal": va["arousal"],
+                            "description": va.get("description", ""),
+                            "chord": va.get("chord", ""),
+                            "chord_bpm": va.get("chord_bpm", 0),
+                            "chord_dynamic": va.get("chord_dynamic", "")} if va else None,
+            }
+            from delegate_tools import atomic_write_json
+            atomic_write_json(_SESSION_STATE_PATH, state)
+        except Exception:
+            pass
+
+    def _load_session_state():
+        nonlocal session_cards_written, turn_counter, recent, va
+        try:
+            if os.path.exists(_SESSION_STATE_PATH):
+                with open(_SESSION_STATE_PATH, "r", encoding="utf-8") as _sf:
+                    _ss = json.load(_sf)
+                saved_written = _ss.get("session_cards_written", {})
+                session_cards_written = {k: (turn_counter + v) for k, v in saved_written.items()}
+                turn_counter = _ss.get("turn_counter", 0)
+                _va_saved = _ss.get("last_va")
+                if _va_saved and va is None:
+                    va = _va_saved
+                print(f"[会话恢复] 冷却 {len(session_cards_written)} 类, turn={turn_counter}")
+        except Exception:
+            pass
+
+    _load_session_state()
+
     while True:
         try:
             user_input = input("你: ")
         except (EOFError, KeyboardInterrupt):
             print("\nDS老师 已休眠。")
+            _save_session_state()
             break
 
         if user_input.lower() == "q":
@@ -1718,6 +1763,8 @@ def main():
                     print(f"[恢复] 已从 chat_log 注入 {min(n_rounds, len(rec_pairs))} 轮对话到 recent")
                 else:
                     print("[恢复] chat_log 中未找到可恢复的对话轮次")
+                # 同时恢复冷却状态
+                _load_session_state()
             except Exception as e_rec:
                 print(f"[恢复] 失败: {e_rec}")
             print()
@@ -1902,7 +1949,8 @@ def main():
             print(f"[Bark注入] 已注入 {len(_bark)} 条最近推送")
 
         # ── 时间锚点：代码计算的确定事实，模型用此推理而非瞎猜 ──
-        now_anchor = datetime.now()
+        from clock import beijing_now as _now_anchor
+        now_anchor = _now_anchor()
         next_month = now_anchor.month % 12 + 1
         next_month_year = now_anchor.year if next_month > now_anchor.month else now_anchor.year + 1
         full_context += (
@@ -2020,7 +2068,7 @@ def main():
         # ── 近期概览（滚动总结） ──
         summary = load_rolling_summary()
         if summary:
-            full_context += f"【7日滚动概览】\n{summary[:800]}\n\n"
+            full_context += f"【7日滚动概览】\n{summary}\n\n"
 
         # ═══════════════════════════════════════════════════════════
         # 指令缓冲区：当前待办及艾森豪威尔分类 — 知道要做什么
@@ -2162,7 +2210,8 @@ def main():
         except Exception as e:
             print(f"[未解决事项] 跳过: {e}")
 
-        full_context += f"【当前系统时间】{datetime.now().strftime('%Y-%m-%d %H:%M')}（北京时间）\n"
+        from clock import beijing_now as _bj_ctx
+        full_context += f"【当前系统时间】{_bj_ctx().strftime('%Y-%m-%d %H:%M')}（北京时间）\n"
 
         # ── 阶段2.4：和弦情绪上下文 ──
         if va.get("chord_expanded"):
@@ -2276,6 +2325,9 @@ def main():
             print(panel)
         print(f"DSphantom: {display_reply}\n")
         recent.append({"user": user_input, "assistant": display_reply})
+
+        # ── 会话状态落盘：崩了重开也能恢复 ──
+        _save_session_state()
 
         # ── PA-1: 管家待审核提醒（毒点7修复：仅在触发提醒时重置冷却） ──
         if _pool_remind_cooldown > 0:

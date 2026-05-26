@@ -60,10 +60,6 @@ def _query_neteasecli():
 def get_music_context() -> str:
     state = _read_own_state()
     if not state:
-        # 降级：检查 mpv 是否在播（但可能不知道歌名）
-        cli = _query_neteasecli()
-        if cli:
-            return f"【此刻她正在听的音乐 — 你可以自然提及，但不要刻意】\n  状态: {cli.get('message', '播放中')}\n\n"
         return ""
 
     lines = ["【此刻她正在听的音乐 — 仅当前一首，你可以自然提及，但不要刻意，不要编造其他歌曲】"]

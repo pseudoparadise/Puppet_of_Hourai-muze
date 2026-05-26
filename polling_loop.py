@@ -13,6 +13,8 @@ import json
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
+from clock import beijing_now, beijing_today, beijing_yesterday
+
 INTERVAL_MINUTES = 5
 HEARTBEAT_INTERVAL = 30 * 60  # 心跳间隔：30分钟
 DIARY_INTERVAL = 24 * 3600     # 日记最小间隔：24小时
@@ -33,7 +35,63 @@ def _log_event(event_type: str, extra: dict = None):
         print(f"[_log_event 写入失败] {e}", file=sys.stderr)
 
 
+def _ensure_diary(chain_dream, reason: str = "scheduled"):
+    """确保昨天（北京时间）的日记已生成。无文件则调用 chain_dream。"""
+    yesterday = beijing_yesterday()
+    diary_path = os.path.join(PROJECT_ROOT, "diary", f"{yesterday}.md")
+    if not os.path.exists(diary_path):
+        print(f"[每日日记] {reason} — {yesterday} 日记不存在，立即生成...")
+        _log_event("diary_scheduled", {"reason": reason, "date": yesterday})
+        try:
+            chain_dream(yesterday)
+        except Exception as e:
+            _log_event("diary_error", {"error": str(e)[:200]})
+
+
+def _ensure_miner():
+    """确保今天（北京时间）已执行人格蒸馏。"""
+    miner_state_path = os.path.join(PROJECT_ROOT, "persona", "miner_state.json")
+    today_str = beijing_today()
+    last_date = ""
+    if os.path.exists(miner_state_path):
+        try:
+            with open(miner_state_path, "r", encoding="utf-8") as f:
+                last_date = json.load(f).get("last_analysis_date", "")
+        except Exception:
+            pass
+    if last_date != today_str:
+        print(f"[礦工] 上次蒸馏 {last_date or '无'}，触发蒸馏...")
+        _log_event("miner_scheduled", {"reason": "daily", "last_date": last_date})
+        try:
+            from persona.miner import main as miner_main
+            miner_main()
+        except Exception as e:
+            _log_event("miner_error", {"error": str(e)[:200]})
+
+
 def main():
+    # ── PID 文件锁：防止多个轮询守护同时运行 ──
+    PID_FILE = os.path.join(PROJECT_ROOT, ".polling_loop.pid")
+    if os.path.exists(PID_FILE):
+        try:
+            with open(PID_FILE, "r") as pf:
+                old_pid = int(pf.read().strip())
+            import ctypes
+            SYNCHRONIZE = 0x00100000
+            PROCESS_QUERY_LIMITED = 0x1000
+            kernel32 = ctypes.windll.kernel32
+            h = kernel32.OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED, False, old_pid)
+            if h:
+                kernel32.CloseHandle(h)
+                print(f"[轮询守护] 已有实例在运行 (PID {old_pid})，退出。")
+                return
+        except Exception:
+            pass
+    with open(PID_FILE, "w") as pf:
+        pf.write(str(os.getpid()))
+    import atexit
+    atexit.register(lambda: os.path.exists(PID_FILE) and os.remove(PID_FILE))
+
     print(f"[DSphantom轮询守护] 启动，每 {INTERVAL_MINUTES} 分钟检测一次沉默状态")
     print(f"[DSphantom轮询守护] 当前目录: {os.getcwd()}")
     print(f"[DSphantom轮询守护] 按 Ctrl+C 停止\n")
@@ -53,35 +111,9 @@ def main():
     except Exception as e:
         _log_event("audit_error", {"error": str(e)})
 
-    # ── 追补日记：启动时检查昨天（北京时间）日记是否存在 ──
-    from datetime import datetime as _dt_startup, timezone as _tz_startup, timedelta as _td_startup
-    _bj_now_startup = _dt_startup.now(_tz_startup.utc) + _td_startup(hours=8)
-    _yesterday_bj = (_bj_now_startup - _td_startup(days=1)).strftime("%Y-%m-%d")
-    diary_check = os.path.join(PROJECT_ROOT, "diary", f"{_yesterday_bj}.md")
-    if not os.path.exists(diary_check):
-        print(f"[每日日记] 启动追补：{_yesterday_bj} 日记不存在，立即生成...")
-        _log_event("diary_scheduled", {"reason": "startup_catchup", "date": _yesterday_bj})
-        try:
-            chain_dream(_yesterday_bj)
-        except Exception as e:
-            _log_event("diary_error", {"error": str(e)[:200]})
-
-    # ── 追补礦工：启动时检查，如果上次蒸馏超过24h，立即跑一次 ──
-    try:
-        miner_state_path = os.path.join(PROJECT_ROOT, "persona", "miner_state.json")
-        if os.path.exists(miner_state_path):
-            with open(miner_state_path, "r", encoding="utf-8") as _msf:
-                _ms = json.load(_msf)
-            _last_date = _ms.get("last_analysis_date", "")
-            from datetime import datetime as _dt_ms, timedelta as _td_ms
-            _today_ms = _dt_ms.now().strftime("%Y-%m-%d")
-            if _last_date != _today_ms:
-                print(f"[礦工] 启动追补：上次蒸馏 {_last_date}，立即蒸馏...")
-                _log_event("miner_scheduled", {"reason": "startup_catchup"})
-                from persona.miner import main as miner_main
-                miner_main()
-    except Exception as _me:
-        _log_event("miner_error", {"error": str(_me)[:200]})
+    # ── 启动查补：日记 + 矿工 ──
+    _ensure_diary(chain_dream, reason="startup_catchup")
+    _ensure_miner()
 
     # ── 启动自检：老卡 link 回填（link 表为空时自动重建） ──
     try:
@@ -284,13 +316,10 @@ def main():
 
     # ── 计时器 ──
     last_heartbeat = time.time()
-    last_diary_time = time.time()  # 毒点12：时间驱动日记
-    last_audit_time = time.time()  # 长期优化四
-    last_miner_time = time.time()  # 长期优化五：人格蒸馏
-    last_sweep_time = time.time()  # 周收拢
+    last_audit_time = time.time()  # 深渊审计
+    last_housekeeping = 0  # 日常维护（日记/矿工/周收拢）
 
     cycle_count = 0
-    consecutive_empty = 0
 
     while True:
         cycle_count += 1
@@ -299,7 +328,6 @@ def main():
         try:
             print(f"\n{'='*40}")
             bark_main()
-            consecutive_empty = 0
         except KeyboardInterrupt:
             print("\n[DSphantom轮询守护] 已停止。")
             _log_event("polling_stop", {"reason": "user_interrupt"})
@@ -309,55 +337,51 @@ def main():
             traceback.print_exc()
             _log_event("polling_crash", {"error": str(e)[:200]})
 
-        # ── 毒点17修复：心跳日志（每30分钟） ──
+        # ── 心跳日志（每30分钟） ──
         if now_ts - last_heartbeat > HEARTBEAT_INTERVAL:
             _log_event("polling_heartbeat", {"cycles_since_last": cycle_count})
             last_heartbeat = now_ts
             cycle_count = 0
 
-        # ── 毒点12修复v2：日记对齐到自然日 00:00-00:30（北京时间） ──
-        from datetime import datetime as _dt_now
-        bj_now = _dt_now.utcnow().astimezone(__import__('datetime', fromlist=['timezone']).timezone(
-            __import__('datetime', fromlist=['timedelta']).timedelta(hours=8)))
-        bj_hour = bj_now.hour
-        bj_minute = bj_now.minute
-        # 在北京时间 00:00-00:30 窗口内触发，且上次触发不是今天
-        today_bj = bj_now.strftime("%Y-%m-%d")
-        last_diary_date = getattr(main, '_last_diary_date', "")
-        if bj_hour == 0 and bj_minute < 30 and last_diary_date != today_bj:
-            from datetime import datetime as _dt_mid, timezone as _tz_mid, timedelta as _td_mid
-            _bj_mid = _dt_mid.now(_tz_mid.utc) + _td_mid(hours=8)
-            _yesterday_mid = (_bj_mid - _td_mid(days=1)).strftime("%Y-%m-%d")
-            print(f"[每日日记] 自然日触发 — 北京时间 {bj_now.strftime('%H:%M')}，生成 {_yesterday_mid} 日记")
-            _log_event("diary_scheduled", {"reason": "midnight_window", "date": _yesterday_mid})
+        # ── 日常维护：日记/矿工/周收拢（每15分钟执行一次） ──
+        HOUSEKEEPING_INTERVAL = 15 * 60
+        if now_ts - last_housekeeping > HOUSEKEEPING_INTERVAL:
+            last_housekeeping = now_ts
+
+            # 日记：昨天缺失则生成
+            _ensure_diary(chain_dream, reason="scheduled")
+
+            # 矿工：今天未蒸馏则触发
+            _ensure_miner()
+
+            # 周收拢：距上次收拢 >= 7 天则触发（读文件名日期，抗重启）
             try:
-                chain_dream(_yesterday_mid)
-                main._last_diary_date = today_bj  # type: ignore
+                import glob as _glob_sweep, re as _re_sweep
+                diary_dir_sweep = os.path.join(PROJECT_ROOT, "diary")
+                weekly_files = sorted(_glob_sweep.glob(
+                    os.path.join(diary_dir_sweep, "weekly_*.md")), reverse=True)
+                last_sweep_date = None
+                if weekly_files:
+                    m = _re_sweep.search(r'weekly_(\d{4}-\d{2}-\d{2})', weekly_files[0])
+                    if m:
+                        last_sweep_date = m.group(1)
+                today_str = beijing_today()
+                from datetime import datetime as _dt_sweep
+                need_sweep = True
+                if last_sweep_date:
+                    need_sweep = (_dt_sweep.strptime(today_str, "%Y-%m-%d")
+                                  - _dt_sweep.strptime(last_sweep_date, "%Y-%m-%d")).days >= 7
+                if need_sweep:
+                    days_since = "首次" if not last_sweep_date else str(
+                        (_dt_sweep.strptime(today_str, "%Y-%m-%d")
+                         - _dt_sweep.strptime(last_sweep_date, "%Y-%m-%d")).days)
+                    print(f"[周收拢] 聚合近7天待办（距上次 {days_since} 天）...")
+                    _log_event("sweep_scheduled", {"last_sweep_date": last_sweep_date or "无"})
+                    weekly_sweep()
             except Exception as e:
-                _log_event("diary_error", {"error": str(e)[:200]})
-                # 失败不更新 _last_diary_date，让后续周期重试
+                _log_event("sweep_error", {"error": str(e)[:200]})
 
-        # ── 兜底检查：每小时一次，如果昨天日记仍缺失（非午夜窗口错过），追补 ──
-        CATCHUP_INTERVAL = 3600  # 1小时
-        last_catchup = getattr(main, '_last_catchup_ts', 0)
-        if now_ts - last_catchup > CATCHUP_INTERVAL:
-            main._last_catchup_ts = now_ts  # type: ignore
-            if bj_hour >= 1:  # 过了凌晨1点还没日记 = 错过了
-                from datetime import datetime as _dt_cu, timedelta as _td_cu
-                _bj_cu = _dt_cu.now() + _td_cu(hours=8)
-                _yday_cu = (_bj_cu - _td_cu(days=1)).strftime("%Y-%m-%d")
-                _diary_cu = os.path.join(PROJECT_ROOT, "diary", f"{_yday_cu}.md")
-                if not os.path.exists(_diary_cu):
-                    print(f"[兜底] 昨日日记 {_yday_cu} 仍缺失，追补...")
-                    _log_event("diary_scheduled", {"reason": "hourly_catchup", "date": _yday_cu})
-                    try:
-                        chain_dream(_yday_cu)
-                        from persona.miner import main as _miner_cu
-                        _miner_cu()
-                    except Exception as e:
-                        _log_event("diary_error", {"error": str(e)[:200]})
-
-        # ── 长期优化四：深渊审计（每6小时） ──
+        # ── 深渊审计（每6小时） ──
         if now_ts - last_audit_time > AUDIT_INTERVAL:
             print("[深渊审计] 定时执行...")
             try:
@@ -369,32 +393,8 @@ def main():
                 _log_event("audit_error", {"error": str(e)[:200]})
             last_audit_time = now_ts
 
-        # ── 长期优化五v2：人格蒸馏对齐日记，日记生成后触发（00:30-01:00窗口） ──
-        if bj_hour == 0 and 30 <= bj_minute < 60 and last_diary_date != getattr(main, '_last_miner_date', ""):
-            print("[人格蒸馏] 日界线后触发 — 在日记生成之后")
-            _log_event("miner_scheduled", {"reason": "after_diary"})
-            try:
-                from persona.miner import main as miner_main
-                miner_main()
-                main._last_miner_date = today_bj  # type: ignore
-            except Exception as e:
-                _log_event("miner_error", {"error": str(e)[:200]})
-
-        # ── 周收拢：每7天聚合待办事项 ──
-        SWEEP_INTERVAL = 7 * 24 * 3600
-        if now_ts - last_sweep_time > SWEEP_INTERVAL:
-            print("[周收拢] 聚合近7天待办...")
-            _log_event("sweep_scheduled")
-            try:
-                weekly_sweep()
-            except Exception as e:
-                _log_event("sweep_error", {"error": str(e)[:200]})
-            last_sweep_time = now_ts
-
         # ── 待办提醒扫描 ──
-        from datetime import datetime as _dt_remind, timezone as _tz_remind, timedelta as _td_remind
-        _bj_remind = _dt_remind.now(_tz_remind.utc) + _td_remind(hours=8)
-        _check_todo_reminders(_bj_remind)
+        _check_todo_reminders(beijing_now())
 
         # 倒计时：消除累积漂移，精确 5 分钟间隔
         elapsed = time.time() - now_ts

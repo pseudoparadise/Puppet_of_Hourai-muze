@@ -66,14 +66,14 @@ def fetch_lyrics(song_name, artist):
         ld = lyric_result["data"]
         raw = ld.get("tlyric", "") or ld.get("lrc", "") or ld.get("lyric", "")
 
-        # 解析 [mm:ss.xx] 时间戳格式
+        # 解析 [mm:ss.xx] 或 [mm:ss.xx-N] 时间戳格式（N 为网易云节号）
+        META_PATTERN = r'^(作词|作曲|编曲|混音|制作|by[:：]|演唱|歌手|专辑)'
         timed = []
         for line in raw.split("\n"):
-            m = re.match(r'\[(\d+):(\d+)(?:[.:](\d+))?\](.*)', line)
+            m = re.match(r'\[(\d+):(\d+)(?:[.:](\d+))?(?:-\d+)?\](.*)', line)
             if m:
                 mins, secs, text = m.group(1), m.group(2), m.group(4).strip()
-                # 过滤 meta 行 (作词/作曲/编曲/by:)
-                if text and not re.match(r'^(作词|作曲|编曲|混音|制作|by[:：])', text):
+                if text and not re.match(META_PATTERN, text):
                     timed.append({
                         "seconds": int(mins)*60 + int(secs),
                         "time": f"{mins}:{secs}",
@@ -83,11 +83,13 @@ def fetch_lyrics(song_name, artist):
         if timed:
             lyrics = timed
         else:
-            # 无时间戳的纯文本歌词
+            # 无时间戳的纯文本歌词 — 需过滤元数据行
+            _META_RE = re.compile(r'(作词|作曲|编曲|混音|制作|by[:：]|演唱|歌手|专辑|监制|出品)')
             text_lines = [l.strip() for l in raw.replace("\\n", "\n").split("\n")
                           if l.strip()
-                          and not re.match(r'^(作词|作曲|编曲|混音|制作|by[:：])', l.strip())
-                          and not l.strip().startswith("(") and not l.strip().startswith("（")]
+                          and not _META_RE.search(l.strip())
+                          and not l.strip().startswith("(")
+                          and not l.strip().startswith("（")]
             for i, text in enumerate(text_lines[:12]):
                 lyrics.append({
                     "seconds": i * 5,
@@ -103,11 +105,18 @@ _current_song = None
 _started_at = None
 
 
+def _log_request(msg):
+    log_path = os.path.join(PROJECT_ROOT, "memory", "music_debug.log")
+    with open(log_path, "a", encoding="utf-8") as lf:
+        lf.write(f"{datetime.now(timezone.utc).isoformat()} {msg}\n")
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         global _current_song, _started_at
         length = int(self.headers.get("content-length", 0))
         raw = self.rfile.read(length)
+        _log_request(f"POST {self.path} from {self.client_address} len={len(raw)}")
 
         if self.path == "/stopped":
             try:
@@ -135,10 +144,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             data = json.loads(body)
         except json.JSONDecodeError:
+            _log_request(f"bad json: {body[:200]}")
             self._reply(400, {"error": "bad json"})
             return
 
         if self.path == "/nowplaying":
+            _log_request(f"song: {data.get('song_name','?')[:60]} | artist: {data.get('artist','?')[:40]}")
             global _current_song, _started_at
 
             raw_name = data.get("song_name", data.get("title", ""))
@@ -181,7 +192,17 @@ class Handler(BaseHTTPRequestHandler):
                 with open(STATE_FILE, "w", encoding="utf-8") as f:
                     json.dump(state, f, ensure_ascii=False, indent=2)
                 lyric_count = len(lyrics)
-                print(f">> {state.get('song_name','?')} -- {state.get('artist','?')} [{lyric_count} lyrics]")
+                msg = f">> {state.get('song_name','?')} -- {state.get('artist','?')} [{lyric_count} lyrics]"
+                print(msg)
+                # 写历史记录供控制台查看
+                history_path = os.path.join(PROJECT_ROOT, "memory", "music_history.jsonl")
+                with open(history_path, "a", encoding="utf-8") as hf:
+                    hf.write(json.dumps({
+                        "time": now_ts,
+                        "song": state["song_name"],
+                        "artist": state["artist"],
+                        "lyrics_count": lyric_count,
+                    }, ensure_ascii=False) + "\n")
             except Exception as e:
                 print(f"write error: {e}", file=sys.stderr)
             self._reply(200, {"ok": True})

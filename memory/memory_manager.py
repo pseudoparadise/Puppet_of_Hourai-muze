@@ -177,6 +177,7 @@ def suggest_importance_calibration():
 def suggest_merges():
     try:
         from encoder import load_index, search_index, embed
+        import numpy as _np_sm
     except ImportError:
         print("[memory_manager] 无法导入 encoder，跳过合并建议")
         return []
@@ -184,7 +185,7 @@ def suggest_merges():
     conn = sqlite3.connect(DB_PATH)
     try:
         c = conn.cursor()
-        c.execute("SELECT id, title, content FROM cards WHERE review_status='final' AND enabled_in_context=1")
+        c.execute("SELECT id, title, content, embedding FROM cards WHERE review_status='final' AND enabled_in_context=1")
         rows = c.fetchall()
         if len(rows) < 2:
             return []
@@ -193,11 +194,14 @@ def suggest_merges():
         merge_suggestions = []
         checked = set()
         for row in rows:
-            card_id, title, content = row
+            card_id, title, content, emb_blob = row
             if card_id in checked:
                 continue
             try:
-                vec = embed(content)
+                if emb_blob is not None:
+                    vec = _np_sm.frombuffer(emb_blob, dtype=_np_sm.float32)
+                else:
+                    vec = embed(content)
                 similar = search_index(index, vec, k=5)
                 for other_id, distance in similar:
                     if other_id == card_id or other_id in checked:
@@ -387,23 +391,27 @@ def abyss_challenge():
     """
     try:
         from .encoder import load_index, search_index, embed
+        import numpy as _np_ac
         index = load_index()
         if index.ntotal == 0:
             return
 
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("""SELECT id, title, usage_count, importance, content FROM cards
+        c.execute("""SELECT id, title, usage_count, importance, content, embedding FROM cards
                      WHERE review_status='final' AND resolved=0 AND enabled_in_context=1
                      ORDER BY usage_count DESC LIMIT 5""")
         top_cards = c.fetchall()
 
         boosted = 0
-        for cid, title, usage, imp, content in top_cards:
+        for cid, title, usage, imp, content, emb_blob in top_cards:
             if usage < 3:
                 continue
             try:
-                query_vec = embed(content or title)
+                if emb_blob is not None:
+                    query_vec = _np_ac.frombuffer(emb_blob, dtype=_np_ac.float32)
+                else:
+                    query_vec = embed(content or title)
                 neighbors = search_index(index, query_vec, k=6)  # 含自身
                 for nid, dist in neighbors:
                     if nid == cid:

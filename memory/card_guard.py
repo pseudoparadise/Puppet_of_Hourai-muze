@@ -43,16 +43,20 @@ def _cosine_similarity(vec_a, vec_b) -> float:
 def _is_semantic_dup(new_title: str, new_content: str,
                      old_title: str, old_content: str,
                      old_card_id: str = None,
-                     old_vec = None) -> tuple[bool, float]:
+                     old_vec = None,
+                     new_vec = None) -> tuple[bool, float]:
     """
     用豆包 embedding 判断两张卡是否语义重复。返回 (is_dup, cosine_similarity)。
     旧卡向量优先级：old_vec（预存） > DB 缓存 > embed(old_text)。
+    new_vec 由调用方预先计算，避免同一张新卡重复调用 embed API。
     """
     try:
         import numpy as _np
         from encoder import embed
-        new_text = new_title + " " + (new_content or "")
-        vec_new = embed(new_text)
+        vec_new = new_vec
+        if vec_new is None:
+            new_text = new_title + " " + (new_content or "")
+            vec_new = embed(new_text)
 
         # ── 旧卡向量：预存 > DB > 实时 embed ──
         vec_old = None
@@ -226,6 +230,14 @@ def check_before_write(title: str, content: str, user_input: str,
     proposed_features = zh_extract_features(proposed_text)
     new_ctx = new_card_context or {}
 
+    # 预计算新卡 embedding，复用于所有语义对比
+    new_vec = None
+    try:
+        from encoder import embed
+        new_vec = embed((title + " " + (content or ""))[:512])
+    except Exception:
+        pass
+
     # 扫 cards.db
     db_path = os.path.join(PROJECT_ROOT, "memory", "cards.db")
     if os.path.exists(db_path):
@@ -261,7 +273,8 @@ def check_before_write(title: str, content: str, user_input: str,
                     if old_tdate and old_tdate != (new_ctx or {}).get('target_date', ''):
                         continue
 
-                is_dup, sim = _is_semantic_dup(title, content, otitle, ocontent, old_card_id=oid)
+                is_dup, sim = _is_semantic_dup(title, content, otitle, ocontent,
+                                                 old_card_id=oid, new_vec=new_vec)
                 if not is_dup:
                     print(f"[语义去重] 「{title}」与「{otitle}」特征重叠({overlap})"
                           f"但语义不同，放行")
@@ -333,7 +346,8 @@ def check_before_write(title: str, content: str, user_input: str,
                 is_dup, sim = _is_semantic_dup(title, content,
                                                pc.get("title", ""), pc.get("content", ""),
                                                old_card_id=pc.get("id", ""),
-                                               old_vec=pc.get('_embed_vec'))
+                                               old_vec=pc.get('_embed_vec'),
+                                               new_vec=new_vec)
                 if not is_dup:
                     print(f"[语义去重-pending] 「{title}」与「{pc.get('title','')}」"
                           f"特征重叠({overlap})但语义不同，放行")

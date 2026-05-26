@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from delegate_tools import delegate
+from clock import beijing_now, beijing_today, beijing_yesterday
 
 PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
 PENDING_CARDS_PATH = os.path.join(os.path.dirname(__file__), "..", "memory", "pending_cards.json")
@@ -26,20 +27,8 @@ def _load_prompt(name):
         return f.read().strip()
 
 # ═══════════════════════════════════════════════════════════════
-#  日期工具：统一使用北京时间（UTC+8），日记永远写「昨天」
+#  日期工具：统一使用 clock.py，日记永远写「昨天」
 # ═══════════════════════════════════════════════════════════════
-def _beijing_now():
-    """返回当前北京时间 datetime（aware）。"""
-    from datetime import timezone as _tz
-    return datetime.now(_tz.utc) + timedelta(hours=8)
-
-def _beijing_date_str() -> str:
-    """当前北京日期 'YYYY-MM-DD'。"""
-    return _beijing_now().strftime("%Y-%m-%d")
-
-def _beijing_yesterday_str() -> str:
-    """昨天北京日期 'YYYY-MM-DD'。"""
-    return (_beijing_now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
 def _parse_utc_ts(ts_str: str) -> datetime | None:
     """解析 chat_logs 中的 UTC 时间戳为 aware datetime。"""
@@ -88,18 +77,17 @@ def _get_digest_for_date(target_date: str):
     return "\n".join(lines[-50:]), target_date
 
 def _update_rolling_summary(new_summary: str, date_str: str = None):
-    """追加/更新滚动总结。date_str 为北京日期，默认今天。"""
+    """追加/更新滚动总结，并压缩为一段精炼文本（≤500字）。"""
     if date_str is None:
-        date_str = _beijing_date_str()
-    new_entry = f"\n## {date_str}\n{new_summary}\n"
+        date_str = beijing_today()
 
+    # 收集所有已有日期段 + 新的一天
     if os.path.exists(ROLLING_SUMMARY_PATH):
         with open(ROLLING_SUMMARY_PATH, "r", encoding="utf-8") as f:
             old = f.read()
     else:
         old = ""
 
-    # ── FIX: 逐段解析，以 "## " 为分段标记，同日期替换而非追加（毒点4修复） ──
     segments = []
     current = ""
     for line in old.split("\n"):
@@ -111,15 +99,31 @@ def _update_rolling_summary(new_summary: str, date_str: str = None):
     if current.strip():
         segments.append(current.rstrip())
 
-    # 删除所有同日期旧条目，再追加新条目
     segments = [s for s in segments if not s.startswith(f"## {date_str}")]
-    segments.append(new_entry.strip())
-
-    # 只保留最近 7 条
+    segments.append(f"## {date_str}\n{new_summary}")
     segments = segments[-7:]
 
+    raw = "\n\n".join(s.strip() for s in segments).strip()
+
+    # ── 压缩：多于 2 天时，调 DeepSeek 精炼为 ≤500 字总结 ──
+    if len(segments) >= 2:
+        try:
+            compress_prompt = (
+                "你是一个记忆压缩器。下面是你主人最近几天的日记式生活叙事，"
+                "请把它压缩成一段 500 字以内的中文滚动总结（一段话，不分点）。"
+                "保留关键事件、重要承诺、情绪变化、关键日期，丢弃流水账。\n\n"
+                f"{raw}"
+            )
+            compressed = delegate(compress_prompt, "")
+            if compressed and 20 < len(compressed) < 800:
+                raw = f"## {date_str} (压缩)\n{compressed.strip()}"
+            else:
+                raw = f"## {date_str} (压缩)\n{compressed[:500].strip() if compressed else new_summary[:500]}"
+        except Exception as e:
+            print(f"[rolling] 压缩失败，保留原始: {e}")
+
     from delegate_tools import atomic_write_text
-    atomic_write_text(ROLLING_SUMMARY_PATH, "\n\n".join(s.strip() for s in segments).strip() + "\n")
+    atomic_write_text(ROLLING_SUMMARY_PATH, raw + "\n")
 
 def _append_pending_card(card: dict):
     """将卡片草稿写入 pending_cards.json（毒点5修复 — 委托 delegate_tools.atomic_write_json）"""
@@ -161,7 +165,7 @@ def chain_dream(target_date: str = None):
     result = {"step1": None, "step2": None, "step3": None}
 
     if target_date is None:
-        target_date = _beijing_yesterday_str()
+        target_date = beijing_yesterday()
 
     digest_result = _get_digest_for_date(target_date)
     digest = digest_result[0] if digest_result else None
@@ -171,10 +175,39 @@ def chain_dream(target_date: str = None):
     os.makedirs(diary_dir, exist_ok=True)
     diary_path = os.path.join(diary_dir, f"{digest_date}.md")
 
-    if not digest:
-        print(f"[dreaming] {digest_date} 尚无对话，跳过日记。")
-        return result
     diary_prompt = _load_prompt("dreaming_diary.txt")
+    diary_json = None
+    summary = ""
+
+    if not digest:
+        # ── 降级保护：无聊天日也生成空日记 + 空 events.json，防止管道断裂 ──
+        print(f"[dreaming] {digest_date} 无对话记录，生成空日记降级。")
+        from delegate_tools import atomic_write_text
+        quiet_md = f"# {digest_date}\n\n## 日记\n今天是安静的一天，没有和 DS 的对话记录。\n"
+        atomic_write_text(diary_path, quiet_md)
+        print(f"[dreaming] 空日记已落盘: {diary_path}")
+
+        quiet_events = {
+            "narrative_short": "安静的一天，无对话。",
+            "completions": [],
+            "cards_created": [],
+            "eisenhower": {},
+            "calendar": [],
+        }
+        events_path = os.path.join(diary_dir, f"{digest_date}_events.json")
+        try:
+            from delegate_tools import atomic_write_json
+            atomic_write_json(events_path, quiet_events)
+            print(f"[dreaming] 空事件日志已落盘: {events_path}")
+        except Exception as e:
+            print(f"[dreaming] 空事件日志写入失败: {e}")
+        result["step1"] = quiet_events
+        result["step2.5"] = quiet_events
+        summary = f"{digest_date}：安静的一天，无对话。"
+        result["step2"] = summary
+        _update_rolling_summary(summary, digest_date)
+        return result
+
     step1_context = f"今日对话摘要：\n{digest}\n当前日期：{digest_date}"
     diary_raw = delegate(diary_prompt, step1_context)
     print(f"[dreaming] Step1 日记: {diary_raw[:100]}...")
@@ -284,7 +317,7 @@ def chain_dream(target_date: str = None):
     card_json = llm_to_json(card_raw, default={"action": "skip"})
 
     if card_json.get("action") == "create":
-        from delegate_tools import now_utc as _now4
+        from clock import beijing_now as _now4
         # ── VA 估算：对今日对话做情绪估值，替代硬编码默认值 ──
         try:
             from emotion.va_estimator import estimate as va_estimate
@@ -321,9 +354,9 @@ def weekly_sweep():
     """每7天收拢一次：扫近7天事件日志，合并待办去重，输出 weekly_{date}.md"""
     import glob as _glob
     from datetime import datetime as _dt, timedelta as _td
-    from delegate_tools import now_utc, atomic_write_text
+    from delegate_tools import atomic_write_text
 
-    today = now_utc().strftime("%Y-%m-%d")
+    today = beijing_today()
     diary_dir = os.path.join(os.path.dirname(__file__), "..", "diary")
     weekly_path = os.path.join(diary_dir, f"weekly_{today}.md")
 
@@ -333,8 +366,9 @@ def weekly_sweep():
     eis_merged = {"important_urgent": [], "important_not_urgent": [],
                   "not_important_urgent": [], "not_important_not_urgent": []}
 
+    from datetime import timedelta as _td_s
     for days_back in range(7, 0, -1):
-        d = (_dt.now() - _td(days=days_back)).strftime("%Y-%m-%d")
+        d = (beijing_now() - _td_s(days=days_back)).strftime("%Y-%m-%d")
         ep = os.path.join(diary_dir, f"{d}_events.json")
         if not os.path.exists(ep):
             continue

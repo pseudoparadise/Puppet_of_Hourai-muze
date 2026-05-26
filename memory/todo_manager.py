@@ -24,14 +24,21 @@ QUAD_COLORS = {
 
 
 class TodoManager:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("待办事项 — 艾森豪威尔四象限")
-        self.root.geometry("880x520")
-        self.root.resizable(True, True)
+    def __init__(self, root_or_parent, standalone=True):
+        self.standalone = standalone
+        if standalone:
+            self.root = root_or_parent
+            self.root.title("待办事项 — 艾森豪威尔四象限")
+            self.root.geometry("880x520")
+            self.root.resizable(True, True)
+            self.parent_frame = ttk.Frame(self.root)
+            self.parent_frame.pack(fill=tk.BOTH, expand=True)
+        else:
+            self.root = root_or_parent.winfo_toplevel()
+            self.parent_frame = root_or_parent
 
         # 工具栏
-        toolbar = ttk.Frame(root)
+        toolbar = ttk.Frame(self.parent_frame)
         toolbar.pack(fill=tk.X, padx=5, pady=5)
         ttk.Button(toolbar, text="刷新", command=self.load_todos).pack(side=tk.LEFT, padx=3)
         ttk.Button(toolbar, text="📥 同步日记待办", command=self.sync_diary).pack(side=tk.LEFT, padx=3)
@@ -58,7 +65,7 @@ class TodoManager:
 
         # Treeview
         columns = ("quadrant", "title", "status", "source", "category", "deadline", "importance", "chord")
-        self.tree = ttk.Treeview(root, columns=columns, show="headings", selectmode="browse")
+        self.tree = ttk.Treeview(self.parent_frame, columns=columns, show="headings", selectmode="browse")
         self.tree.heading("quadrant", text="象限", command=lambda: self.sort_by("quadrant"))
         self.tree.heading("title", text="标题", command=lambda: self.sort_by("title"))
         self.tree.heading("status", text="状态", command=lambda: self.sort_by("status"))
@@ -80,7 +87,7 @@ class TodoManager:
         self.tree.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         # 右键菜单
-        self.context_menu = tk.Menu(root, tearoff=0)
+        self.context_menu = tk.Menu(self.parent_frame, tearoff=0)
         self.context_menu.add_command(label="标记完成", command=self.resolve_selected)
         self.context_menu.add_separator()
         self.context_menu.add_command(label="查看详情", command=self.show_card_detail)

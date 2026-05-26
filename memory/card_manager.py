@@ -21,14 +21,21 @@ PENDING_PATH = os.path.join(os.path.dirname(__file__), "pending_cards.json")
 DB_PATH = os.path.join(os.path.dirname(__file__), "cards.db")
 
 class CardManager:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("记忆卡片管理")
-        self.root.geometry("700x500")
-        self.root.resizable(False, False)
+    def __init__(self, root_or_parent, standalone=True):
+        self.standalone = standalone
+        if standalone:
+            self.root = root_or_parent
+            self.root.title("记忆卡片管理")
+            self.root.geometry("700x500")
+            self.root.resizable(False, False)
+            self.parent_frame = ttk.Frame(self.root)
+            self.parent_frame.pack(fill=tk.BOTH, expand=True)
+        else:
+            self.root = root_or_parent.winfo_toplevel()
+            self.parent_frame = root_or_parent
 
-        notebook = ttk.Notebook(root)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        notebook = ttk.Notebook(self.parent_frame)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         self.pending_frame = ttk.Frame(notebook)
         notebook.add(self.pending_frame, text="等待审核")
