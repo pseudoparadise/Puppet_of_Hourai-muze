@@ -113,15 +113,18 @@ def invalidate_config_cache():
     _config_cache = None
 
 
-def record_bark_push(msg: str):
-    """记录最近 N 条 Bark 推送消息到 state.json，供 trigger 注入主 AI prompt。"""
-    state = load_state()
+def record_bark_push(msg: str, state: dict = None):
+    """记录最近 N 条 Bark 推送消息。若传入 state 则由调用方统一保存，避免竞态覆盖。"""
+    own_state = state is None
+    if own_state:
+        state = load_state()
     recent = state.get("recent_bark", [])
-    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
-    bj_now = (_dt.now(_tz.utc) + _td(hours=8)).strftime('%m-%d %H:%M')
+    from clock import beijing_now
+    bj_now = beijing_now().strftime('%m-%d %H:%M')
     recent.append({"time": bj_now, "msg": msg})
-    state["recent_bark"] = recent[-5:]  # 只保留最近 5 条
-    save_state(state)
+    state["recent_bark"] = recent[-5:]
+    if own_state:
+        save_state(state)
 
 
 def is_garbage_card(title: str, content: str) -> str:

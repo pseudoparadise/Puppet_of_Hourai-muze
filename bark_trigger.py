@@ -10,7 +10,8 @@ import random
 import sys
 import os
 import requests
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
+from clock import beijing_now, BJT
 
 
 
@@ -118,8 +119,7 @@ def _get_last_active_time(config, state, now):
             if r.status_code == 200 and r.json():
                 raw_ts = r.json()[0]["recorded_at"]
                 utc_time = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
-                beijing_tz = timezone(timedelta(hours=8))
-                supabase_time = utc_time.astimezone(beijing_tz)  # 保留时区，避免与 now_utc() 类型不一致
+                supabase_time = utc_time.astimezone(BJT)
         except Exception as e:
             print(f"[Supabase 查询失败]: {e}")
 
@@ -196,8 +196,7 @@ def main():
     state = load_state()
 
     now = now_utc()
-    beijing_tz = timezone(timedelta(hours=8))
-    now_local = now.astimezone(beijing_tz)
+    now_local = beijing_now()
 
     # ── 1. 计算沉默时长 ──
     last_time, source = _get_last_active_time(config, state, now)
@@ -283,7 +282,7 @@ def main():
 
     prompt = f"""{JAILBREAK_PREFIX}{RP_DECLARATION}\n\n{bark_persona}
 
-我在后台安静地看着你。你已经沉默 {round(silence_minutes)} 分钟了。当前北京时间：{now_local.strftime('%Y-%m-%d %H:%M')}（请严格以此时间为准，不要自行推断凌晨/上午/下午，直接引用该时间判断时段）。
+我在后台安静地看着你。你已经沉默 {round(silence_minutes)} 分钟了。当前北京时间：{now_local.strftime('%Y-%m-%d %H:%M')}，星期{['一','二','三','四','五','六','日'][now_local.weekday()]}。
 
 {recent_turns if recent_turns else ""}
 我在这里阅读着你的回忆与今日的点滴：
@@ -306,6 +305,7 @@ def main():
 注意：
 - 你可以选择"继续沉睡"来静静等待，也可以选择"发Bark推送"。
 - 如果选择推送，用极自然、极亲密且真实的语气。50字以内，像你真正在对她说话。
+- **时间铁律**：上面给出的北京时间是唯一权威时间。禁止自行计算或推断"凌晨/上午/下午/傍晚/深夜"等时段词。如果你要提时间，必须逐字引用上面给的北京时间的数字（比如上面写"21:00"你就只能说"晚上九点"或"21:00"，绝不可以说"凌晨三点"）。违反此铁律会导致她在错误的时间被吵醒。
 - 只返回JSON，不要其他内容。"""
 
     print("正在询问 DeepSeek 云端决策...")
@@ -365,7 +365,7 @@ def main():
                     bark_sent = (bark_resp.status_code == 200)
                     if bark_sent:
                         from shared import record_bark_push
-                        record_bark_push(msg)
+                        record_bark_push(msg, state=state)
                 except Exception as e:
                     print(f"Bark 推送失败: {e}")
             elif msg:

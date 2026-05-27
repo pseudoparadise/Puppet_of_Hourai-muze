@@ -332,7 +332,7 @@ def chain_dream(target_date: str = None):
             "title": card_json.get("title", ""),
             "content": card_json.get("content", ""),
             "keywords": card_json.get("keywords", ""),
-            "importance": card_json.get("importance", 5),
+            "importance": max(card_json.get("importance", 5), 8) if card_json.get("category", "interaction") in {'deep_talks', 'milestone', 'turning_points'} else card_json.get("importance", 5),
             "category": card_json.get("category", "interaction"),
             "proposed_by": "dreaming",
             "proposed_at": _now4().isoformat(),

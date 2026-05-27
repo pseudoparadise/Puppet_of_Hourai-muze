@@ -36,6 +36,39 @@ persona/miner_state.json
 
 # ── 音乐状态缓存 ──
 .music_state.json
+music_history.jsonl
+music_debug.log
+memory/music_history.jsonl
+memory/music_debug.log
+
+# ── VA 日志 ──
+memory/va_log.jsonl
+
+# ── 光遇钢琴定点（非敏感） ──
+# sky_keys.json
+
+# ── 进程 PID 文件 ──
+.daemon.pid
+.polling_loop.pid
+.music_sync.pid
+
+# ── 会话状态（含私人对话上下文） ──
+.session_state.json
+
+# ── 待办提醒状态 ──
+reminded_todos.json
+
+# ── 崩溃日志 ──
+console_crash.log
+
+# ── 聊天日志轮转 ──
+chat_logs_*.json
+
+# ── 损坏文件备份 ──
+*.corrupted_*
+
+# ── Claude Code ──
+.claude/
 
 # ── 快照与诊断文件 ──
 状态快照_*.txt

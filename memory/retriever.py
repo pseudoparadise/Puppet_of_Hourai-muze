@@ -230,8 +230,10 @@ def _build_candidate_pool(all_cards: list, anchor_ids: set, va_tier: str,
             continue
         include = False
         if va_tier == 'high':
-            # 高唤醒：优先近7天新卡 + 日活高频卡（usage≥3）
-            if card.get('created_at'):
+            # 高唤醒：近7天新卡 + 日活高频卡 + 深层卡始终进入
+            if card.get('category') in DEEP_CATEGORIES:
+                include = True
+            if not include and card.get('created_at'):
                 try:
                     created = _safe_parse_ts(card['created_at'])
                     if created is not None and (now - created).days <= 7:
@@ -245,13 +247,13 @@ def _build_candidate_pool(all_cards: list, anchor_ids: set, va_tier: str,
             if card.get('category') in DEEP_CATEGORIES:
                 include = True
         else:
-            # ── 中唤醒：随机采样非锚定卡，打破马太效应 ──
-            if card.get('category') in DAILY_CATEGORIES and card.get('usage_count', 0) >= 1:
+            # ── 中唤醒：采样非锚定卡，深层卡不受 resolved 限制 ──
+            if card.get('category') in DEEP_CATEGORIES:
+                include = True  # 深层卡始终进入候选池（已解决的创伤卡也需能被召回）
+            elif card.get('category') in DAILY_CATEGORIES and card.get('usage_count', 0) >= 1:
                 include = True  # 日活卡至少被用过1次的进候选
             elif card.get('importance', 5) >= 6:
                 include = True  # 高重要性卡给机会
-            elif card.get('resolved') == 0 and card.get('category') in DEEP_CATEGORIES:
-                include = True  # 未解决的深层卡给机会
         if include:
             pool.append(card)
             seen_ids.add(card['id'])
@@ -495,6 +497,7 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
             forced_ids.add(fid)
             print(f"[强制召回] 触发关键词 → 锁定卡片 {fid}")
 
+
     # ── VA 唤醒度三层分档：调整检索策略 ──
     # ── 以 SCORING_CONFIG 为基底合并 weights，确保 w_keyword 等必要键始终存在 ──
     w = dict(SCORING_CONFIG)
@@ -625,8 +628,49 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
     all_cards = [dict(row) for row in c.fetchall()]
 
     query_lower = query.lower()
+
+    # ── 口癖自动召回：命中口癖卡关键词 → 用 cached query vec + DB embedding 余弦 → 置顶 1 张 ──
+    tic_candidates = []
+    for card in all_cards:
+        title = card.get('title', '')
+        if not (title.startswith('口癖') or title.startswith('梗')):
+            continue
+        kws = [kw.strip().lower() for kw in card.get("keywords", "").split(",") if kw.strip()]
+        if not kws:
+            continue
+        if any(kw in query_lower for kw in kws):
+            tic_candidates.append(card)
+    if tic_candidates:
+        _tic_vec = getattr(retrieve, '_cached_query_vec', None)
+        if _tic_vec is None:
+            _tic_vec = embed(query)
+            retrieve._cached_query_vec = _tic_vec
+        _best_tic_id, _best_tic_sim = None, 0.0
+        for _tc in tic_candidates:
+            try:
+                c.execute("SELECT embedding FROM cards WHERE id=?", (_tc['id'],))
+                _tc_row = c.fetchone()
+                if _tc_row and _tc_row[0]:
+                    _tc_vec = np.frombuffer(_tc_row[0], dtype=np.float32)
+                    _tc_dot = np.dot(_tic_vec, _tc_vec)
+                    _tc_norm = np.linalg.norm(_tic_vec) * np.linalg.norm(_tc_vec)
+                    _tc_sim = float(_tc_dot / _tc_norm) if _tc_norm > 0 else 0.0
+                    if _tc_sim > _best_tic_sim:
+                        _best_tic_sim = _tc_sim
+                        _best_tic_id = _tc['id']
+                        _best_tic = _tc
+            except Exception:
+                pass
+        if _best_tic_id and _best_tic_sim > 0.30:
+            forced_ids.add(_best_tic_id)
+            print(f"[口癖召回] 「{_best_tic['title']}」cos={_best_tic_sim:.3f} → 强制置顶")
+
     keyword_hits = []
     for card in all_cards:
+        # 口癖/梗卡只走口癖扫描器，不走通用关键词
+        _title = card.get('title', '')
+        if _title.startswith('口癖') or _title.startswith('梗'):
+            continue
         kws = [kw.strip().lower() for kw in card.get("keywords", "").split(",") if kw.strip()]
         hit_count = sum(1 for kw in kws if kw in query_lower)
         if hit_count > 0:

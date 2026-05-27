@@ -516,10 +516,16 @@ def delete_card(card_id: str) -> bool:
 
 
 def resolve_card(card_id: str) -> bool:
-    """标记卡片为已解决（resolved=1, status='completed'）。用于对话中自动检测「我做完了」等信号。"""
+    """标记卡片为已解决（resolved=1, status='completed'）。深层卡不可解决。"""
+    DEEP_CATS = {'deep_talks', 'milestone', 'turning_points'}
     conn = sqlite3.connect(DB_PATH)
     try:
         c = conn.cursor()
+        c.execute("SELECT category FROM cards WHERE id=?", (card_id,))
+        row = c.fetchone()
+        if row and row[0] in DEEP_CATS:
+            print(f"[memory_manager] {card_id} 是{row[0]}卡，不可标记为已解决")
+            return False
         c.execute("UPDATE cards SET resolved = 1, status = 'completed' WHERE id = ? AND review_status='final'", (card_id,))
         if c.rowcount == 0:
             return False

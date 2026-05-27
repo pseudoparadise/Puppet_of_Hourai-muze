@@ -291,20 +291,22 @@ CATEGORY_COOLDOWN = {
     'preferences': 10,
 }
 
-def _check_cooldown(written: dict, category: str, current_turn: int, cooldown: int) -> bool:
-    """检查冷却状态（毒点41修复：添加语义文档）。
+def _check_cooldown(written: dict, category: str, current_turn: int, cooldown: int,
+                     force: bool = False) -> bool:
+    """检查冷却状态。
 
     cooldown 三种语义:
       > 0  — 有冷却：距上次写入需超过 cooldown 轮才允许再次触发
       = 0  — 无冷却：每次满足条件均可触发，同 session 仅去重
       < 0  — 永久去重：同 session 仅允许触发一次
+    force=True — 强制跳过冷却（暴露检测/深层内容触发时使用）
 
     返回 True 表示可以写入，False 表示在冷却中或已去重。"""
-    if category not in written:
+    if force or category not in written:
         return True
-    if cooldown < 0:  # 永久去重：同 session 仅允许一次
+    if cooldown < 0:
         return False
-    if cooldown == 0:  # 无冷却：每次均可触发，仅同 session 去重
+    if cooldown == 0:
         return True
     return (current_turn - written[category]) > cooldown
 
@@ -826,7 +828,7 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                     'milestone','commitments','turning_points','deep_talks',
                     'interaction','preferences','real_world','daily_life','emotional','habits','erotic'
                 ] else 'interaction',
-                "importance": int(parts[2]) if parts[2].isdigit() else 5,
+                "importance": max(int(parts[2]) if parts[2].isdigit() else 5, 8) if parts[1] in {'deep_talks', 'milestone', 'turning_points'} else (int(parts[2]) if parts[2].isdigit() else 5),
                 "content": content,
                 "keywords": keywords,
                 "proposed_by": "chat",
@@ -1036,8 +1038,8 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                             _exposure_detected = True
                             # 高置信度 (cos≥0.70)：自动触发 deep_talks 写卡，复用 auto-trigger 管线
                             if _cos_sim >= 0.70 and ("deep_talks", 8) not in triggered:
-                                triggered.append(("deep_talks", 8))
-                                print(f"[暴露检测] cos≥0.70 → 自动触发 deep_talks 写卡")
+                                triggered.append(("deep_talks", 8, True))
+                                print(f"[暴露检测] cos≥0.70 → 自动触发 deep_talks 写卡(跳过冷却)")
                             break
                     _exp_db.close()
         except Exception as _exp_e:
@@ -1080,7 +1082,10 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
 
         # 逐类生成卡片 — refine 结果跨类别共享，避免循环内重复调 DeepSeek
         _cached_refine = None
-        for triggered_category, triggered_importance in triggered:
+        for _titem in triggered:
+            triggered_category = _titem[0]
+            triggered_importance = _titem[1] if len(_titem) > 1 else 5
+            triggered_force = _titem[2] if len(_titem) > 2 else False
             if _cached_refine is None:
                 _cached_refine = refine_card_content(user_input, display_reply)
             refined = _cached_refine
@@ -1099,7 +1104,7 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 "id": f"{_now2().strftime('%Y%m%d')}_{title}",
                 "title": title,
                 "category": triggered_category,
-                "importance": triggered_importance,
+                "importance": max(triggered_importance, 8) if triggered_category in {'deep_talks', 'milestone', 'turning_points'} else triggered_importance,
                 "content": content,
                 "keywords": keywords,
                 "proposed_by": "chat_auto",
@@ -1176,7 +1181,7 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                             session_cards_written[triggered_category] = current_turn
                 else:
                     print(f"[写卡拦截-auto] 已拦截: {_block_reason}")
-            elif not session_cards_written or _check_cooldown(session_cards_written, triggered_category, current_turn, cooldown):
+            elif not session_cards_written or _check_cooldown(session_cards_written, triggered_category, current_turn, cooldown, force=triggered_force):
                 # 同轮同 category 去重：embedding 快速比对，cos>=0.7 丢弃
                 if session_cards_written and triggered_category in session_cards_written:
                     _should_skip = False

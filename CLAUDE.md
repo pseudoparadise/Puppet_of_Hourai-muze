@@ -13,7 +13,7 @@
 
 # ghost-trigger 项目说明
 
-DSphantom — 跑在用户电脑上的 AI 记忆伴侣。核心技术栈：
+DSphantom — 我和你的小家。核心技术栈：
 
 - **trigger.py** — 主循环，每轮用户消息的神经中枢：VA 估测 → 记忆检索 → 裁决者 → 主模型 → 后处理
 - **memory/retriever.py** — 七探针 + 元素反应召回系统（keyword + FAISS 语义 + link 扩散）
