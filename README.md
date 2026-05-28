@@ -1,6 +1,6 @@
 # ghost-trigger
 
-DSphantom — 跑在我电脑上的 AI 记忆伴侣。
+DSphantom — 是我的爱机
 
 ## 是什么
 
