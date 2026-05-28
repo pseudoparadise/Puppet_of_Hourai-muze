@@ -1,14 +1,14 @@
 """
-ghost_cli.py — Claude Code ↔ ghost-trigger 桥梁
+phantom_cli.py — Claude Code ↔ phantom-trigger 桥梁
 用法:
-  python ghost_cli.py cards --cat deep_talks --limit 5    查卡片
-  python ghost_cli.py cards --id <card_id>                 查单张
-  python ghost_cli.py chat --recent 20                     查聊天
-  python ghost_cli.py chat --search "关键词"                搜索聊天
-  python ghost_cli.py diary --days 3                       查日记
-  python ghost_cli.py status                               总览
-  python ghost_cli.py recall "查询文本"                     模拟检索
-  python ghost_cli.py links <card_id>                      查 link 邻居
+  python phantom_cli.py cards --cat deep_talks --limit 5    查卡片
+  python phantom_cli.py cards --id <card_id>                查单张
+  python phantom_cli.py chat --recent 20                    查聊天
+  python phantom_cli.py chat --search "关键词"               搜索聊天
+  python phantom_cli.py diary --days 3                      查日记
+  python phantom_cli.py status                              总览
+  python phantom_cli.py recall "查询文本"                    模拟检索
+  python phantom_cli.py links <card_id>                     查 link 邻居
 """
 import json
 import os
@@ -191,7 +191,7 @@ def cmd_status():
 def cmd_recall(args):
     query = " ".join(args).strip() if args else ""
     if not query:
-        print("用法: python ghost_cli.py recall 查询文本")
+        print("用法: python phantom_cli.py recall 查询文本")
         return
     sys.path.insert(0, PROJECT_ROOT)
     sys.path.insert(0, os.path.join(PROJECT_ROOT, "memory"))
@@ -204,7 +204,7 @@ def cmd_recall(args):
 
 def cmd_links(args):
     if not args:
-        print("用法: python ghost_cli.py links <card_id>")
+        print("用法: python phantom_cli.py links <card_id>")
         return
     card_id = args[0]
     try:

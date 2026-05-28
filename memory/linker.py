@@ -13,6 +13,18 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "cards.db")
 LINK_THRESHOLD = 0.85
 LINK_K = 10  # FAISS 搜索的最近邻数量
 
+# 分类防火墙：这些分类对之间不建 link 边
+LINK_CATEGORY_BLOCK = {
+    ('deep_talks', 'erotic'), ('erotic', 'deep_talks'),
+    ('milestone', 'erotic'), ('erotic', 'milestone'),
+    ('turning_points', 'erotic'), ('erotic', 'turning_points'),
+    ('daily_life', 'erotic'), ('erotic', 'daily_life'),
+}
+
+
+def _categories_compatible(cat_a: str, cat_b: str) -> bool:
+    return (cat_a, cat_b) not in LINK_CATEGORY_BLOCK
+
 
 def ensure_link_table():
     """创建 card_links 表（幂等）。"""
@@ -77,6 +89,12 @@ def build_links(card_id: str, vec: np.ndarray):
         cosine = max(0.0, min(1.0, cosine))
 
         if cosine < LINK_THRESHOLD:
+            continue
+
+        # 分类防火墙
+        _cat_a = conn.execute("SELECT category FROM cards WHERE id=?", (card_id,)).fetchone()
+        _cat_b = conn.execute("SELECT category FROM cards WHERE id=?", (other_id,)).fetchone()
+        if _cat_a and _cat_b and not _categories_compatible(_cat_a[0], _cat_b[0]):
             continue
 
         a, b = _normalize_pair(card_id, other_id)
@@ -168,6 +186,12 @@ def rebuild_all_links():
             cosine = max(0.0, min(1.0, cosine))
 
             if cosine < LINK_THRESHOLD:
+                continue
+
+            # 分类防火墙
+            _cat_a = conn.execute("SELECT category FROM cards WHERE id=?", (card_id,)).fetchone()
+            _cat_b = conn.execute("SELECT category FROM cards WHERE id=?", (other_id,)).fetchone()
+            if _cat_a and _cat_b and not _categories_compatible(_cat_a[0], _cat_b[0]):
                 continue
 
             a, b = _normalize_pair(card_id, other_id)

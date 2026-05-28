@@ -7,6 +7,7 @@ FIX #2: 多样性约束逻辑 bug（重复添加卡片）→ 重写合并循环
 FIX #3: 集成 encoder 的 ID 映射系统
 NEW: 提取 _score_card() 独立打分函数，为未来重排算法优化留收口
 """
+import json
 import sqlite3
 import os
 from .encoder import embed, load_index, search_index, DIM
@@ -85,6 +86,153 @@ def _compute_penalty(card_id: str, weights: dict) -> float:
 def _track_referenced(card_ids: list):
     """追踪被 AI 实际引用的卡片（区别于被检索但未引用的）。"""
     USAGE_STATS["total_refs"] = USAGE_STATS.get("total_refs", 0) + len(card_ids)
+
+
+# ── 反馈驱动探针微调 ──
+PROBE_ADJUSTMENTS_PATH = os.path.join(os.path.dirname(__file__), "probe_adjustments.json")
+TRACE_PATH = os.path.join(os.path.dirname(__file__), "retrieval_traces.jsonl")
+
+PROBE_WEIGHTS = [
+    "w_keyword", "w_semantic", "w_importance", "w_anchor",
+    "w_diffusion", "w_recency", "w_decay", "w_fire", "w_water", "w_va",
+]
+
+
+def _load_adjustments() -> dict:
+    if os.path.exists(PROBE_ADJUSTMENTS_PATH):
+        try:
+            with open(PROBE_ADJUSTMENTS_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_adjustments(adj: dict):
+    with open(PROBE_ADJUSTMENTS_PATH, "w", encoding="utf-8") as f:
+        json.dump(adj, f, ensure_ascii=False, indent=2)
+
+
+def get_effective_weights() -> dict:
+    """SCORING_CONFIG + 反馈微调后的有效权重。"""
+    adj = _load_adjustments()
+    w = dict(SCORING_CONFIG)
+    for k in PROBE_WEIGHTS:
+        if k in adj:
+            w[k] = round(w.get(k, 0) + adj[k], 4)
+    return w
+
+
+def _write_trace(trace_id: str, query: str, va_tier: str, weights: dict, results: list):
+    """写一条检索 trace，供反馈面板读取。"""
+    try:
+        cards = []
+        for c in results:
+            cards.append({
+                "id": c["id"], "title": c["title"], "category": c["category"],
+                "score": c["score"], "probes": c.get("probes", {}),
+                "feedback": None
+            })
+        trace = {
+            "trace_id": trace_id,
+            "ts": datetime.now().isoformat(),
+            "query": query[:120],
+            "va_tier": va_tier,
+            "weights_snapshot": {k: weights.get(k, 0) for k in PROBE_WEIGHTS},
+            "cards": cards
+        }
+        from delegate_tools import atomic_write_json as _awj_trace
+        # 追加到 JSONL
+        with open(TRACE_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(trace, ensure_ascii=False) + "\n")
+        # 只保留最近 50 条
+        if os.path.exists(TRACE_PATH):
+            with open(TRACE_PATH, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            if len(lines) > 50:
+                with open(TRACE_PATH, "w", encoding="utf-8") as f:
+                    f.writelines(lines[-50:])
+    except Exception:
+        pass
+
+
+def record_feedback(trace_id: str, card_id: str, is_good: bool):
+    """用户对某次检索的某张卡片标记 ✓/✗。"""
+    if not os.path.exists(TRACE_PATH):
+        return 0
+    try:
+        with open(TRACE_PATH, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        found = 0
+        updated = []
+        for line in lines:
+            trace = json.loads(line.strip())
+            if trace.get("trace_id") == trace_id:
+                for c in trace.get("cards", []):
+                    if c["id"] == card_id:
+                        c["feedback"] = "good" if is_good else "bad"
+                        found += 1
+            updated.append(json.dumps(trace, ensure_ascii=False))
+        with open(TRACE_PATH, "w", encoding="utf-8") as f:
+            f.write("\n".join(updated) + "\n")
+        return found
+    except Exception:
+        return 0
+
+
+def apply_feedback_adjustments():
+    """读取所有已反馈的 trace，按探针贡献比例微调 SCORING_CONFIG 权重。"""
+    if not os.path.exists(TRACE_PATH):
+        return {"good": 0, "bad": 0}
+    try:
+        with open(TRACE_PATH, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception:
+        return {"good": 0, "bad": 0}
+
+    adj = _load_adjustments()
+    good_count, bad_count = 0, 0
+
+    for line in lines:
+        try:
+            trace = json.loads(line.strip())
+        except Exception:
+            continue
+        for c in trace.get("cards", []):
+            fb = c.get("feedback")
+            if fb not in ("good", "bad"):
+                continue
+            probes = c.get("probes", {})
+            total = c.get("score", 0.01)
+            if total <= 0:
+                continue
+
+            # 映射 probes 到 weights
+            probe_to_weight = {
+                "keyword": "w_keyword", "semantic": "w_semantic",
+                "importance": "w_importance", "anchor": "w_anchor",
+                "diffusion": "w_diffusion", "recency": "w_recency",
+                "decay": "w_decay", "fire": "w_fire", "water": "w_water",
+            }
+
+            for probe_key, weight_key in probe_to_weight.items():
+                contribution = probes.get(probe_key, 0)
+                if contribution == 0:
+                    continue
+                ratio = contribution / total
+                if fb == "good":
+                    delta = round(0.006 * ratio, 4)
+                    good_count += 1
+                else:
+                    delta = round(-0.010 * ratio, 4)
+                    bad_count += 1
+                adj[weight_key] = round(adj.get(weight_key, 0) + delta, 4)
+                # 钳制单权重调整范围 [-0.15, +0.15]
+                adj[weight_key] = max(-0.15, min(0.15, adj[weight_key]))
+
+    _save_adjustments(adj)
+    print(f"[探针微调] ✓={good_count}张 ✗={bad_count}张 → adjustments: {json.dumps(adj, ensure_ascii=False)}")
+    return {"good": good_count, "bad": bad_count, "adjustments": dict(adj)}
 
 
 def artifact_adapt():
@@ -470,7 +618,23 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
         fire_burst + water_smooth + growth_bonus + chord_harvest +
         treasure_bonus
         - presence_repetition_penalty - frequency_penalty
-    ) * resolved_penalty
+    ) * resolved_penalty, {
+        "keyword": keyword_score,
+        "semantic": semantic_score,
+        "importance": importance_score,
+        "anchor": anchor_bonus,
+        "diffusion": diffusion_bonus,
+        "recency": recent_bonus,
+        "decay": -decay_penalty,
+        "fire": fire_burst,
+        "water": water_smooth,
+        "growth": growth_bonus,
+        "chord": chord_harvest,
+        "treasure": treasure_bonus,
+        "presence_repeat": -presence_repetition_penalty,
+        "frequency": -frequency_penalty,
+        "resolved_penalty": resolved_penalty
+    }
 
 
 def retrieve(query: str, top_k: int = 3, weights: dict = None,
@@ -499,8 +663,8 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
 
 
     # ── VA 唤醒度三层分档：调整检索策略 ──
-    # ── 以 SCORING_CONFIG 为基底合并 weights，确保 w_keyword 等必要键始终存在 ──
-    w = dict(SCORING_CONFIG)
+    # ── 以 SCORING_CONFIG + 反馈调整为基底，确保 w_keyword 等必要键始终存在 ──
+    w = get_effective_weights()
     if weights:
         w.update(weights)
     # ── 毒点32修复：deepcopy 避免跨调用污染原始配置 ──
@@ -676,7 +840,7 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
         if hit_count > 0:
             card["hit_count"] = hit_count
             card["distance"] = 1.0
-            card["score"] = _score_card(card, hit_count, 1.0, effective_weights, anchor_ids, va_tier)
+            card["score"], card["probes"] = _score_card(card, hit_count, 1.0, effective_weights, anchor_ids, va_tier)
             keyword_hits.append(card)
 
     # ── EL-4: 虫洞跳跃 — 构建候选池，语义搜索仅限候选池内 ──
@@ -710,7 +874,7 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
                         card = dict(row)
                         card["hit_count"] = 0  # ── FIX: 明确设0 ──
                         card["distance"] = dist
-                        card["score"] = _score_card(card, 0, dist, effective_weights, anchor_ids, va_tier)  # ── FIX: hit_count=0 ──
+                        card["score"], card["probes"] = _score_card(card, 0, dist, effective_weights, anchor_ids, va_tier)  # ── FIX: hit_count=0 ──
                         semantic_hits.append(card)
         except Exception as e:
             print(f"[语义召回异常]: {e}")
@@ -766,6 +930,12 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
 
     # ── link 扩散：沿 link 边走一跳，邻居卡衰减权重加入候选池 ──
     LINK_DECAY = 0.60
+    LINK_CATEGORY_BLOCK = {
+        ('deep_talks', 'erotic'), ('erotic', 'deep_talks'),
+        ('milestone', 'erotic'), ('erotic', 'milestone'),
+        ('turning_points', 'erotic'), ('erotic', 'turning_points'),
+        ('daily_life', 'erotic'), ('erotic', 'daily_life'),
+    }
     _expand_from = [c for c in merged[:5] if c.get("score", 0) > 0]
     _diffused_cards = []  # 记录扩散详情供 console 输出
     if _expand_from:
@@ -774,12 +944,15 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
             _neighbor_ids = set()
             _neighbor_sims = {}
             _neighbor_sources = {}  # nid → source card title
+            _neighbor_sources_cat = {}  # nid → source card category
             for _card in _expand_from:
+                _scat = _card.get("category", "")
                 for _nid, _nsim in _get_linked(_card["id"]):
                     if _nid not in seen:
                         if _nid not in _neighbor_ids or _nsim > _neighbor_sims.get(_nid, 0):
                             _neighbor_sims[_nid] = _nsim
                             _neighbor_sources[_nid] = _card.get("title", _card["id"])[:20]
+                            _neighbor_sources_cat[_nid] = _scat
                         _neighbor_ids.add(_nid)
 
             if _neighbor_ids:
@@ -799,6 +972,11 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
                 _linked = 0
                 for _row in _clink.fetchall():
                     _ncard = dict(_row)
+                    # 分类防火墙：deep_talk ↔ erotic 禁止互相扩散
+                    _ncat = _ncard.get("category", "")
+                    _scat = _neighbor_sources_cat.get(_ncard["id"], "")
+                    if (_scat, _ncat) in LINK_CATEGORY_BLOCK:
+                        continue
                     _neblob = _ncard.pop("embedding", None)
                     # query-neighbor 余弦过滤：邻居必须在语义上和查询相关
                     if _query_vec is not None and _neblob is not None:
@@ -813,7 +991,7 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
                             pass
                     _ncard["hit_count"] = 0
                     _ncard["distance"] = 1.5
-                    _base_score = _score_card(_ncard, 0, 1.5, effective_weights, anchor_ids, va_tier)
+                    _base_score, _ = _score_card(_ncard, 0, 1.5, effective_weights, anchor_ids, va_tier)
                     _nsim = _neighbor_sims.get(_ncard["id"], _LINK_MIN)
                     _ncard["score"] = _base_score * LINK_DECAY * (0.7 + 0.3 * _nsim)
                     _ncard["_link_diffused"] = True
@@ -887,8 +1065,9 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
                     print(f"[传送锚点] 霸榜卡{dominated_ids} → 传送「{teleport_card['title']}」")
 
     output = []
+    trace_id = datetime.now().strftime('%Y%m%d_%H%M%S_') + str(random.randint(1000, 9999))
     for card in result:
-        output.append({
+        entry = {
             "id": card["id"],
             "title": card["title"],
             "content": card["content"],
@@ -897,10 +1076,14 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
             "category": card["category"],
             "score": round(card["score"], 4),
             "hit_count": card.get("hit_count", 0),
-            "distance": round(card.get("distance", 1.0), 4)
-        })
+            "distance": round(card.get("distance", 1.0), 4),
+            "probes": card.get("probes", {}),
+        }
+        output.append(entry)
     # ── 追踪本轮召回，供下轮 presence/repetition penalty 使用 ──
     _track_retrieved([c["id"] for c in output])
     # ── 圣遗物自适应：每100次检索自动调参 ──
     artifact_adapt()
+    # ── 写检索 trace ──
+    _write_trace(trace_id, query, va_tier, effective_weights, output)
     return output

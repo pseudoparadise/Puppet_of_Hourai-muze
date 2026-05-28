@@ -1,5 +1,5 @@
 """
-play_music.py — 轻量播放封装，记录当前播放状态供 ghost-trigger 读取
+play_music.py — 轻量播放封装，记录当前播放状态供 phantom-trigger 读取
 用法:
   python play_music.py search 周杰伦 晴天     # 搜索并播放
   python play_music.py play 186016            # 按 ID 播放

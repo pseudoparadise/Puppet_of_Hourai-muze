@@ -1,5 +1,5 @@
 """
-music_context.py — 读取当前网易云播放状态，供 ghost-trigger 注入 prompt
+music_context.py — 读取当前网易云播放状态，供 phantom-trigger 注入 prompt
 来源优先级：本项目的 .music_state.json > neteasecli player status
 """
 import json

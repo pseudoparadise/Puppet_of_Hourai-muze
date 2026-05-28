@@ -1,6 +1,6 @@
 """
-ghost_status.py — ghost-trigger 实时状态快照
-用法：python ghost_status.py  或  双击 查看状态.bat
+phantom_status.py — phantom-trigger 实时状态快照
+用法：python phantom_status.py  或  双击 查看状态.bat
 输出：状态快照_YYYYMMDD_HHMMSS.txt
 """
 import os
@@ -116,7 +116,7 @@ def tree_walk(base: str, prefix: str = "") -> list:
 
 def file_listing() -> str:
     """目录树"""
-    lines = ["ghost-trigger/"]
+    lines = ["phantom-trigger/"]
     lines.extend(tree_walk(ROOT, "  "))
     return "\n".join(lines)
 
@@ -283,7 +283,7 @@ def main():
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     output_parts = []
 
-    output_parts.append(f"ghost-trigger 实时状态快照")
+    output_parts.append(f"phantom-trigger 实时状态快照")
     output_parts.append(f"生成时间: {now}")
     output_parts.append(f"项目路径: {ROOT}")
 

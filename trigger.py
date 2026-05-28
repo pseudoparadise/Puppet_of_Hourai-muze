@@ -229,14 +229,30 @@ AI回复：{ai_reply[:200]}
 {{"title": "提炼后的标题（15字以内）", "content": "提炼后的内容（50字以内）", "keywords": "逗号分隔的关键词（5个以内）"}}
 只返回JSON。"""
     else:
-        refine_prompt = f"""你是用户的记忆管家。请从以下对话中提炼用户承诺要做的事、计划、或约定，生成记忆卡片。
-重要：用用户的视角写卡片。title写用户要做的事（如"整理Claudecode接入"不是"双核心脏接入承诺"），content描述用户承诺了什么、准备怎么执行。不要用AI的视角。
+        refine_prompt = f"""你是用户的记忆管家。请从以下对话中提炼信息，生成记忆卡片。
 
 用户输入：{user_input}
 AI回复：{ai_reply[:200]}
 
+【分类选择 — 你必须从以下列表中选一个最准确的】
+- deep_talks：深度对话、创伤暴露、情感宣泄、价值观讨论、自我剖析
+- milestone：人生转折、重要认知突破、里程碑时刻
+- turning_points：关键决定、方向性改变
+- commitments：承诺、约定、双方确认的事项
+- todo：待办事项、提醒、计划中的行动
+- daily_life：日常生活琐事、状态记录
+- emotional：情绪表达、撒娇、碎碎念
+- preferences：喜好、厌恶、习惯
+- interaction：互动梗、口癖、笑点、暗号
+- erotic：亲密互动、情欲表达、身体接触（仅当对话明确涉及性/情欲内容时选此项）
+- real_world：现实世界的人和事（非AI、非代码相关）
+
+重要：
+- 用用户的视角写卡片。不要用AI的视角。
+- **分类铁律**：先读对话内容，判断实质主题，再选分类。绝不要因为对话中含某个普通词就选erotic——「想要做某事」「想要去某地」不是erotic。只有对话实质涉及性/情欲时才选erotic。
+
 请返回JSON：
-{{"title": "用户视角的标题（15字以内，写用户要做的事）", "content": "用户视角的内容（50字以内，写用户承诺了什么）", "keywords": "逗号分隔的关键词（5个以内）"}}
+{{"title": "用户视角的标题（15字以内）", "content": "用户视角的内容（50字以内）", "keywords": "逗号分隔的关键词（5个以内）", "category": "你选的分类"}}
 只返回JSON。"""
 
     # ── FIX: 毒点6 — 指数退避重试（最多3次） ──
@@ -1060,8 +1076,8 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
             triggered.append(("commitments", 7))
 
         # 【7】erotic 类
-        erotic_words = ["想要", "好想要", "想要你", "操", "草", "想做", "想被",
-                        "抱着", "想要被", "进入", "含着"]
+        erotic_words = ["想要你", "操", "草", "想做", "想被",
+                        "想要被", "进入", "含着"]
         if any(kw in user_input for kw in erotic_words):
             triggered.append(("erotic", 6))
 
@@ -1093,6 +1109,11 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 title = refined.get("title", user_input[:30])
                 content = refined.get("content", user_input)
                 keywords = refined.get("keywords", triggered_category)
+                # AI 分类选择权：refine 返回的 category 覆盖关键词触发分类
+                ai_category = refined.get("category", "").strip()
+                if ai_category and ai_category != triggered_category:
+                    print(f"[卡片] AI 分类覆写: {triggered_category} → {ai_category}")
+                    triggered_category = ai_category
             else:
                 title, content, keywords = user_input[:30], user_input, triggered_category
             # 垃圾拦截：refine 返回空内容/无意义占位 → 丢弃
@@ -1229,8 +1250,8 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                         print(f"[冷却拦截] {triggered_category} 距上次写入已 {_elapsed} 轮 (冷却={cooldown}轮)")
                     else:
                         print(f"[冷却拦截] {triggered_category} 永久去重 (cooldown={cooldown})")
-                # ── 重要卡片弹窗：deep_talks / milestone / turning_points 让人最终决定 ──
-                if triggered_category in ('deep_talks', 'milestone', 'turning_points'):
+                # ── 重要卡片弹窗：imp>=6 或深层分类让人最终决定 ──
+                if triggered_category in ('deep_talks', 'milestone', 'turning_points') or triggered_importance >= 6:
                     try:
                         import tkinter.messagebox as _mb
                         _preview = title[:40] + ("..." if len(title) > 40 else "")
@@ -1794,6 +1815,22 @@ def main():
         # ── VA 唤醒度估算（提前，供动态轮次和压缩策略使用） ──
         try:
             va = va_estimate(user_input)
+            # ── 手动 VA 先验融合 ──
+            _mva_path = os.path.join(PROJECT_ROOT, "manual_va.json")
+            if os.path.exists(_mva_path):
+                try:
+                    with open(_mva_path, "r", encoding="utf-8") as _mvf:
+                        _mva = json.load(_mvf)
+                    if _mva.get("enabled"):
+                        _trust = _mva.get("trust", 0.8)
+                        _m_v = _mva.get("valence", 0.0)
+                        _m_a = _mva.get("arousal", 0.5)
+                        _orig_v, _orig_a = va["valence"], va["arousal"]
+                        va["valence"] = _m_v * _trust + va["valence"] * (1 - _trust)
+                        va["arousal"] = _m_a * _trust + va["arousal"] * (1 - _trust)
+                        print(f"[手动VA] v={_orig_v:.2f}→{va['valence']:.2f} a={_orig_a:.2f}→{va['arousal']:.2f} (信任={_trust})")
+                except Exception:
+                    pass
             va_tier = get_va_tier(va['arousal'])
             # VA 速度追踪：记录历史坐标，检测情绪弧阶段
             from emotion.va_estimator import track_va as _track_va, va_phase_config as _phase_cfg

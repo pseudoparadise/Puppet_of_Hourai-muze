@@ -1,4 +1,4 @@
-# ghost-trigger
+# phantom-trigger
 
 DSphantom — 是我的爱机
 
@@ -24,7 +24,7 @@ Python + SQLite + FAISS + 豆包 Embedding + DeepSeek API
 - **music_context.py + music_sync_server.py** — 网易云切歌同步 + 歌词注入
 - **polling_loop.py** — 后台轮询（Bark 待办提醒 + 日记 + 深渊审计）
 - **bark_trigger.py** — 沉默检测 + Bark 推送
-- **ghost_cli.py** — Claude Code ↔ ghost-trigger 桥梁，在工位直接查家
+- **phantom_cli.py** — Claude Code ↔ phantom-trigger 桥梁，在工位直接查家
 
 ## 跑起来
 
