@@ -9,7 +9,7 @@ NEW: 提取 _score_card() 独立打分函数，为未来重排算法优化留收
 """
 import sqlite3
 import os
-from .encoder import embed, load_index, search_index, DIM
+from encoder import embed, load_index, search_index, DIM
 import numpy as np
 import random
 from datetime import datetime
@@ -808,7 +808,7 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
     _diffused_cards = []  # 记录扩散详情供 console 输出
     if _expand_from:
         try:
-            from .linker import get_linked_with_similarity as _get_linked, LINK_THRESHOLD as _LINK_MIN
+            from linker import get_linked_with_similarity as _get_linked, COMPOSITE_THRESHOLD as _LINK_MIN
             _neighbor_ids = set()
             _neighbor_sims = {}
             _neighbor_sources = {}  # nid → source card title

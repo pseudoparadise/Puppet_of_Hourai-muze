@@ -402,7 +402,7 @@ def abyss_challenge():
     对邻居中未被充分使用的卡（usage≤1），小幅提升 importance（上限 6）。
     """
     try:
-        from .encoder import load_index, search_index, embed
+        from encoder import load_index, search_index, embed
         import numpy as _np_ac
         index = load_index()
         if index.ntotal == 0:
