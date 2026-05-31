@@ -74,24 +74,6 @@ STATE_PATH = os.path.join(PROJECT_ROOT, "state.json")
 #  和弦情绪标记系统（修正3+4）
 # ═══════════════════════════════════════════════════════════════
 # 映射基于乐理主观经验，可随时调整
-CHORD_EMOTION = {
-    "C": "明亮坚定，C大调主和弦，稳定温暖",
-    "Cmaj7": "梦幻漂浮，大七度带来慵懒的爵士感",
-    "Dm": "柔和忧郁，D小调的自然感伤",
-    "Dm7": "内敛深情，小七度增加一丝温柔",
-    "Em": "宁静感伤，E小调的克制与深思",
-    "Em7": "柔软思念，小七度的暧昧悬停",
-    "F": "温暖宽广，F大调下属和弦的怀抱感",
-    "Fmaj7": "温柔摇曳，大七度像春日午后的微风",
-    "G": "明亮推进，G大调属和弦的期待与张力",
-    "G7": "焦灼渴望，属七和弦的迫切未完成感",
-    "Am": "黯然神伤，A小调主和弦的纯净悲伤",
-    "Am7": "慵懒忧伤，小七度让悲伤变得松弛",
-    "Bm7": "深邃迷离，B小调七和弦的复杂情绪",
-    "E": "强烈明亮，E大调的高亢冲击力",
-    "D7": "乡村律动，属七和弦的摇摆推动感",
-    "B7": "尖锐张力，B属七和弦的戏剧性冲突",
-}
 
 # BPM 速度描述
 BPM_DESC = [(30, "极慢"), (40, "很慢"), (60, "慢"), (80, "中速"), (110, "快"), (140, "很快"), (170, "极快")]
@@ -107,13 +89,7 @@ def _dyn_text(dyn: str) -> str:
     return DYN_DESC.get(dyn, dyn)
 
 def _describe_chord(chord_str: str) -> str:
-    """和弦名→情绪描述。支持和弦进行（多和弦串联如 Em7Fmaj7）"""
-    import re
-    individuals = re.findall(r'[A-G][a-z0-9]*', chord_str)
-    if len(individuals) >= 2:
-        descs = [CHORD_EMOTION.get(c, f"自定义({c})") for c in individuals]
-        return f"{'→'.join(individuals)}: {'→'.join(descs)}"
-    return CHORD_EMOTION.get(chord_str, f"自定义({chord_str})")
+    return chord_str
 
 def _parse_chord(raw: str) -> tuple:
     """
@@ -165,6 +141,70 @@ def detect_refs_by_keywords(reply: str, cards: list) -> list:
             ref_ids.append(card["id"])
     return list(set(ref_ids))
 
+def _popup_collect_keywords(title: str, content: str, keywords: str, category: str, importance: int):
+    """写卡弹窗：展示卡片内容，强制人类输入至少一个关键词。
+    返回 (confirmed, new_title, new_keywords) —— confirmed=False 表示丢弃卡片。
+    """
+    try:
+        import tkinter as tk
+        from tkinter import ttk
+
+        root = tk.Tk()
+        root.title("写卡确认 — 输入关键词")
+        root.geometry("520x420")
+        root.resizable(False, False)
+
+        frm = ttk.Frame(root, padding=10)
+        frm.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frm, text=f"分类: {category} | 重要度: {importance}",
+                  font=("", 9, "bold")).pack(anchor=tk.W, pady=(0, 5))
+
+        ttk.Label(frm, text="标题:", font=("", 9)).pack(anchor=tk.W)
+        title_var = tk.StringVar(value=title)
+        title_entry = ttk.Entry(frm, textvariable=title_var, width=60)
+        title_entry.pack(fill=tk.X, pady=(0, 8))
+
+        ttk.Label(frm, text="内容:", font=("", 9)).pack(anchor=tk.W)
+        content_text = tk.Text(frm, height=5, wrap=tk.WORD)
+        content_text.insert("1.0", content)
+        content_text.config(state=tk.DISABLED)
+        content_text.pack(fill=tk.X, pady=(0, 8))
+
+        ttk.Label(frm, text="关键词（至少输入 1 个，逗号分隔）:", font=("", 9, "bold")).pack(anchor=tk.W)
+        kw_var = tk.StringVar(value=keywords)
+        kw_entry = ttk.Entry(frm, textvariable=kw_var, width=60)
+        kw_entry.pack(fill=tk.X, pady=(0, 10))
+        kw_entry.focus_set()
+
+        result = {"confirmed": False, "title": "", "keywords": ""}
+
+        def on_ok():
+            kws = [k.strip() for k in kw_var.get().split(",") if k.strip()]
+            if not kws:
+                kw_entry.config(foreground="red")
+                kw_entry.insert(0, "（必须输入至少一个关键词！）")
+                return
+            result["confirmed"] = True
+            result["title"] = title_var.get().strip()
+            result["keywords"] = ", ".join(kws)
+            root.destroy()
+
+        def on_cancel():
+            root.destroy()
+
+        btn_row = ttk.Frame(frm)
+        btn_row.pack(fill=tk.X, pady=(5, 0))
+        ttk.Button(btn_row, text="✓ 写入", command=on_ok).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_row, text="✗ 丢弃", command=on_cancel).pack(side=tk.LEFT, padx=5)
+
+        root.protocol("WM_DELETE_WINDOW", on_cancel)
+        root.mainloop()
+        return result["confirmed"], result["title"], result["keywords"]
+    except Exception:
+        return False, title, keywords
+
+
 # ── FIX: 写入待审核卡片（毒点5修复 — 委托 delegate_tools.atomic_write_json） ──
 def write_pending_card(card_draft: dict):
     from shared import is_garbage_card
@@ -173,6 +213,26 @@ def write_pending_card(card_draft: dict):
         print(f"[卡片提议] 拦截: {reason}")
         return
 
+    # ── todo 卡统一弹窗审核，不放过任何一个自动写入的待办 ──
+    if card_draft.get("category") == "todo" and card_draft.get("proposed_by") != "muze":
+        try:
+            import tkinter.messagebox as _mb_todo
+            _todo_preview = card_draft.get("title", "")[:40]
+            _todo_content = card_draft.get("content", "")[:120]
+            _todo_answer = _mb_todo.askyesno(
+                "待办卡片审核",
+                f"AI 提议写入待办卡片:\n\n"
+                f"标题: {_todo_preview}\n"
+                f"内容: {_todo_content}\n"
+                f"目标日期: {card_draft.get('target_date', '无')}\n\n"
+                f"是否通过并写入待审核池？"
+            )
+            if not _todo_answer:
+                print(f"[卡片提议] 用户拒绝 todo 卡「{card_draft.get('title', '')}」")
+                return
+        except Exception:
+            pass  # 无 GUI 降级：照常写入
+
     from delegate_tools import atomic_write_json
     pending_path = os.path.join(PROJECT_ROOT, "memory", "pending_cards.json")
     from shared import load_json_safe as _load_safe
@@ -180,8 +240,9 @@ def write_pending_card(card_draft: dict):
     # ── 预存 embedding 向量：写入时即调 embed，供 card_guard 去重直接比对 ──
     if '_embed_vec' not in card_draft:
         try:
-            from encoder import embed as _embed_pending
-            _pv = _embed_pending(card_draft.get('title', '') + ' ' + card_draft.get('content', ''))
+            from encoder import embed as _embed_pending, build_embed_text as _bet_pending
+            import numpy as _np_pv
+            _pv = _embed_pending(_bet_pending(card_draft))
             card_draft['_embed_vec'] = _pv.tolist()  # 2048 维 float 列表
         except Exception:
             pass
@@ -250,9 +311,11 @@ AI回复：{ai_reply[:200]}
 重要：
 - 用用户的视角写卡片。不要用AI的视角。
 - **分类铁律**：先读对话内容，判断实质主题，再选分类。绝不要因为对话中含某个普通词就选erotic——「想要做某事」「想要去某地」不是erotic。只有对话实质涉及性/情欲时才选erotic。
+- **原话**：从用户输入中提取最具标志性的1-2句原话，不要改写，保持用户的语序和用词。如果没有标志性原话就留空字符串。
+- **概括**：用1-2句话概括这段对话发生了什么事件。用户视角，不要AI视角。
 
 请返回JSON：
-{{"title": "用户视角的标题（15字以内）", "content": "用户视角的内容（50字以内）", "keywords": "逗号分隔的关键词（5个以内）", "category": "你选的分类"}}
+{{"title": "用户视角的标题（15字以内）", "原话": "用户标志性原话（不改写）", "概括": "事件概括（50字以内）", "keywords": "逗号分隔的关键词（5个以内）", "category": "你选的分类"}}
 只返回JSON。"""
 
     # ── FIX: 毒点6 — 指数退避重试（最多3次） ──
@@ -306,6 +369,31 @@ CATEGORY_COOLDOWN = {
     'emotional': 10,
     'preferences': 10,
 }
+
+def _load_manual_va():
+    """读取 console 手动 VA 设置，返回 (enabled, valence, arousal, trust)。"""
+    import json as _json_mva
+    _path = os.path.join(PROJECT_ROOT, "manual_va.json")
+    if os.path.exists(_path):
+        try:
+            with open(_path, "r", encoding="utf-8") as _f:
+                _d = _json_mva.load(_f)
+            if _d.get("enabled"):
+                return True, _d.get("valence", 0.0), _d.get("arousal", 0.5), _d.get("trust", 0.8)
+        except Exception:
+            pass
+    return False, 0.0, 0.5, 0.8
+
+
+def _fuse_manual_va_valence(model_v: float) -> float:
+    enabled, m_v, _, trust = _load_manual_va()
+    return round(m_v * trust + model_v * (1 - trust), 4) if enabled else model_v
+
+
+def _fuse_manual_va_arousal(model_a: float) -> float:
+    enabled, _, m_a, trust = _load_manual_va()
+    return round(m_a * trust + model_a * (1 - trust), 4) if enabled else model_a
+
 
 def _check_cooldown(written: dict, category: str, current_turn: int, cooldown: int,
                      force: bool = False) -> bool:
@@ -1096,18 +1184,39 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 print(f"[裁决者兜底] 新话题未触发任何分类 (conf={_arb_c:.2f}) → 强制 deep_talks")
                 triggered.append(("deep_talks", 7))
 
-        # 逐类生成卡片 — refine 结果跨类别共享，避免循环内重复调 DeepSeek
+        # 逐类生成卡片 — 先弹窗问是否写卡，同意后再调 AI refine
         _cached_refine = None
+        _write_confirmed = False
         for _titem in triggered:
             triggered_category = _titem[0]
             triggered_importance = _titem[1] if len(_titem) > 1 else 5
             triggered_force = _titem[2] if len(_titem) > 2 else False
+            # ── 第一道弹窗：是否写卡（先不调 AI） ──
+            if not _write_confirmed:
+                try:
+                    import tkinter.messagebox as _mb1
+                    _trigger_preview = ", ".join(f"{t[0]}(imp={t[1]})" for t in triggered)
+                    _answer1 = _mb1.askyesno(
+                        "写卡确认",
+                        f"触发写卡:\n{_trigger_preview}\n\n"
+                        f"用户消息: {user_input[:80]}\n\n"
+                        f"是否调 AI 提炼并写入卡片？"
+                    )
+                    if not _answer1:
+                        print("[写卡] 用户在第一步弹窗拒绝写卡")
+                        break
+                except Exception:
+                    pass  # 无 GUI 降级：继续
+                _write_confirmed = True
+
             if _cached_refine is None:
                 _cached_refine = refine_card_content(user_input, display_reply)
             refined = _cached_refine
             if refined:
                 title = refined.get("title", user_input[:30])
-                content = refined.get("content", user_input)
+                raw_quote = refined.get("原话", "")
+                summary = refined.get("概括", user_input[:80])
+                content = (f"原话：{raw_quote} | 概括：{summary}" if raw_quote else f"概括：{summary}") if summary else user_input[:80]
                 keywords = refined.get("keywords", triggered_category)
                 # AI 分类选择权：refine 返回的 category 覆盖关键词触发分类
                 ai_category = refined.get("category", "").strip()
@@ -1115,7 +1224,7 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                     print(f"[卡片] AI 分类覆写: {triggered_category} → {ai_category}")
                     triggered_category = ai_category
             else:
-                title, content, keywords = user_input[:30], user_input, triggered_category
+                title, content, keywords = user_input[:30], user_input[:80], triggered_category
             # 垃圾拦截：refine 返回空内容/无意义占位 → 丢弃
             if content in ("无", "暂无", "无明确承诺") or "未发现" in content or "没有承诺" in content:
                 print(f"[卡片] refine 返回空内容「{content}」，丢弃 {triggered_category} 卡")
@@ -1128,12 +1237,13 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 "importance": max(triggered_importance, 8) if triggered_category in {'deep_talks', 'milestone', 'turning_points'} else triggered_importance,
                 "content": content,
                 "keywords": keywords,
+                "user_raw": user_input[:200],
                 "proposed_by": "chat_auto",
                 "proposed_at": _now2().isoformat(),
                 "review_status": "pending",
                 "chord": va.get("chord", "") if va else "",
-                "valence": va.get("valence", 0.0) if va else 0.0,
-                "arousal": va.get("arousal", 0.5) if va else 0.5,
+                "valence": _fuse_manual_va_valence(va.get("valence", 0.0) if va else 0.0),
+                "arousal": _fuse_manual_va_arousal(va.get("arousal", 0.5) if va else 0.5),
                 "target_date": target_date_from_ai or _parse_target_date(user_input),
                 "time_anchor": _parse_time_anchor(user_input)
             }
@@ -1143,9 +1253,14 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
             _auto_skip = False
             _pre_vec = None
             try:
-                from encoder import embed as _embed_pre, load_index as _load_pre, search_index as _search_pre
+                from encoder import embed as _embed_pre, load_index as _load_pre, search_index as _search_pre, build_embed_text as _bet_pre
                 import numpy as _np_pre
-                _pre_vec = _embed_pre(title + ' ' + content)
+                # 优先复用 card_draft 自带 embedding，避免重复调豆包
+                _pre_cached = card_draft.get('_embed_vec')
+                if _pre_cached is not None:
+                    _pre_vec = _np_pre.array(_pre_cached, dtype=_np_pre.float32)
+                else:
+                    _pre_vec = _embed_pre(_bet_pre(card_draft))
                 _pre_idx = _load_pre()
                 if _pre_idx.ntotal > 0:
                     _pre_neighbors = _search_pre(_pre_idx, _pre_vec, k=3)
@@ -1175,9 +1290,12 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                 pass
             if _auto_skip:
                 continue
+            # FAISS 预检向量复用于后续所有步骤，避免重复调豆包 API
+            if _pre_vec is not None and '_embed_vec' not in card_draft:
+                card_draft['_embed_vec'] = _pre_vec.tolist()
             # ── 写卡拦截器：auto-trigger 路径也检查 ──
             from memory.card_guard import check_before_write as _guard_check, show_conflict_popup
-            _should_block, _block_reason, _conflict = _guard_check(title, content, user_input, card_draft)
+            _should_block, _block_reason, _conflict = _guard_check(title, content, user_input, card_draft, pre_vec=_pre_vec)
             if _should_block:
                 if _conflict:
                     action = show_conflict_popup(_conflict['new_card'], _conflict['old_card'],
@@ -1218,8 +1336,11 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                             with open(_pp_dedup, "r", encoding="utf-8") as _pf_dedup:
                                 _pend_all = json.load(_pf_dedup)
                             for _pc_dedup in _pend_all:
-                                if _pc_dedup.get('category') != triggered_category:
-                                    continue
+                                _pc_cat = _pc_dedup.get('category', '')
+                                # 同类别去重 + todo/commitments 跨类别去重
+                                if _pc_cat != triggered_category:
+                                    if not ({triggered_category, _pc_cat} <= {'todo', 'commitments'}):
+                                        continue
                                 _pv = _pc_dedup.get('_embed_vec')
                                 if _pv is not None:
                                     _pv = _np_dedup.array(_pv, dtype=_np_dedup.float32)
@@ -1237,11 +1358,19 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                         pass
                     if _should_skip:
                         continue
+                # ── 弹窗确认：展示卡片、强制输入至少 1 个关键词 ──
+                _confirmed, _final_title, _final_kw = _popup_collect_keywords(
+                    title, content, keywords, triggered_category, triggered_importance)
+                if not _confirmed:
+                    print(f"[弹窗] 用户丢弃卡片「{title}」")
+                    continue
+                card_draft["title"] = _final_title
+                card_draft["keywords"] = _final_kw
                 write_pending_card(card_draft)
                 if session_cards_written is not None:
                     session_cards_written[triggered_category] = current_turn
             else:
-                # cooldown 拦截：打印详细诊断
+                # cooldown 拦截：弹窗确认 + 关键词输入
                 _cooldown_bypass = False
                 if session_cards_written:
                     _last = session_cards_written.get(triggered_category)
@@ -1252,23 +1381,16 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
                         print(f"[冷却拦截] {triggered_category} 永久去重 (cooldown={cooldown})")
                 # ── 重要卡片弹窗：imp>=6 或深层分类让人最终决定 ──
                 if triggered_category in ('deep_talks', 'milestone', 'turning_points') or triggered_importance >= 6:
-                    try:
-                        import tkinter.messagebox as _mb
-                        _preview = title[:40] + ("..." if len(title) > 40 else "")
-                        _answer = _mb.askyesno(
-                            "重要卡片 — 冷却拦截",
-                            f"「{_preview}」\n"
-                            f"分类: {triggered_category} | 重要度: {triggered_importance}\n"
-                            f"冷却尚未结束——是否仍然写入？\n\n"
-                            f"选「是」写入待审核 | 选「否」丢弃"
-                        )
-                        if _answer:
-                            _cooldown_bypass = True
-                            print(f"[冷却弹窗] 用户选择强制写入")
-                    except Exception:
-                        pass  # 无 GUI 环境降级
+                    _bypass_confirmed, _bypass_title, _bypass_kw = _popup_collect_keywords(
+                        title, content, keywords, triggered_category, triggered_importance)
+                    if _bypass_confirmed:
+                        _cooldown_bypass = True
+                        title = _bypass_title
+                        keywords = _bypass_kw
+                        card_draft["title"] = title
+                        card_draft["keywords"] = keywords
+                        print(f"[冷却弹窗] 用户选择强制写入")
                 if _cooldown_bypass:
-                    # 绕过冷却，直接写入
                     write_pending_card(card_draft)
                     if session_cards_written is not None:
                         session_cards_written[triggered_category] = current_turn

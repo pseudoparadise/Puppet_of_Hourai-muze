@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import sqlite3
+import numpy as np
 import tkinter as tk
 from tkinter import ttk, messagebox
 
@@ -56,20 +57,22 @@ class CardManager:
         btn_frame.pack(fill=tk.X, pady=5)
         ttk.Button(btn_frame, text="刷新待审列表", command=self.load_pending).pack(side=tk.LEFT, padx=5)
 
-        columns = ("title", "category", "importance", "valence", "arousal", "content")
+        columns = ("title", "category", "importance", "target_date", "valence", "arousal", "content")
         self.pending_tree = ttk.Treeview(self.pending_frame, columns=columns, show="headings", height=15)
         self.pending_tree.heading("title", text="标题")
         self.pending_tree.heading("category", text="分类")
         self.pending_tree.heading("importance", text="重要度")
+        self.pending_tree.heading("target_date", text="目标日期")
         self.pending_tree.heading("valence", text="效价")
         self.pending_tree.heading("arousal", text="唤醒")
         self.pending_tree.heading("content", text="内容")
-        self.pending_tree.column("title", width=120)
-        self.pending_tree.column("category", width=80)
-        self.pending_tree.column("importance", width=60)
-        self.pending_tree.column("valence", width=55)
-        self.pending_tree.column("arousal", width=55)
-        self.pending_tree.column("content", width=400)
+        self.pending_tree.column("title", width=110)
+        self.pending_tree.column("category", width=70)
+        self.pending_tree.column("importance", width=55)
+        self.pending_tree.column("target_date", width=85)
+        self.pending_tree.column("valence", width=50)
+        self.pending_tree.column("arousal", width=50)
+        self.pending_tree.column("content", width=350)
         self.pending_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         self.pending_tree.bind("<Double-1>", lambda e: self.show_card_detail())
 
@@ -108,6 +111,7 @@ class CardManager:
                 card.get("title", "无标题"),
                 card.get("category", "?"),
                 card.get("importance", "?"),
+                card.get("target_date", "") or "",
                 f"{card.get('valence', 0.0):+.1f}",
                 f"{card.get('arousal', 0.5):.1f}",
                 card.get("content", "")[:120]
@@ -131,11 +135,14 @@ class CardManager:
             self.status_label.config(text="卡片信息读取失败。")
             return
 
+        print(f"[CardManager] approve 读取: id={card.get('id')} title={card.get('title')} cat={card.get('category')} imp={card.get('importance')} kw={card.get('keywords','')[:40]}")
+
         # ── FIX: 先入库（含 embed），全部成功后才从 pending 移除（毒点3修复） ──
         try:
             self._insert_into_db(card)
         except Exception as e:
             self.status_label.config(text=f"入库失败: {e}")
+            messagebox.showerror("入库异常", str(e))
             return  # 入库失败，pending 列表不修改
 
         # _insert_into_db 成功，安全移除 pending
@@ -185,18 +192,25 @@ class CardManager:
 
             # ── FIX: embed 调用加异常保护（毒点26修复：commit 移到最后） ──
             try:
-                embed_content = card["content"]
-                ch = card.get("chord") or ""
-                if ch:
-                    embed_content += f"\n[情绪纹理: {ch}]"
-                vec = embed(embed_content)
+                # 优先复用 pending 预计算向量
+                pre_vec = card.get("_embed_vec")
+                if pre_vec is not None:
+                    vec = np.array(pre_vec, dtype=np.float32)
+                else:
+                    from encoder import build_embed_text
+                    embed_content = build_embed_text(card)
+                    ch = card.get("chord") or ""
+                    if ch:
+                        embed_content += f"\n[情绪纹理: {ch}]"
+                    vec = embed(embed_content)
             except Exception as e:
                 raise RuntimeError(f"向量生成失败。请查看终端 [encoder] 日志了解详情。最后一次错误: {e}")
 
             vec_bytes = vec.tobytes()
+            print(f"[CardManager] 入库: id={card.get('id')} title={card.get('title')} cat={card.get('category')} imp={card.get('importance')} kw={card.get('keywords','')[:40]}")
             conn.execute("""
-                INSERT OR REPLACE INTO cards (id, title, content, keywords, embedding, importance, category, review_status, chord, valence, arousal, target_date)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'final', ?, ?, ?, ?)
+                INSERT OR REPLACE INTO cards (id, title, content, keywords, embedding, importance, category, review_status, chord, valence, arousal, target_date, user_raw)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'final', ?, ?, ?, ?, ?)
             """, (
                 card["id"],
                 card["title"],
@@ -208,7 +222,8 @@ class CardManager:
                 card.get("chord") or "",
                 card.get("valence", 0.0),
                 card.get("arousal", 0.5),
-                card.get("target_date")
+                card.get("target_date"),
+                card.get("user_raw", "")
             ))
 
             # ── FIX: 不再 create_index() 覆盖！改为 load→add→save ──
@@ -221,13 +236,17 @@ class CardManager:
 
             # 为新卡片建 link 边
             try:
-                from .linker import build_links as _build_links
+                from linker import build_links as _build_links
                 _build_links(card["id"], vec)
             except Exception as _le:
-                print(f"[link] 建边跳过: {_le}")
-        except Exception:
+                import traceback as _tb_link
+                _tb_link.print_exc()
+                messagebox.showwarning("link 建边异常", f"{type(_le).__name__}: {_le}")
+        except Exception as _e:
+            import traceback
+            traceback.print_exc()
             conn.rollback()
-            raise
+            raise RuntimeError(f"{type(_e).__name__}: {_e}")
         finally:
             conn.close()
 
@@ -251,6 +270,8 @@ class CardManager:
         ttk.Button(btn_frame, text="标记已解决", command=self.resolve_card).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="查看详情", command=self.show_card_detail).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="回填向量", command=self.backfill_embeddings).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="关联卡片", command=self.manual_link_cards).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="一键断连", command=self.break_card_link).pack(side=tk.LEFT, padx=5)
 
         columns = ("id", "title", "category", "importance", "links", "valence", "arousal", "days_remaining", "enabled", "resolved", "vec", "content")
         self.final_tree = ttk.Treeview(self.final_frame, columns=columns, show="headings", height=12)
@@ -279,6 +300,7 @@ class CardManager:
         self.final_tree.column("vec", width=40)
         self.final_tree.column("content", width=320)
         self.final_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        self.final_tree.configure(selectmode='extended')
         self.final_tree.bind("<Double-1>", lambda e: self.show_card_detail())
         self.load_final()
 
@@ -404,27 +426,42 @@ class CardManager:
             try:
                 conn = sqlite3.connect(DB_PATH)
                 c = conn.cursor()
-                c.execute("SELECT content, keywords FROM cards WHERE id=?", (card_id,))
+                c.execute("SELECT content, keywords, title, target_date FROM cards WHERE id=?", (card_id,))
                 row = c.fetchone()
                 if row:
-                    detail += "\n\n--- 完整内容 ---\n" + str(row[0])
+                    content_str = row[0] or ""
+                    raw_part, summary_part = "", content_str
+                    if content_str.startswith("原话："):
+                        parts = content_str.split(" | 概括：", 1)
+                        raw_part = parts[0][3:]
+                        summary_part = parts[1] if len(parts) > 1 else ""
+                    elif content_str.startswith("概括："):
+                        summary_part = content_str[3:]
+                    detail += "\n\n--- 标志性原话 ---\n" + (raw_part or "（无）")
+                    detail += "\n\n--- 事件概括 ---\n" + summary_part
                     detail += "\n\n关键词: " + str(row[1] or "")
-                # 查询 link 邻居
+                    if row[3]:
+                        detail += "\n\n目标日期: " + str(row[3])
+                # 查询 link 邻居（含方向 + 手动标记）
                 try:
                     lc = conn.execute(
-                        "SELECT card_id_b, similarity FROM card_links WHERE card_id_a=? "
-                        "UNION ALL SELECT card_id_a, similarity FROM card_links WHERE card_id_b=? "
+                        "SELECT card_id_b, similarity, direction, manual FROM card_links WHERE card_id_a=? "
+                        "UNION ALL SELECT card_id_a, similarity, "
+                        "CASE direction WHEN 'forward' THEN 'backward' WHEN 'backward' THEN 'forward' ELSE direction END, "
+                        "manual FROM card_links WHERE card_id_b=? "
                         "ORDER BY similarity DESC",
                         (card_id, card_id)
                     ).fetchall()
                     if lc:
                         detail += "\n\n--- 关联卡片 ---"
-                        for lid, lsim in lc:
+                        for lid, lsim, ldir, lmanual in lc:
                             nc = conn.cursor()
                             nc.execute("SELECT title FROM cards WHERE id=?", (lid,))
                             nr = nc.fetchone()
                             label = nr[0][:30] if nr else lid
-                            detail += f"\n  {label}  (cos={lsim:.3f})"
+                            arrow = {'forward': '→', 'backward': '←', 'parallel': '≈', 'unknown': '—'}[ldir]
+                            manual_tag = " [手动]" if lmanual else ""
+                            detail += f"\n  {arrow} {label} (score={lsim:.3f}{manual_tag})"
                     else:
                         detail += "\n\n(无关联卡片)"
                 except Exception:
@@ -613,8 +650,133 @@ class CardManager:
         except Exception as e:
             messagebox.showerror("异常", f"回填失败: {e}")
 
+    def manual_link_cards(self):
+        """选中两张卡片，手动创建因果边。"""
+        selected = self.final_tree.selection()
+        if len(selected) != 2:
+            messagebox.showwarning("需选两张", "请在卡片库中选中恰好两张卡片（Ctrl+点击），再点「关联卡片」。")
+            return
+        cid_a, cid_b = selected[0], selected[1]
+        if cid_a == cid_b:
+            messagebox.showwarning("不能自连", "请选中两张不同的卡片。")
+            return
 
-if __name__ == "__main__":
+        # 取卡片信息
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        ta = conn.execute("SELECT id, title, category FROM cards WHERE id=?", (cid_a,)).fetchone()
+        tb = conn.execute("SELECT id, title, category FROM cards WHERE id=?", (cid_b,)).fetchone()
+        conn.close()
+
+        if not ta or not tb:
+            conn.close()
+            messagebox.showerror("错误", "未找到指定的卡片。")
+            return
+
+        # 检查是否已有边
+        from linker import get_linked_cards, create_manual_link
+        existing = get_linked_cards(cid_a)
+        if cid_b in existing:
+            messagebox.showinfo("已存在", f"「{ta['title']}」和「{tb['title']}」之间已有 link 边。")
+            return
+
+        # 分类防火墙警告
+        from linker import _categories_compatible
+        warn = ""
+        if not _categories_compatible(ta["category"], tb["category"]):
+            warn = (f"\n\n⚠ 分类防火墙：{ta['category']} ↔ {tb['category']} 通常不建边。\n"
+                    f"手动关联将覆盖此限制。")
+
+        if not messagebox.askyesno("确认关联",
+            f"确定创建手动因果边吗？\n\n"
+            f"  {ta['title']}（{ta['category']}）\n"
+            f"  ↔\n"
+            f"  {tb['title']}（{tb['category']}）{warn}"):
+            return
+
+        try:
+            create_manual_link(cid_a, cid_b)
+            messagebox.showinfo("成功", f"手动因果边已创建。\n\n{ta['title']} ↔ {tb['title']}")
+            self.load_final()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("关联失败", f"{type(e).__name__}: {e}")
+
+    def break_card_link(self):
+        """选中一张卡片，列出其所有 link 邻居，用户选择断开。"""
+        selected = self.final_tree.selection()
+        if not selected:
+            messagebox.showwarning("未选中", "请先在卡片库里点选一张卡片。")
+            return
+
+        card_id = selected[0]
+        title = self.final_tree.item(card_id, "values")[1]
+
+        from linker import get_linked_with_similarity, break_link
+
+        neighbors = get_linked_with_similarity(card_id)
+        if not neighbors:
+            messagebox.showinfo("无关联", f"「{title}」目前没有任何 link 边。")
+            return
+
+        # 构建选择弹窗
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"断连 — {title}")
+        dialog.geometry("550x350")
+        dialog.resizable(False, False)
+
+        ttk.Label(dialog, text=f"「{title}」的关联卡片（点击选中后断开）：",
+                  font=("", 10, "bold")).pack(pady=10, padx=10)
+
+        list_frame = ttk.Frame(dialog)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        lb = tk.Listbox(list_frame, height=10)
+        lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll = ttk.Scrollbar(list_frame, command=lb.yview)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        lb.config(yscrollcommand=scroll.set)
+
+        for nid, sim, direction, manual in neighbors:
+            arrow = {'forward': '→', 'backward': '←', 'parallel': '≈', 'unknown': '—'}[direction]
+            manual_tag = " [手动]" if manual else ""
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            nr = conn.execute("SELECT title FROM cards WHERE id=?", (nid,)).fetchone()
+            conn.close()
+            ntitle = nr["title"] if nr else nid
+            lb.insert(tk.END, f"{arrow} {ntitle} (score={sim:.3f}{manual_tag})")
+
+        def do_break():
+            sel = lb.curselection()
+            if not sel:
+                return
+            idx = sel[0]
+            nid, sim, direction, manual = neighbors[idx]
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            nr = conn.execute("SELECT title FROM cards WHERE id=?", (nid,)).fetchone()
+            conn.close()
+            ntitle = nr["title"] if nr else nid
+
+            if not messagebox.askyesno("确认断连",
+                f"确定断开以下关联吗？\n\n"
+                f"  {title}\n"
+                f"  ↔ (断开)\n"
+                f"  {ntitle}\n\n"
+                f"此操作不可撤销，重建 link 不会恢复。"):
+                return
+
+            if break_link(card_id, nid):
+                messagebox.showinfo("成功", f"已断开：{title} ↔ {ntitle}")
+                self.load_final()
+                dialog.destroy()
+            else:
+                messagebox.showerror("失败", "断开操作未生效。")
+
+        ttk.Button(dialog, text="断开选中边", command=do_break).pack(pady=10)
+        ttk.Button(dialog, text="取消", command=dialog.destroy).pack(pady=(0, 10))
     root = tk.Tk()
     app = CardManager(root)
     root.mainloop()

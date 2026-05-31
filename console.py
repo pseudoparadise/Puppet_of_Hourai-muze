@@ -21,6 +21,20 @@ DB_PATH = os.path.join(PROJECT_ROOT, "memory", "cards.db")
 CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.json")
 
 
+def _parse_content_parts(content_str: str) -> tuple:
+    """解析 '原话：xxx | 概括：yyy' 格式，返回 (raw, summary)。"""
+    if not content_str:
+        return "", ""
+    raw, summary = "", content_str
+    if content_str.startswith("原话："):
+        parts = content_str.split(" | 概括：", 1)
+        raw = parts[0][3:]  # 去掉 '原话：'
+        summary = parts[1] if len(parts) > 1 else ""
+    elif content_str.startswith("概括："):
+        summary = content_str[3:]
+    return raw, summary
+
+
 class DashboardTab(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
@@ -137,7 +151,7 @@ class DashboardTab(ttk.Frame):
         self.va_trust_var = tk.DoubleVar(value=0.8)
         ttk.Label(emo_row1, text="信任度:").pack(side=tk.LEFT, padx=(15, 2))
         ttk.Spinbox(emo_row1, from_=0.0, to=1.0, increment=0.05, textvariable=self.va_trust_var,
-                    width=5, state="readonly").pack(side=tk.LEFT)
+                    width=5).pack(side=tk.LEFT)
 
         emo_row2 = ttk.Frame(emo_frame)
         emo_row2.pack(fill=tk.X, pady=2)
@@ -662,16 +676,18 @@ class CardEditTab(ttk.Frame):
         # 左侧：搜索结果
         left = ttk.Frame(panes)
         panes.add(left, weight=1)
-        columns = ("id", "title", "cat", "imp")
+        columns = ("id", "title", "cat", "imp", "content_preview")
         self.result_tree = ttk.Treeview(left, columns=columns, show="headings", height=18)
         self.result_tree.heading("id", text="ID")
         self.result_tree.heading("title", text="标题")
         self.result_tree.heading("cat", text="分类")
         self.result_tree.heading("imp", text="重要度")
-        self.result_tree.column("id", width=120)
-        self.result_tree.column("title", width=100)
-        self.result_tree.column("cat", width=70)
+        self.result_tree.heading("content_preview", text="内容预览")
+        self.result_tree.column("id", width=100)
+        self.result_tree.column("title", width=90)
+        self.result_tree.column("cat", width=60)
         self.result_tree.column("imp", width=40)
+        self.result_tree.column("content_preview", width=220)
         self.result_tree.pack(fill=tk.BOTH, expand=True)
         self.result_tree.bind("<<TreeviewSelect>>", self._on_select)
 
@@ -723,6 +739,9 @@ class CardEditTab(ttk.Frame):
         ttk.Label(row1c, text="唤醒:", width=6).pack(side=tk.LEFT, padx=(10, 2))
         self.var_arousal = tk.DoubleVar(value=0.5)
         ttk.Spinbox(row1c, from_=-1.0, to=1.0, increment=0.05, textvariable=self.var_arousal, width=6).pack(side=tk.LEFT)
+        ttk.Label(row1c, text="和弦:", width=6).pack(side=tk.LEFT, padx=(10, 2))
+        self.var_chord = tk.StringVar()
+        ttk.Entry(row1c, textvariable=self.var_chord, width=22).pack(side=tk.LEFT)
 
         chk_row = ttk.Frame(f)
         chk_row.pack(fill=tk.X, pady=2)
@@ -739,12 +758,21 @@ class CardEditTab(ttk.Frame):
 
         row3 = ttk.Frame(f)
         row3.pack(fill=tk.BOTH, expand=True, pady=2)
-        ttk.Label(row3, text="内容:", width=8).pack(side=tk.LEFT, anchor=tk.N)
-        self.content_text = tk.Text(row3, height=8, wrap=tk.WORD)
-        self.content_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar = ttk.Scrollbar(row3, command=self.content_text.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.content_text.config(yscrollcommand=scrollbar.set)
+        ttk.Label(row3, text="标志性原话:", width=10).pack(side=tk.LEFT, anchor=tk.N)
+        self.raw_text = tk.Text(row3, height=3, wrap=tk.WORD)
+        self.raw_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        raw_scroll = ttk.Scrollbar(row3, command=self.raw_text.yview)
+        raw_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.raw_text.config(yscrollcommand=raw_scroll.set)
+
+        row4 = ttk.Frame(f)
+        row4.pack(fill=tk.BOTH, expand=True, pady=2)
+        ttk.Label(row4, text="事件概括:", width=10).pack(side=tk.LEFT, anchor=tk.N)
+        self.summary_text = tk.Text(row4, height=4, wrap=tk.WORD)
+        self.summary_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sum_scroll = ttk.Scrollbar(row4, command=self.summary_text.yview)
+        sum_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.summary_text.config(yscrollcommand=sum_scroll.set)
 
     def _search(self):
         query = self.search_var.get().strip()
@@ -756,49 +784,70 @@ class CardEditTab(ttk.Frame):
         c = conn.cursor()
         if query:
             c.execute(
-                "SELECT id, title, category, importance FROM cards WHERE review_status='final' "
+                "SELECT id, title, category, importance, content FROM cards WHERE review_status='final' "
                 "AND (id LIKE ? OR title LIKE ?) ORDER BY importance DESC LIMIT 50",
                 (f"%{query}%", f"%{query}%")
             )
         else:
             c.execute(
-                "SELECT id, title, category, importance FROM cards WHERE review_status='final' "
+                "SELECT id, title, category, importance, content FROM cards WHERE review_status='final' "
                 "ORDER BY importance DESC LIMIT 50"
             )
         for r in c.fetchall():
-            self.result_tree.insert("", tk.END, values=(r["id"], r["title"], r["category"], r["importance"]), iid=r["id"])
+            preview = (r["content"] or "")[:60]
+            self.result_tree.insert("", tk.END,
+                values=(r["id"], r["title"], r["category"], r["importance"], preview),
+                iid=r["id"])
         conn.close()
         self.status_var.set(f"找到 {len(self.result_tree.get_children())} 张卡片")
 
     def _on_select(self, event):
-        sel = self.result_tree.selection()
-        if not sel:
-            return
-        card_id = sel[0]
+        try:
+            sel = self.result_tree.selection()
+            if not sel:
+                return
+            card_id = sel[0]
 
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
-        c.execute("SELECT * FROM cards WHERE id=?", (card_id,))
-        row = c.fetchone()
-        conn.close()
-        if not row:
-            self.status_var.set(f"卡片 {card_id} 不在库中")
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            c.execute("SELECT * FROM cards WHERE id=?", (card_id,))
+            row = c.fetchone()
+            if not row:
+                conn.close()
+                self.status_var.set(f"卡片 {card_id} 不在库中")
+                return
+            self._card = dict(row)
+            conn.close()
+        except Exception as _e:
+            import traceback as _tb
+            _tb.print_exc()
+            messagebox.showerror("卡片编辑-加载异常", f"{type(_e).__name__}: {_e}")
+            self.status_var.set(f"加载失败: {_e}")
             return
-
-        self._card = dict(row)
-        self.var_id.set(self._card.get("id", ""))
-        self.var_title.set(self._card.get("title", ""))
-        self.var_category.set(self._card.get("category", "interaction"))
-        self.var_importance.set(self._card.get("importance", 5))
-        self.var_valence.set(self._card.get("valence", 0.0) or 0.0)
-        self.var_arousal.set(self._card.get("arousal", 0.5) or 0.5)
-        self.var_enabled.set(bool(self._card.get("enabled_in_context", 1)))
-        self.var_resolved.set(bool(self._card.get("resolved", 0)))
-        self.var_keywords.set(self._card.get("keywords", "") or "")
-        self.content_text.delete("1.0", tk.END)
-        self.content_text.insert("1.0", self._card.get("content", "") or "")
-        self.status_var.set(f"已加载: {card_id}")
+        try:
+            self.var_id.set(self._card.get("id", ""))
+            self.var_title.set(self._card.get("title", ""))
+            self.var_category.set(self._card.get("category", "interaction"))
+            self.var_importance.set(self._card.get("importance", 5))
+            self.var_valence.set(self._card.get("valence", 0.0) or 0.0)
+            self.var_arousal.set(self._card.get("arousal", 0.5) or 0.5)
+            self.var_chord.set(self._card.get("chord", "") or "")
+            self.var_enabled.set(bool(self._card.get("enabled_in_context", 1)))
+            self.var_resolved.set(bool(self._card.get("resolved", 0)))
+            self.var_keywords.set(self._card.get("keywords", "") or "")
+            content_str = self._card.get("content", "") or ""
+            raw_part, summary_part = _parse_content_parts(content_str)
+            self.raw_text.delete("1.0", tk.END)
+            self.raw_text.insert("1.0", raw_part)
+            self.summary_text.delete("1.0", tk.END)
+            self.summary_text.insert("1.0", summary_part)
+            self.status_var.set(f"已加载: {card_id}")
+        except Exception as _e:
+            import traceback as _tb
+            _tb.print_exc()
+            messagebox.showerror("卡片编辑-字段加载异常", f"{type(_e).__name__}: {_e}")
+            self.status_var.set(f"加载失败: {_e}")
 
     def _save(self):
         if not self._card:
@@ -807,12 +856,15 @@ class CardEditTab(ttk.Frame):
         card_id = self._card["id"]
 
         title = self.var_title.get().strip()
-        content = self.content_text.get("1.0", tk.END).strip()
+        raw_quote = self.raw_text.get("1.0", tk.END).strip()
+        summary = self.summary_text.get("1.0", tk.END).strip()
+        content = f"原话：{raw_quote} | 概括：{summary}" if raw_quote else f"概括：{summary}"
         keywords = self.var_keywords.get().strip()
         category = self.var_category.get()
         importance = self.var_importance.get()
         valence = self.var_valence.get()
         arousal = self.var_arousal.get()
+        chord = self.var_chord.get().strip()
         enabled = 1 if self.var_enabled.get() else 0
         resolved = 1 if self.var_resolved.get() else 0
 
@@ -828,8 +880,8 @@ class CardEditTab(ttk.Frame):
             c = conn.cursor()
             c.execute(
                 "UPDATE cards SET title=?, content=?, keywords=?, importance=?, category=?, "
-                "valence=?, arousal=?, enabled_in_context=?, resolved=? WHERE id=?",
-                (title, content, keywords, importance, category, valence, arousal, enabled, resolved, card_id)
+                "valence=?, arousal=?, chord=?, enabled_in_context=?, resolved=? WHERE id=?",
+                (title, content, keywords, importance, category, valence, arousal, chord, enabled, resolved, card_id)
             )
             if c.rowcount == 0:
                 messagebox.showerror("失败", "未找到对应卡片。")
@@ -841,29 +893,39 @@ class CardEditTab(ttk.Frame):
                 try:
                     self._re_embed(card_id, title, content, keywords)
                 except Exception as e:
-                    print(f"[editor] re-embed 失败: {e}")
+                    import traceback as _tb_re
+                    _tb_re.print_exc()
+                    messagebox.showerror("卡片编辑-re-embed异常", f"{type(e).__name__}: {e}")
             self._card = {**self._card, "title": title, "content": content, "keywords": keywords,
                           "category": category, "importance": importance, "valence": valence,
-                          "arousal": arousal, "enabled_in_context": enabled, "resolved": resolved}
+                          "arousal": arousal, "chord": chord, "enabled_in_context": enabled, "resolved": resolved}
             self.status_var.set(f"已保存: {card_id}")
             messagebox.showinfo("成功", f"卡片「{title}」已保存。")
             self._search()
         except Exception as e:
-            messagebox.showerror("异常", f"保存失败: {e}")
+            import traceback as _tb_s
+            _tb_s.print_exc()
+            messagebox.showerror("卡片编辑-保存异常", f"{type(e).__name__}: {e}")
         finally:
             conn.close()
 
     def _re_embed(self, card_id, title, content, keywords):
-        from memory.encoder import embed, load_index, add_to_index, save_index, remove_from_index
-        text = f"{title} {keywords} {content}"
-        vec = embed(text)
+        from memory.encoder import embed, load_index, add_to_index, save_index, remove_from_index, build_embed_text
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM cards WHERE id=?", (card_id,))
+        row = c.fetchone()
+        card = dict(row) if row else {"title": title, "content": content, "keywords": keywords, "user_raw": "", "category": ""}
+        conn.close()
+        vec = embed(build_embed_text(card))
         vec_bytes = vec.tobytes()
         conn = sqlite3.connect(DB_PATH)
         conn.execute("UPDATE cards SET embedding=? WHERE id=?", (vec_bytes, card_id))
         conn.commit()
         conn.close()
+        remove_from_index(card_id)
         index = load_index()
-        remove_from_index(index, card_id)
         add_to_index(index, card_id, vec)
         save_index(index)
         print(f"[editor] embedding 已更新: {card_id}")
@@ -881,6 +943,8 @@ class RecallFeedbackTab(ttk.Frame):
         top.pack(fill=tk.X, padx=10, pady=5)
         ttk.Button(top, text="刷新列表", command=self._load).pack(side=tk.LEFT, padx=5)
         ttk.Button(top, text="应用反馈微调", command=self._apply).pack(side=tk.LEFT, padx=5)
+        self.auto_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text="5轮自动微调", variable=self.auto_var).pack(side=tk.LEFT, padx=10)
         self.stats_label = ttk.Label(top, text="", foreground="gray")
         self.stats_label.pack(side=tk.LEFT, padx=15)
 
@@ -934,6 +998,13 @@ class RecallFeedbackTab(ttk.Frame):
         ttk.Button(bottom, text="清除标记", command=lambda: self._mark(None)).pack(side=tk.LEFT, padx=5)
         self.fb_status = ttk.Label(bottom, text="", foreground="gray")
         self.fb_status.pack(side=tk.LEFT, padx=10)
+
+        # QA 上下文面板
+        qa_frame = ttk.LabelFrame(right, text="对话上下文 (chat_logs.json)", padding=5)
+        qa_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        self.qa_text = tk.Text(qa_frame, height=6, wrap=tk.WORD, font=("", 9))
+        self.qa_text.pack(fill=tk.BOTH, expand=True)
+        self.qa_text.config(state=tk.DISABLED)
 
         self._traces = {}
         self._load()
@@ -1005,6 +1076,9 @@ class RecallFeedbackTab(ttk.Frame):
                 fb_str
             ), iid=c["id"])
 
+        # 加载 QA 上下文
+        self._show_qa_context(trace)
+
     def _mark(self, fb_val):
         sel_tid = self.tree.selection()
         sel_cid = self.card_tree.selection()
@@ -1019,8 +1093,87 @@ class RecallFeedbackTab(ttk.Frame):
         from memory.retriever import record_feedback
         record_feedback(tid, card_id, is_good)
         label = "✓" if fb_val == "good" else ("✗" if fb_val == "bad" else "○")
-        self.fb_status.config(text=f"已标记 {label} → {card_id}")
+
+        # 自动微调计数器
+        if not hasattr(self, '_auto_count'):
+            self._auto_count = 0
+        self._auto_count += 1
+        msg = f"已标记 {label} → {card_id} (第{self._auto_count}张)"
+        self.fb_status.config(text=msg)
+
+        if self.auto_var.get() and self._auto_count >= 5:
+            self.fb_status.config(text=f"{msg} — 自动触发微调...")
+            self._auto_count = 0
+            self.after(200, self._apply_auto)
+
         self._load()
+
+    def _apply_auto(self):
+        from memory.retriever import apply_feedback_adjustments, get_effective_weights
+        result = apply_feedback_adjustments()
+        eff = get_effective_weights()
+        self.fb_status.config(
+            text=f"自动微调完成: ✓{result['good']}张 ✗{result['bad']}张 | "
+                 f"kw={eff.get('w_keyword','?'):.2f} sem={eff.get('w_semantic','?'):.2f}")
+        self._load()
+
+    def _show_qa_context(self, trace: dict):
+        """根据 trace 的查询和时间戳，从 chat_logs.json 拉出对应对话。"""
+        self.qa_text.config(state=tk.NORMAL)
+        self.qa_text.delete("1.0", tk.END)
+        query = trace.get("query", "")
+        ts = trace.get("ts", "")
+
+        chat_path = os.path.join(PROJECT_ROOT, "chat_logs.json")
+        if not os.path.exists(chat_path):
+            self.qa_text.insert(tk.END, "(chat_logs.json 不存在)")
+            self.qa_text.config(state=tk.DISABLED)
+            return
+
+        entries = []
+        with open(chat_path, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    e = json.loads(line.strip())
+                    entries.append(e)
+                except json.JSONDecodeError:
+                    pass
+
+        # 找最接近 trace 时间戳的 user 消息
+        best_idx = -1
+        best_score = 999
+        for i, e in enumerate(entries):
+            ets = e.get("timestamp", "")
+            if query and query[:30] in str(e.get("content", "")):
+                best_idx = i
+                break
+            # 备选：时间戳最接近
+            if ts and ets:
+                try:
+                    dist = abs(len(ets) - len(ts))
+                    if dist < best_score:
+                        best_score = dist
+                        best_idx = i
+                except:
+                    pass
+
+        if best_idx < 0:
+            self.qa_text.insert(tk.END, f"(未找到匹配对话)\n查询: {query}")
+            self.qa_text.config(state=tk.DISABLED)
+            return
+
+        # 显示前后 3 条
+        start = max(0, best_idx - 2)
+        end = min(len(entries), best_idx + 4)
+        for i in range(start, end):
+            e = entries[i]
+            role = "沐泽" if e.get("role") == "user" else ("DS" if e.get("role") == "ghost" else e.get("role", "?"))
+            ts_short = e.get("timestamp", "")[:19]
+            content = str(e.get("content", ""))[:200]
+            marker = " →" if i == best_idx else "  "
+            self.qa_text.insert(tk.END, f"{marker}[{ts_short}] {role}:\n{content}\n\n")
+
+        self.qa_text.config(state=tk.DISABLED)
 
     def _apply(self):
         if not messagebox.askyesno("确认", "根据所有已标记反馈微调探针权重？\n\n✓ 卡片增强其高分探针\n✗ 卡片削弱其高分探针"):
@@ -1081,9 +1234,22 @@ class HumanWriteCardTab(ttk.Frame):
 
         row3 = ttk.Frame(f)
         row3.pack(fill=tk.BOTH, expand=True, pady=2)
-        ttk.Label(row3, text="内容:", width=8).pack(side=tk.LEFT, anchor=tk.N)
-        self.content_text = tk.Text(row3, height=10, wrap=tk.WORD)
-        self.content_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ttk.Label(row3, text="标志性原话:", width=10).pack(side=tk.LEFT, anchor=tk.N)
+        self.raw_text = tk.Text(row3, height=3, wrap=tk.WORD)
+        self.raw_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        row3b = ttk.Frame(f)
+        row3b.pack(fill=tk.BOTH, expand=True, pady=2)
+        ttk.Label(row3b, text="事件概括:", width=10).pack(side=tk.LEFT, anchor=tk.N)
+        self.summary_text = tk.Text(row3b, height=4, wrap=tk.WORD)
+        self.summary_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        row_chord = ttk.Frame(f)
+        row_chord.pack(fill=tk.X, pady=2)
+        ttk.Label(row_chord, text="和弦标注:", width=10).pack(side=tk.LEFT)
+        self.var_chord = tk.StringVar()
+        ttk.Entry(row_chord, textvariable=self.var_chord, width=30).pack(side=tk.LEFT)
+        ttk.Label(row_chord, text="(可选, 如 Em7Fmaj7.40bpm.pp)", foreground="gray", font=("", 8)).pack(side=tk.LEFT, padx=5)
 
         row_target = ttk.Frame(f)
         row_target.pack(fill=tk.X, pady=2)
@@ -1102,19 +1268,25 @@ class HumanWriteCardTab(ttk.Frame):
 
     def _submit(self):
         title = self.var_title.get().strip()
-        content = self.content_text.get("1.0", tk.END).strip()
+        raw_quote = self.raw_text.get("1.0", tk.END).strip()
+        summary = self.summary_text.get("1.0", tk.END).strip()
+        content = f"原话：{raw_quote} | 概括：{summary}" if raw_quote else f"概括：{summary}"
         keywords = self.var_keywords.get().strip()
         category = self.var_category.get()
         importance = self.var_importance.get()
         valence = self.var_valence.get()
         arousal = self.var_arousal.get()
+        chord = self.var_chord.get().strip()
         target = self.var_target.get().strip()
 
         if not title:
             self.status_var.config(text="标题不能为空")
             return
-        if not content:
-            self.status_var.config(text="内容不能为空")
+        if not summary:
+            self.status_var.config(text="事件概括不能为空")
+            return
+        if not keywords:
+            self.status_var.config(text="关键词不能为空")
             return
 
         card_id = f"{datetime.now().strftime('%Y%m%d')}_{title}"
@@ -1123,18 +1295,27 @@ class HumanWriteCardTab(ttk.Frame):
             "title": title,
             "content": content,
             "keywords": keywords,
+            "user_raw": raw_quote,
             "category": category,
             "importance": importance,
             "proposed_by": "muze",
             "proposed_at": datetime.now(timezone.utc).isoformat(),
             "review_status": "pending",
-            "chord": "",
+            "chord": chord,
             "valence": valence,
             "arousal": arousal,
             "target_date": target or None,
             "time_anchor": {"date": None, "fuzzy": None, "label": None, "days_until": None}
         }
 
+        # 预计算 embedding 供后续去重
+        try:
+            from memory.encoder import build_embed_text, embed
+            card["_embed_vec"] = embed(build_embed_text(card)).tolist()
+        except Exception:
+            pass
+
+        # ── 重复卡片检查 ──
         pending_path = os.path.join(PROJECT_ROOT, "memory", "pending_cards.json")
         pending = []
         if os.path.exists(pending_path):
@@ -1143,11 +1324,38 @@ class HumanWriteCardTab(ttk.Frame):
                     pending = json.load(f)
             except Exception:
                 pass
+        # 检查 pending 中是否有相似卡片
+        _dup_info = None
+        for _pc in pending:
+            if _pc.get("title", "") == title or content[:30] in _pc.get("content", ""):
+                _dup_info = f"待审核池: {_pc.get('title', '')}"
+                break
+        # 检查 DB 中是否有相似卡片
+        if not _dup_info:
+            try:
+                _db_conn = sqlite3.connect(DB_PATH)
+                _db_c = _db_conn.cursor()
+                _db_c.execute("SELECT id, title FROM cards WHERE title=? LIMIT 1", (title,))
+                _db_row = _db_c.fetchone()
+                if _db_row:
+                    _dup_info = f"卡片库: {_db_row[1]}"
+                _db_conn.close()
+            except Exception:
+                pass
+        if _dup_info:
+            if not messagebox.askyesno("重复卡片确认",
+                f"检测到相似卡片:\n{_dup_info}\n\n"
+                f"即将写入:\n标题: {title}\n内容: {content[:80]}\n\n"
+                f"是否保留两张完全一样的卡片？"):
+                self.status_var.config(text="已取消（重复卡片）")
+                return
+
         pending.append(card)
         try:
             from delegate_tools import atomic_write_json
             atomic_write_json(pending_path, pending)
-            self.status_var.config(text=f"已写入: {card_id}")
+            print(f"[人类写卡] id={card_id} title={title} cat={category} imp={importance} kw={keywords}")
+            self.status_var.config(text=f"已写入: {card_id} (embed 已预计算)")
             self._clear()
         except Exception as e:
             self.status_var.config(text=f"写入失败: {e}")
@@ -1155,8 +1363,10 @@ class HumanWriteCardTab(ttk.Frame):
     def _clear(self):
         self.var_title.set("")
         self.var_keywords.set("")
+        self.var_chord.set("")
         self.var_target.set("")
-        self.content_text.delete("1.0", tk.END)
+        self.raw_text.delete("1.0", tk.END)
+        self.summary_text.delete("1.0", tk.END)
         self.var_importance.set(6)
         self.var_valence.set(0.0)
         self.var_arousal.set(0.5)

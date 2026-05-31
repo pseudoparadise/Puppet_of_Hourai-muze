@@ -196,17 +196,11 @@ def show_conflict_popup(new_card: dict, old_card: dict, overlap: int, similarity
 
 
 def check_before_write(title: str, content: str, user_input: str,
-                       new_card_context: dict = None) -> tuple[bool, str, dict | None]:
+                       new_card_context: dict = None,
+                       pre_vec = None) -> tuple[bool, str, dict | None]:
     """
     写卡前检查。返回 (should_block, reason, conflict_info)。
-    conflict_info 非 None 表示需要人工弹窗审核，包含新旧卡详情。
-
-    1. 垃圾标题 → 硬拦截
-    2. 与现有 final 卡特征重叠 ≥2 → embedding 语义去重
-       - 语义不同 → 放行
-       - 语义重复 + 旧卡为 commitments/daily_life/todo → 返回 conflict_info，由调用方弹窗
-       - 语义重复 + 旧卡为其他分类 → 硬拦截不划
-    3. 与 pending 卡特征重叠 ≥2 → 同上
+    pre_vec: 调用方已预计算的新卡 embedding，传入则跳过重复 embed 调用。
     """
     if is_garbage_title(title):
         return True, f"垃圾标题拦截: 「{title}」", None
@@ -231,12 +225,15 @@ def check_before_write(title: str, content: str, user_input: str,
     new_ctx = new_card_context or {}
 
     # 预计算新卡 embedding，复用于所有语义对比
-    new_vec = None
-    try:
-        from encoder import embed
-        new_vec = embed((title + " " + (content or ""))[:512])
-    except Exception:
-        pass
+    new_vec = pre_vec
+    if new_vec is None:
+        try:
+            from encoder import embed, build_embed_text
+            _draft = {"title": title, "content": content, "keywords": (new_card_context or {}).get("keywords", ""),
+                       "user_raw": user_input[:200], "category": (new_card_context or {}).get("category", "")}
+            new_vec = embed(build_embed_text(_draft))
+        except Exception:
+            pass
 
     # 扫 cards.db
     db_path = os.path.join(PROJECT_ROOT, "memory", "cards.db")

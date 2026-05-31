@@ -123,18 +123,55 @@ DEEP_CATEGORIES = {'milestone', 'commitments', 'deep_talks', 'turning_points', '
 # ── P1-3: 日活卡片分类列表 ──
 DAILY_CATEGORIES = {'daily_life', 'interaction', 'emotional', 'preferences', 'habits', 'todo'}
 
-# ── 和弦情绪四组：和弦名 → group ──
-CHORD_GROUP = {
-    # bright: 明亮坚定、推进、冲击
-    'C': 'bright', 'Cmaj7': 'bright', 'G': 'bright', 'E': 'bright',
-    # warm: 温暖宽广、摇曳
-    'F': 'warm', 'Fmaj7': 'warm',
-    # melancholy: 黯然、思念、忧郁
-    'Am': 'melancholy', 'Am7': 'melancholy', 'Em': 'melancholy',
-    'Em7': 'melancholy', 'Dm': 'melancholy', 'Dm7': 'melancholy',
-    # tense: 焦灼、张力、冲突
-    'G7': 'tense', 'D7': 'tense', 'B7': 'tense', 'Bm7': 'tense',
+# ── 分类自适应关键词权重：口癖类靠精确文本匹配，深层类靠语义 ──
+CATEGORY_KW_BOOST = {
+    "interaction": 1.5,      # 口癖：关键词吃到饱（「恶俗啊」≠「俗恶啊」）
+    "preferences": 1.2,      # 偏好：关键词重要（「燕麦拿铁」「少糖」）
+    "habits": 1.2,
+    "real_world": 1.2,
+    "daily_life": 1.0,       # 日常：正常
+    "todo": 1.0,
+    "emotional": 1.0,
+    "erotic": 0.7,           # 深层：关键词降权，语义主导
+    "deep_talks": 0.6,
+    "milestone": 0.6,
+    "turning_points": 0.6,
+    "commitments": 0.8,
 }
+
+# ── 和弦情绪四组：按音程结构自动归类 ──
+def _classify_chord(chord_name: str) -> str:
+    """根据和弦名推断情绪分组。"""
+    import re as _re
+    m = _re.match(r'^[A-G](?:#|b)?(.+)?$', chord_name)
+    quality = (m.group(1) or '') if m else ''
+
+    # 减和弦 / 半减七 → tense
+    if any(x in quality for x in ('dim', '°', 'ø', 'm7b5')):
+        return 'tense'
+    # 增和弦 → tense（不稳定）
+    if any(x in quality for x in ('aug', '+')):
+        return 'tense'
+    # 变化属和弦 → tense
+    if any(x in quality for x in ('7b', '7#', 'alt')):
+        return 'tense'
+    # 大七 → warm（柔化的大调和弦）
+    if any(x in quality for x in ('maj', 'M7', 'Δ')):
+        return 'warm'
+    # 小调和弦家族 → melancholy
+    if quality.startswith('m'):
+        return 'melancholy'
+    # 加音和弦 → warm（check 在属七正则之前，add9 ≠ 属九）
+    if 'add' in quality or '6' in quality:
+        return 'warm'
+    # 属七/属九/属十一/属十三 → tense
+    if _re.search(r'[79]|11|13', quality):
+        return 'tense'
+    # 挂留和弦 → bright
+    if 'sus' in quality:
+        return 'bright'
+    # 大三和弦 / 强力和弦 → bright
+    return 'bright'
 
 def _parse_chord_str(chord_str: str) -> dict:
     """从和弦字符串解析 group / bpm / dynamic。进行取首个和弦。"""
@@ -145,9 +182,8 @@ def _parse_chord_str(chord_str: str) -> dict:
     if len(parts) < 3:
         return {}
     name_raw, bpm_part, dynamic = parts[0], parts[1], parts[2]
-    # 进行：取首个和弦名
     first = _re.findall(r'[A-G][a-z0-9]*', name_raw)
-    group = CHORD_GROUP.get(first[0], None) if first else None
+    group = _classify_chord(first[0]) if first else None
     try:
         bpm = int(bpm_part.replace('bpm', ''))
     except ValueError:
@@ -302,6 +338,9 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
     w = weights or SCORING_CONFIG
     dist_sigmoid = 2.0 / (1.0 + np.exp(distance)) if distance < 10 else 0.0
     keyword_score = hit_count * w["w_keyword"]
+    # ── 分类自适应关键词权重：口癖类↑ 深层类↓ ──
+    kw_boost = CATEGORY_KW_BOOST.get(card.get("category", ""), 1.0)
+    keyword_score *= kw_boost
     semantic_score = dist_sigmoid * w["w_semantic"]
     importance_score = card.get("importance", 5) * w["w_importance"]
 
@@ -529,7 +568,7 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
             import re as _re
             first = _re.findall(r'[A-G][a-z0-9]*', chord_name)
             if first:
-                group = CHORD_GROUP.get(first[0])
+                group = _classify_chord(first[0])
         effective_weights['_query_chord'] = {
             'group': group,
             'bpm_tier': bpm_tier,
@@ -829,7 +868,7 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
                 if _linked:
                     print(f"[link扩散] {_linked} 张邻居卡注入候选池 (decay={LINK_DECAY})")
                     for _dt, _ds, _dsim, _dscore in _diffused_cards:
-                        print(f"  ↳ 「{_dt}」← {_ds}  (link_cos={_dsim:.3f} score={_dscore})")
+                        print(f"  -> [{_dt}] <- {_ds}  (link_cos={_dsim:.3f} score={_dscore})")
         except Exception as _ld_e:
             print(f"[link扩散] 跳过: {_ld_e}")
 

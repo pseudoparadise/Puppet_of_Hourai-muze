@@ -143,20 +143,31 @@ def suggest_importance_calibration():
     conn = sqlite3.connect(DB_PATH)
     try:
         c = conn.cursor()
-        c.execute("SELECT id, title, importance, usage_count FROM cards WHERE review_status='final'")
+        c.execute("SELECT id, title, importance, usage_count, created_at FROM cards WHERE review_status='final'")
         rows = c.fetchall()
         bumped = []
         demoted = []
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         for row in rows:
-            card_id, title, importance, usage_count = row
+            card_id, title, importance, usage_count, created_at = row
             if usage_count >= 10 and importance < 7:
                 new_imp = 7
                 c.execute("UPDATE cards SET importance = ? WHERE id = ?", (new_imp, card_id))
                 bumped.append((card_id, title, importance, new_imp))
             elif importance >= 8 and usage_count == 0:
-                new_imp = 6
-                c.execute("UPDATE cards SET importance = ? WHERE id = ?", (new_imp, card_id))
-                demoted.append((card_id, title, importance, new_imp))
+                card_age_days = 999
+                if created_at:
+                    try:
+                        ct = datetime.fromisoformat(created_at)
+                        if ct.tzinfo is not None:
+                            ct = ct.astimezone(timezone.utc).replace(tzinfo=None)
+                        card_age_days = (now - ct).days
+                    except Exception:
+                        pass
+                if card_age_days > 7:
+                    new_imp = 6
+                    c.execute("UPDATE cards SET importance = ? WHERE id = ?", (new_imp, card_id))
+                    demoted.append((card_id, title, importance, new_imp))
         if bumped or demoted:
             conn.commit()
         if bumped:
@@ -231,14 +242,15 @@ def suggest_merges():
         conn.close()
 
 def resolve_expired_cards():
-    """扫描 target_date 已过的卡片，自动标记为已解决。"""
+    """扫描 deadline 相关的 todo/commitments/preferences 卡片，target_date 过期自动标记已解决。
+    milestone/deep_talks 等分类的 target_date 是历史锚点，不过期。"""
     conn = sqlite3.connect(DB_PATH)
     try:
         now_utc = datetime.now(timezone.utc)
         today_str = now_utc.strftime('%Y-%m-%d')
         c = conn.cursor()
         c.execute(
-            "SELECT id, title, target_date FROM cards WHERE review_status='final' AND resolved=0 AND target_date IS NOT NULL AND target_date != '' AND target_date < ?",
+            "SELECT id, title, target_date FROM cards WHERE review_status='final' AND resolved=0 AND target_date IS NOT NULL AND target_date != '' AND target_date < ? AND category IN ('todo', 'commitments', 'preferences')",
             (today_str,)
         )
         expired = c.fetchall()
@@ -506,6 +518,12 @@ def delete_card(card_id: str) -> bool:
                 pass
             return False
         conn.commit()
+        # 清理 link 边（含手动边）
+        try:
+            from linker import remove_links as _rm_links
+            _rm_links(card_id, include_manual=True)
+        except Exception as _l_err:
+            print(f"[memory_manager] link 清理跳过: {_l_err}")
         print(f"[memory_manager] 卡片 {card_id} 已彻底删除")
         return True
     except Exception as e:
@@ -883,13 +901,21 @@ def sync_diary_todos_to_cards(days_back: int = 30) -> int:
                     content = f"{item_text}。" + (f"备注: {note}" if note else "")
                     target_date = deadline if deadline else None
 
+                    # 改为写入 pending 审核池，不经弹窗直接写入（diary sync 已有人工审查日记的前提）
                     try:
-                        conn.execute("""
-                            INSERT INTO cards (id, title, content, keywords, importance,
-                                category, review_status, enabled_in_context, target_date, synced_from)
-                            VALUES (?, ?, ?, ?, ?, ?, 'final', 1, ?, 'diary')
-                        """, (cid, item_text[:40], content[:200], item_text, imp, cat, target_date))
-                        conn.commit()
+                        from delegate_tools import atomic_write_json
+                        pending_path = os.path.join(os.path.dirname(DB_PATH), "pending_cards.json")
+                        from shared import load_json_safe
+                        pending_list = load_json_safe(pending_path, default=[], label="diary_sync")
+                        card_draft = {
+                            "id": cid, "title": item_text[:40], "content": content[:200],
+                            "keywords": item_text, "importance": imp, "category": cat,
+                            "review_status": "pending", "enabled_in_context": 1,
+                            "target_date": target_date, "synced_from": "diary",
+                            "proposed_by": "diary_sync",
+                        }
+                        pending_list.append(card_draft)
+                        atomic_write_json(pending_path, pending_list)
                         it["card_id"] = cid
                         events_modified = True
                         created += 1

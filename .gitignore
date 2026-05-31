@@ -44,6 +44,15 @@ memory/music_debug.log
 # ── VA 日志 ──
 memory/va_log.jsonl
 
+# ── 手动 VA 先验（私人生理/情绪数据） ──
+manual_va.json
+
+# ── 数据库 / 索引备份（含私人 embedding） ──
+memory/cards_backup_*.db
+memory/id_map_backup_*.json
+memory/vectors_backup_*.faiss
+memory/model_meta_backup_*.json
+
 # ── 光遇钢琴定点（非敏感） ──
 # sky_keys.json
 
@@ -57,6 +66,7 @@ memory/va_log.jsonl
 
 # ── 待办提醒状态 ──
 reminded_todos.json
+memory/reminded_todos.json
 
 # ── 崩溃日志 ──
 console_crash.log

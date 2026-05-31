@@ -12,7 +12,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(__file__))
 # ── FIX: 导入 load_index ──
-from encoder import embed, load_index, add_to_index, save_index
+from encoder import embed, load_index, add_to_index, save_index, build_embed_text
 
 PENDING_PATH = os.path.join(os.path.dirname(__file__), "pending_cards.json")
 DB_PATH = os.path.join(os.path.dirname(__file__), "cards.db")
@@ -30,17 +30,23 @@ def approve_card(card):
     conn = sqlite3.connect(DB_PATH)
     try:
         conn.execute("""
-            INSERT OR REPLACE INTO cards (id, title, content, keywords, embedding, importance, category, review_status, enabled_in_context, chord, valence, arousal, target_date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'final', 1, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO cards (id, title, content, keywords, embedding, importance, category, review_status, enabled_in_context, chord, valence, arousal, target_date, user_raw)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'final', 1, ?, ?, ?, ?, ?)
         """, (
             card["id"], card["title"], card["content"], card["keywords"],
             None, card.get("importance", 5), card.get("category", "interaction"),
             card.get("chord") or "", card.get("valence", 0.0), card.get("arousal", 0.5),
-            card.get("target_date")
+            card.get("target_date"), card.get("user_raw", "")
         ))
         conn.commit()
 
-        vec = embed(card["content"])
+        # 复用 pending 预计算向量，避免重复调豆包 API
+        pre_vec = card.get("_embed_vec")
+        if pre_vec is not None:
+            vec = np.array(pre_vec, dtype=np.float32)
+            print(f"  📎 复用预计算向量 ({vec.shape[0]} 维)")
+        else:
+            vec = embed(build_embed_text(card))
         vec_bytes = vec.tobytes()
         conn.execute("UPDATE cards SET embedding = ? WHERE id = ?", (vec_bytes, card["id"]))
         conn.commit()

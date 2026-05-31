@@ -40,10 +40,17 @@ def _get_session():
 
 # ── NEW: ID 映射管理（字符串ID ↔ FAISS int64 ID） ──
 def _load_id_map():
+    default = {"str_to_int": {}, "int_to_str": {}, "next_int": 1}
     if os.path.exists(ID_MAP_PATH):
-        with open(ID_MAP_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"str_to_int": {}, "int_to_str": {}, "next_int": 1}
+        try:
+            with open(ID_MAP_PATH, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d, dict) and "str_to_int" in d and "int_to_str" in d:
+                d.setdefault("next_int", 1)
+                return d
+        except Exception:
+            pass
+    return default
 
 def _save_id_map(id_map):
     import tempfile, shutil
@@ -151,6 +158,23 @@ def embed(text: str, max_retries: int = 3) -> np.ndarray:
                 raise
 
     raise ConnectionError(f"embed 调用失败（已重试 {max_retries} 次）: {last_error}")
+
+def build_embed_text(card: dict) -> str:
+    """构建 embedding 输入文本：title + keywords + user_raw + content。
+    erotic 类卡片不改动，保持旧格式（title + content）。
+    """
+    title = card.get("title", "")
+    keywords = card.get("keywords", "")
+    user_raw = card.get("user_raw", "")
+    content = card.get("content", "")
+    category = card.get("category", "")
+
+    if category == "erotic":
+        return (title + " " + (content or ""))[:512]
+
+    parts = [p for p in [title, keywords, user_raw, content] if p]
+    return " ".join(parts)[:1024]
+
 
 def create_index() -> faiss.Index:
     base_index = faiss.IndexFlatL2(DIM)

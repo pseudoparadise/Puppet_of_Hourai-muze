@@ -1,82 +1,90 @@
 """
-backfill_embeddings.py — 批量标注老卡 embedding 向量
-扫描 cards.db 中 embedding IS NULL 的卡片，调 embed() 生成 2048 维向量，
-写回 DB 并更新 FAISS 索引。已有向量的自动跳过，可重复安全运行。
-用法：python backfill_embeddings.py
+re-embed.py — 全量重建 embedding 向量
+扫描所有 final 卡片，用 build_embed_text() 重新生成 2048 维向量，
+写回 DB 并重建 FAISS 索引 + link graph。
+用法：python -m memory.re_embed
 """
 import os, sys, sqlite3, time
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from encoder import embed, load_index, add_to_index, save_index
+from encoder import embed, load_index, add_to_index, save_index, build_embed_text
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "cards.db")
-BATCH_SIZE = 3   # 每批处理张数
-BATCH_PAUSE = 2  # 批次间暂停秒数，避免 API 限流
+BATCH_SIZE = 3
+BATCH_PAUSE = 2
 
 
 def main():
     conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
     c = conn.cursor()
-    c.execute("SELECT id, title, content FROM cards WHERE embedding IS NULL")
-    missing = c.fetchall()
+    c.execute("SELECT * FROM cards WHERE review_status='final'")
+    all_cards = [dict(r) for r in c.fetchall()]
     conn.close()
 
-    if not missing:
-        print("所有卡片已有向量，无需回填。")
+    if not all_cards:
+        print("无卡片。")
         return
 
-    print(f"找到 {len(missing)} 张缺向量的卡片，开始回填...\n")
     index = load_index()
+
+    # 清空旧 FAISS 索引
+    import faiss
+    DIM = 2048
+    base = faiss.IndexFlatL2(DIM)
+    index = faiss.IndexIDMap(base)
+
     success = 0
     fail = 0
+    skipped = 0
 
-    for i, (card_id, title, content) in enumerate(missing):
-        text = title + " " + (content or "")
-        print(f"[{i+1}/{len(missing)}] {card_id}: {title[:50]}")
+    for i, card in enumerate(all_cards):
+        cid = card["id"]
+        cat = card.get("category", "")
+        label = f"{cid}: {card['title'][:40]} [{cat}]"
+        print(f"[{i+1}/{len(all_cards)}] {label}")
+
+        if cat == "erotic":
+            print(f"  ⏭  跳过 (erotic 类不动)")
+            skipped += 1
+            add_to_index(index, cid, np.frombuffer(card["embedding"], dtype=np.float32))
+            continue
 
         try:
+            text = build_embed_text(card)
             vec = embed(text)
             vec_bytes = vec.tobytes()
 
             conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            c.execute("UPDATE cards SET embedding = ? WHERE id = ?", (vec_bytes, card_id))
+            conn.execute("UPDATE cards SET embedding = ? WHERE id = ?", (vec_bytes, cid))
             conn.commit()
             conn.close()
 
-            add_to_index(index, card_id, vec)
-            print(f"  ✅ 向量已写入 ({vec.shape[0]} 维)")
+            add_to_index(index, cid, vec)
+            print(f"  ✅ 已重嵌 ({vec.shape[0]} 维)")
             success += 1
         except Exception as e:
             print(f"  ❌ 失败: {e}")
+            # 保留旧向量
+            if card.get("embedding"):
+                add_to_index(index, cid, np.frombuffer(card["embedding"], dtype=np.float32))
             fail += 1
 
-        # 批次暂停
-        if (i + 1) % BATCH_SIZE == 0 and i + 1 < len(missing):
+        if (i + 1) % BATCH_SIZE == 0 and i + 1 < len(all_cards):
             print(f"  ⏸  暂停 {BATCH_PAUSE}s ...")
             time.sleep(BATCH_PAUSE)
 
     save_index(index)
-    print(f"\n完成: {success} 成功, {fail} 失败, {len(missing)} 总计")
+    print(f"\n完成: {success} 重嵌, {skipped} 跳过 (erotic), {fail} 失败, {len(all_cards)} 总计")
 
-    # 全量重建 link graph
     try:
         from linker import rebuild_all_links as _rebuild
         _rebuild()
+        print("✅ link graph 已重建")
     except Exception as _le:
         print(f"[link] 重建跳过: {_le}")
-
-    # 验证
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM cards WHERE embedding IS NULL")
-    remaining = c.fetchone()[0]
-    conn.close()
-    print(f"剩余缺向量: {remaining}")
-    if remaining == 0:
-        print("✅ 全部卡片向量就绪。")
 
 
 if __name__ == "__main__":
