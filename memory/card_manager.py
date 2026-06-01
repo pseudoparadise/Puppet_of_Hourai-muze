@@ -777,6 +777,9 @@ class CardManager:
 
         ttk.Button(dialog, text="断开选中边", command=do_break).pack(pady=10)
         ttk.Button(dialog, text="取消", command=dialog.destroy).pack(pady=(0, 10))
+
+
+if __name__ == "__main__":
     root = tk.Tk()
     app = CardManager(root)
     root.mainloop()
