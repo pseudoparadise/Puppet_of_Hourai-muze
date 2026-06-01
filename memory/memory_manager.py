@@ -278,8 +278,7 @@ def get_todo_list() -> list:
             SELECT id, title, category, importance, target_date, chord, valence, arousal, resolved, COALESCE(synced_from,'') as synced_from
             FROM cards
             WHERE review_status='final' AND resolved=0
-              AND (target_date IS NOT NULL AND target_date != ''
-                   OR category IN ('commitments', 'daily_life', 'todo'))
+              AND category IN ('todo', 'commitments', 'daily_life')
             ORDER BY
                 CASE WHEN target_date IS NOT NULL AND target_date != '' THEN target_date ELSE '9999-99-99' END ASC,
                 importance DESC
