@@ -1433,6 +1433,21 @@ class Console:
 
 
 if __name__ == "__main__":
+    import traceback as _tb_global
+
     root = tk.Tk()
+
+    def _tk_error_handler(exc_type, exc_val, exc_tb):
+        msg = "".join(_tb_global.format_exception(exc_type, exc_val, exc_tb))
+        print(f"[console CRASH] {msg}", file=sys.stderr)
+        try:
+            with open(os.path.join(PROJECT_ROOT, "console_crash.log"), "a", encoding="utf-8") as _cf:
+                _cf.write(f"\n=== {datetime.now().isoformat()} ===\n{msg}\n")
+        except Exception:
+            pass
+        messagebox.showerror("console 异常", f"{exc_type.__name__}: {exc_val}\n\n详情已写入 console_crash.log")
+
+    root.report_callback_exception = _tk_error_handler
+
     app = Console(root)
     root.mainloop()
