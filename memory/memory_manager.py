@@ -154,6 +154,7 @@ def suggest_importance_calibration():
                 new_imp = 7
                 c.execute("UPDATE cards SET importance = ? WHERE id = ?", (new_imp, card_id))
                 bumped.append((card_id, title, importance, new_imp))
+                print(f"[imp校准] 提升: {title} imp={importance}→{new_imp} (usage={usage_count})")
             elif importance >= 8 and usage_count == 0:
                 card_age_days = 999
                 if created_at:
@@ -162,12 +163,16 @@ def suggest_importance_calibration():
                         if ct.tzinfo is not None:
                             ct = ct.astimezone(timezone.utc).replace(tzinfo=None)
                         card_age_days = (now - ct).days
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"[imp校准] 日期解析失败: {title} created_at={created_at!r} err={e}")
+                print(f"[imp校准] 检查降级: {title} imp={importance} age={card_age_days}d usage=0")
                 if card_age_days > 7:
                     new_imp = 6
                     c.execute("UPDATE cards SET importance = ? WHERE id = ?", (new_imp, card_id))
                     demoted.append((card_id, title, importance, new_imp))
+                    print(f"[imp校准] 降级: {title} imp={importance}→{new_imp} (age={card_age_days}d)")
+                else:
+                    print(f"[imp校准] 跳过降级: {title} (age={card_age_days}d, 保护期内)")
         if bumped or demoted:
             conn.commit()
         if bumped:
