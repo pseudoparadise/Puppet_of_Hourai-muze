@@ -302,6 +302,12 @@ class CardManager:
         self.final_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         self.final_tree.configure(selectmode='extended')
         self.final_tree.bind("<Double-1>", lambda e: self.show_card_detail())
+        self.final_tree.bind("<<TreeviewSelect>>", lambda e: self._show_link_bar())
+
+        # 关联信息栏
+        self.link_bar = ttk.Label(self.final_frame, text="", foreground="gray", anchor=tk.W, font=("", 9))
+        self.link_bar.pack(fill=tk.X, padx=10, pady=(0, 5))
+
         self.load_final()
 
     def load_final(self):
@@ -649,6 +655,34 @@ class CardManager:
             self.load_dormant()
         except Exception as e:
             messagebox.showerror("异常", f"回填失败: {e}")
+
+    def _show_link_bar(self):
+        """选中卡片时在底栏显示关联信息。"""
+        selected = self.final_tree.selection()
+        if not selected:
+            self.link_bar.config(text="")
+            return
+        card_id = selected[0]
+        try:
+            from linker import get_linked_with_similarity
+            neighbors = get_linked_with_similarity(card_id)
+        except Exception:
+            self.link_bar.config(text="(获取关联失败)")
+            return
+        if not neighbors:
+            self.link_bar.config(text="关联: (无)")
+            return
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        parts = []
+        for nid, sim, direction, manual in neighbors:
+            nr = conn.execute("SELECT title FROM cards WHERE id=?", (nid,)).fetchone()
+            ntitle = nr["title"] if nr else nid
+            arrow = {'forward': '→', 'backward': '←', 'parallel': '≈', 'unknown': '—'}[direction]
+            tag = " [手动]" if manual else ""
+            parts.append(f"{arrow} {ntitle} ({sim:.2f}{tag})")
+        conn.close()
+        self.link_bar.config(text="关联: " + "  |  ".join(parts))
 
     def manual_link_cards(self):
         """选中两张卡片，手动创建因果边。"""
