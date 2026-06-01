@@ -71,7 +71,8 @@ def _ensure_miner():
 
 
 def _sync_supabase_count():
-    """查询 Supabase 今日录入次数，写入今日日记。"""
+    """查询 Supabase 昨日录入次数，写入昨日日记。
+    日记流程是凌晨写昨天的——今天 6/2 写 6/1 的日记，查 6/1 的 Supabase。"""
     config_path = os.path.join(PROJECT_ROOT, "config.json")
     try:
         with open(config_path, "r", encoding="utf-8") as f:
@@ -84,20 +85,20 @@ def _sync_supabase_count():
     if not supabase_url or not supabase_key or supabase_key == "你的SupabaseKey填这里":
         return
 
-    # 北京时间今日范围 → UTC（Supabase 存 UTC，北京时间领先 8h）
+    # 北京时间昨日范围 → UTC
     from datetime import timezone as _tz, timedelta as _td
     BJT = _tz(_td(hours=8))
     bj_now = datetime.now(_tz.utc).astimezone(BJT)
-    bj_start = bj_now.replace(hour=0, minute=0, second=0, microsecond=0)
-    bj_end = bj_now.replace(hour=23, minute=59, second=59, microsecond=999999)
-    utc_start = bj_start.astimezone(_tz.utc).strftime("%Y-%m-%dT%H:%M:%S")
-    utc_end = bj_end.astimezone(_tz.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    yesterday = bj_now - _td(days=1)
+    y_start = yesterday.replace(hour=0, minute=0, second=0, microsecond=0)
+    y_end = yesterday.replace(hour=23, minute=59, second=59, microsecond=999999)
+    utc_start = y_start.astimezone(_tz.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    utc_end = y_end.astimezone(_tz.utc).strftime("%Y-%m-%dT%H:%M:%S")
 
     count = 0
     try:
         import requests as _req
         headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
-        # 用 gt/lt 范围过滤，Supabase REST 的时区过滤器格式
         url = (f"{supabase_url}/rest/v1/app_usage_logs"
                f"?select=recorded_at"
                f"&recorded_at=gte.{utc_start}"
@@ -110,27 +111,27 @@ def _sync_supabase_count():
         print(f"[Supabase计数] 查询失败: {e}")
         return
 
-    # 写入今日日记
-    today_str = bj_now.strftime("%Y-%m-%d")
-    diary_path = os.path.join(PROJECT_ROOT, "diary", f"{today_str}.md")
+    # 写入昨日日记
+    yesterday_str = yesterday.strftime("%Y-%m-%d")
+    diary_path = os.path.join(PROJECT_ROOT, "diary", f"{yesterday_str}.md")
 
-    supabase_line = f"今日 Supabase 录入 {count} 次"
+    supabase_line = f"Supabase 录入 {count} 次"
     if os.path.exists(diary_path):
         with open(diary_path, "r", encoding="utf-8") as f:
             content = f.read()
     else:
-        content = f"# {today_str}\n\n## 日记\n"
+        content = f"# {yesterday_str}\n\n## 日记\n"
 
     import re as _re
-    if _re.search(r'今日 Supabase 录入 \d+ 次', content):
-        content = _re.sub(r'今日 Supabase 录入 \d+ 次', supabase_line, content)
+    if _re.search(r'Supabase 录入 \d+ 次', content):
+        content = _re.sub(r'Supabase 录入 \d+ 次', supabase_line, content)
     else:
         content = content.rstrip() + f"\n\n{supabase_line}\n"
 
     try:
         from delegate_tools import atomic_write_text
         atomic_write_text(diary_path, content)
-        print(f"[Supabase计数] 今日 {count} 次 → {today_str}.md")
+        print(f"[Supabase计数] {yesterday_str} {count} 次 → {yesterday_str}.md")
     except Exception as e:
         print(f"[Supabase计数] 写入日记失败: {e}")
 
