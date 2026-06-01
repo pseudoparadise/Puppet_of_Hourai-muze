@@ -9,6 +9,7 @@ import os
 import time
 import traceback
 import json
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -67,6 +68,71 @@ def _ensure_miner():
             miner_main()
         except Exception as e:
             _log_event("miner_error", {"error": str(e)[:200]})
+
+
+def _sync_supabase_count():
+    """查询 Supabase 今日录入次数，写入今日日记。"""
+    config_path = os.path.join(PROJECT_ROOT, "config.json")
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+    except Exception:
+        return
+
+    supabase_url = config.get("global", {}).get("supabase_url", "")
+    supabase_key = config.get("global", {}).get("supabase_key", "")
+    if not supabase_url or not supabase_key or supabase_key == "你的SupabaseKey填这里":
+        return
+
+    # 北京时间今日范围 → UTC（Supabase 存 UTC，北京时间领先 8h）
+    from datetime import timezone as _tz, timedelta as _td
+    BJT = _tz(_td(hours=8))
+    bj_now = datetime.now(_tz.utc).astimezone(BJT)
+    bj_start = bj_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    bj_end = bj_now.replace(hour=23, minute=59, second=59, microsecond=999999)
+    utc_start = bj_start.astimezone(_tz.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    utc_end = bj_end.astimezone(_tz.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+    count = 0
+    try:
+        import requests as _req
+        headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
+        # 用 gt/lt 范围过滤，Supabase REST 的时区过滤器格式
+        url = (f"{supabase_url}/rest/v1/app_usage_logs"
+               f"?select=recorded_at"
+               f"&recorded_at=gte.{utc_start}"
+               f"&recorded_at=lte.{utc_end}")
+        r = _req.get(url, headers=headers, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            count = len(data) if isinstance(data, list) else 0
+    except Exception as e:
+        print(f"[Supabase计数] 查询失败: {e}")
+        return
+
+    # 写入今日日记
+    today_str = bj_now.strftime("%Y-%m-%d")
+    diary_path = os.path.join(PROJECT_ROOT, "diary", f"{today_str}.md")
+
+    supabase_line = f"今日 Supabase 录入 {count} 次"
+    if os.path.exists(diary_path):
+        with open(diary_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    else:
+        content = f"# {today_str}\n\n## 日记\n"
+
+    import re as _re
+    if _re.search(r'今日 Supabase 录入 \d+ 次', content):
+        content = _re.sub(r'今日 Supabase 录入 \d+ 次', supabase_line, content)
+    else:
+        content = content.rstrip() + f"\n\n{supabase_line}\n"
+
+    try:
+        from delegate_tools import atomic_write_text
+        atomic_write_text(diary_path, content)
+        print(f"[Supabase计数] 今日 {count} 次 → {today_str}.md")
+    except Exception as e:
+        print(f"[Supabase计数] 写入日记失败: {e}")
 
 
 def main():
@@ -353,6 +419,9 @@ def main():
 
             # 矿工：今天未蒸馏则触发
             _ensure_miner()
+
+            # Supabase 录入计数：同步当日日记
+            _sync_supabase_count()
 
             # 周收拢：距上次收拢 >= 7 天则触发（读文件名日期，抗重启）
             try:
