@@ -339,10 +339,21 @@ def get_pending_todos() -> list:
         return []
 
     todos = []
+    now_utc = _dt_pend.now(timezone.utc)
     for pc in pending:
         cat = pc.get("category", "")
         if cat not in ('todo', 'commitments', 'daily_life'):
             continue
+        # AI 噪声过滤：非人类写的 pending 卡超过 3 天未审批 → 静默丢弃
+        if pc.get("proposed_by") != "muze":
+            try:
+                proposed_at = pc.get("proposed_at", "")
+                if proposed_at:
+                    age_days = (now_utc - datetime.fromisoformat(proposed_at)).days
+                    if age_days > 3:
+                        continue
+            except Exception:
+                pass
         td = pc.get("target_date", "")
         imp = pc.get("importance", 5)
         # 艾森豪威尔分类

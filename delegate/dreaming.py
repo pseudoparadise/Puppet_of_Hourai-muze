@@ -397,19 +397,60 @@ def weekly_sweep():
     md = f"# 周收拢 — {today}\n\n"
     md += f"覆盖: {today} 前 7 天\n\n"
 
-    quad_labels = [
-        ("重要且紧急", "important_urgent"),
-        ("重要不紧急", "important_not_urgent"),
-        ("不重要但紧急", "not_important_urgent"),
-        ("不重要不紧急", "not_important_not_urgent"),
-    ]
-    for label, key in quad_labels:
-        items = eis_merged.get(key, [])
+    # ── 待办：以 cards.db 中 resolved=0 的卡片为准，不对齐过时的 events.json ──
+    db_todos = {"重要且紧急": [], "重要不紧急": [], "不重要但紧急": [], "不重要不紧急": []}
+    try:
+        import sqlite3 as _sql_todo
+        _tdb = _sql_todo.connect(os.path.join(os.path.dirname(__file__), "..", "memory", "cards.db"))
+        _tdb.row_factory = _sql_todo.Row
+        _trows = _tdb.execute("""
+            SELECT id, title, category, importance, target_date
+            FROM cards
+            WHERE review_status='final' AND resolved=0
+              AND category IN ('todo', 'commitments', 'daily_life')
+            ORDER BY importance DESC
+        """).fetchall()
+        _tdb.close()
+        for tr in _trows:
+            imp = tr["importance"]
+            td = tr["target_date"] or ""
+            # 艾森豪威尔分类（与 get_todo_list 一致）
+            if imp >= 8:
+                quad = "重要不紧急"
+            elif td and td < today:
+                quad = "重要且紧急"
+            elif tr["category"] == 'todo':
+                try:
+                    from datetime import datetime as _dt_t
+                    days_left = (_dt_t.strptime(td, '%Y-%m-%d') - datetime.now()).days if td else 999
+                    quad = "重要且紧急" if days_left <= 7 else "重要不紧急"
+                except:
+                    quad = "重要不紧急"
+            elif tr["category"] == 'commitments':
+                quad = "重要不紧急" if imp >= 7 else "不重要但紧急"
+            else:
+                quad = "不重要不紧急"
+            db_todos.setdefault(quad, []).append((tr["title"], td))
+    except Exception as e:
+        print(f"[weekly_sweep] DB 待办读取失败，回退 events: {e}")
+        # 回退：用 events.json 的数据
+        quad_labels_legacy = [
+            ("重要且紧急", "important_urgent"),
+            ("重要不紧急", "important_not_urgent"),
+            ("不重要但紧急", "not_important_urgent"),
+            ("不重要不紧急", "not_important_not_urgent"),
+        ]
+        for label, key in quad_labels_legacy:
+            for it in eis_merged.get(key, []):
+                db_todos[label].append((it.get('item', '?'), it.get('deadline', '')))
+
+    for label in ("重要且紧急", "重要不紧急", "不重要但紧急", "不重要不紧急"):
+        items = db_todos.get(label, [])
         if items:
             md += f"## {label}\n"
-            for it in items:
-                dl = f" 📅{it.get('deadline','')}" if it.get('deadline') and it['deadline'] != '无' else ""
-                md += f"- {it.get('item','?')}{dl}\n"
+            for title, td in items:
+                dl = f" 📅{td}" if td else ""
+                md += f"- {title}{dl}\n"
             md += "\n"
 
     if all_completions:
