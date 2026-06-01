@@ -1280,13 +1280,13 @@ class HumanWriteCardTab(ttk.Frame):
         target = self.var_target.get().strip()
 
         if not title:
-            self.status_var.config(text="标题不能为空")
+            self.status_var.set("标题不能为空")
             return
         if not summary:
-            self.status_var.config(text="事件概括不能为空")
+            self.status_var.set("事件概括不能为空")
             return
         if not keywords:
-            self.status_var.config(text="关键词不能为空")
+            self.status_var.set("关键词不能为空")
             return
 
         card_id = f"{datetime.now().strftime('%Y%m%d')}_{title}"
@@ -1347,7 +1347,7 @@ class HumanWriteCardTab(ttk.Frame):
                 f"检测到相似卡片:\n{_dup_info}\n\n"
                 f"即将写入:\n标题: {title}\n内容: {content[:80]}\n\n"
                 f"是否保留两张完全一样的卡片？"):
-                self.status_var.config(text="已取消（重复卡片）")
+                self.status_var.set("已取消（重复卡片）")
                 return
 
         pending.append(card)
@@ -1355,10 +1355,10 @@ class HumanWriteCardTab(ttk.Frame):
             from delegate_tools import atomic_write_json
             atomic_write_json(pending_path, pending)
             print(f"[人类写卡] id={card_id} title={title} cat={category} imp={importance} kw={keywords}")
-            self.status_var.config(text=f"已写入: {card_id} (embed 已预计算)")
+            self.status_var.set(f"已写入: {card_id} (embed 已预计算)")
             self._clear()
         except Exception as e:
-            self.status_var.config(text=f"写入失败: {e}")
+            self.status_var.set(f"写入失败: {e}")
 
     def _clear(self):
         self.var_title.set("")
