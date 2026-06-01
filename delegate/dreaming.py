@@ -306,13 +306,6 @@ def chain_dream(target_date: str = None):
     step3_context = f"今日总结：\n{summary}\n\n完整对话摘要：\n{digest}"
     card_raw = delegate(card_prompt, step3_context)
     print(f"[dreaming] Step3 提议: {card_raw}")
-    # ── 日记生成后同步：将 events.json 中的四象限待办写入 cards.db ──
-    try:
-        from memory.memory_manager import sync_diary_todos_to_cards
-        sync_diary_todos_to_cards(days_back=7)
-    except Exception as e_sync:
-        print(f"[dreaming] 日记同步待办跳过: {e_sync}")
-
     from shared import llm_to_json
     card_json = llm_to_json(card_raw, default={"action": "skip"})
 
@@ -360,11 +353,9 @@ def weekly_sweep():
     diary_dir = os.path.join(os.path.dirname(__file__), "..", "diary")
     weekly_path = os.path.join(diary_dir, f"weekly_{today}.md")
 
-    # 收集近7天事件
+    # 收集近7天事件（完成 + 日历，待办从 cards.db 取）
     all_completions = []
     all_calendar = []
-    eis_merged = {"important_urgent": [], "important_not_urgent": [],
-                  "not_important_urgent": [], "not_important_not_urgent": []}
 
     from datetime import timedelta as _td_s
     for days_back in range(7, 0, -1):
@@ -379,10 +370,6 @@ def weekly_sweep():
             continue
         all_completions.extend(ev.get("completions", []))
         all_calendar.extend(ev.get("calendar", []))
-        for key in eis_merged:
-            for item in ev.get("eisenhower", {}).get(key, []):
-                if item not in eis_merged[key]:
-                    eis_merged[key].append(item)
 
     # 去重日历
     seen_dates = set()
@@ -432,17 +419,7 @@ def weekly_sweep():
                 quad = "不重要不紧急"
             db_todos.setdefault(quad, []).append((tr["title"], td))
     except Exception as e:
-        print(f"[weekly_sweep] DB 待办读取失败，回退 events: {e}")
-        # 回退：用 events.json 的数据
-        quad_labels_legacy = [
-            ("重要且紧急", "important_urgent"),
-            ("重要不紧急", "important_not_urgent"),
-            ("不重要但紧急", "not_important_urgent"),
-            ("不重要不紧急", "not_important_not_urgent"),
-        ]
-        for label, key in quad_labels_legacy:
-            for it in eis_merged.get(key, []):
-                db_todos[label].append((it.get('item', '?'), it.get('deadline', '')))
+        print(f"[weekly_sweep] DB 待办读取失败: {e}")
 
     for label in ("重要且紧急", "重要不紧急", "不重要但紧急", "不重要不紧急"):
         items = db_todos.get(label, [])

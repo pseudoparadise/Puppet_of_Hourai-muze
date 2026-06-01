@@ -41,7 +41,6 @@ class TodoManager:
         toolbar = ttk.Frame(self.parent_frame)
         toolbar.pack(fill=tk.X, padx=5, pady=5)
         ttk.Button(toolbar, text="刷新", command=self.load_todos).pack(side=tk.LEFT, padx=3)
-        ttk.Button(toolbar, text="📥 同步日记待办", command=self.sync_diary).pack(side=tk.LEFT, padx=3)
         ttk.Button(toolbar, text="标记完成", command=self.resolve_selected).pack(side=tk.LEFT, padx=3)
         ttk.Button(toolbar, text="查看卡片详情", command=self.show_card_detail).pack(side=tk.LEFT, padx=3)
         # 自动刷新
@@ -140,16 +139,6 @@ class TodoManager:
             if quad_filter == "全部"
             else f"{shown}/{len(self.todos)} 项"
         )
-
-    def sync_diary(self):
-        """同步日记事件中的待办到卡片库。"""
-        try:
-            from memory.memory_manager import sync_diary_todos_to_cards
-            n = sync_diary_todos_to_cards(days_back=30)
-            self.status_label.config(text=f"同步完成：新增 {n} 张待办卡片")
-            self.load_todos()
-        except Exception as e:
-            self.status_label.config(text=f"同步失败: {e}")
 
     def _toggle_auto_refresh(self):
         """启用/停用 30 秒自动刷新。"""
