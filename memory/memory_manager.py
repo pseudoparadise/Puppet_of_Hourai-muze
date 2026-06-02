@@ -407,6 +407,12 @@ def run_audit():
     suggest_merges()
     resolve_expired_cards()
     abyss_challenge()
+    # Persona 情感追踪更新
+    try:
+        from persona_engine import update_persona
+        update_persona()
+    except Exception as _pe:
+        print(f"[memory_manager] persona 更新跳过: {_pe}")
     print("[memory_manager] 审计完成。")
 
 

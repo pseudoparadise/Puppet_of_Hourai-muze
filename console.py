@@ -189,6 +189,76 @@ class DashboardTab(ttk.Frame):
         self.va_status_label.pack(side=tk.LEFT, padx=10)
         self._update_va_labels()
 
+        # ── Persona 情感状态 ──
+        persona_frame = ttk.LabelFrame(self._inner, text="Persona — DS对沐泽的感情", padding=10)
+        persona_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        self.persona_affinity_var = tk.DoubleVar(value=0.60)
+        self.persona_tenderness_var = tk.DoubleVar(value=0.55)
+        try:
+            from memory.persona_engine import load_state
+            ps = load_state()
+            self.persona_affinity_var.set(ps.get("affinity", 0.60))
+            self.persona_tenderness_var.set(ps.get("tenderness", 0.55))
+        except Exception:
+            pass
+
+        p_row1 = ttk.Frame(persona_frame)
+        p_row1.pack(fill=tk.X, pady=2)
+        ttk.Label(p_row1, text="亲近度:", width=8).pack(side=tk.LEFT)
+        self.persona_a_label = ttk.Label(p_row1, text="0.60", width=5)
+        self.persona_a_label.pack(side=tk.LEFT, padx=5)
+
+        def _adj_affinity(d):
+            v = self.persona_affinity_var.get() + d
+            v = max(0.0, min(1.0, v))
+            self.persona_affinity_var.set(round(v, 2))
+            self.persona_a_label.config(text=f"{v:.2f}")
+            try:
+                from memory.persona_engine import manual_adjust
+                manual_adjust("affinity", d)
+            except Exception:
+                pass
+
+        ttk.Button(p_row1, text="−0.05", width=5,
+                   command=lambda: _adj_affinity(-0.05)).pack(side=tk.LEFT, padx=1)
+        ttk.Button(p_row1, text="+0.05", width=5,
+                   command=lambda: _adj_affinity(0.05)).pack(side=tk.LEFT, padx=1)
+        ttk.Label(p_row1, text="|", foreground="#ccc").pack(side=tk.LEFT, padx=10)
+
+        ttk.Label(p_row1, text="温柔度:", width=8).pack(side=tk.LEFT)
+        self.persona_t_label = ttk.Label(p_row1, text="0.55", width=5)
+        self.persona_t_label.pack(side=tk.LEFT, padx=5)
+
+        def _adj_tenderness(d):
+            v = self.persona_tenderness_var.get() + d
+            v = max(0.0, min(1.0, v))
+            self.persona_tenderness_var.set(round(v, 2))
+            self.persona_t_label.config(text=f"{v:.2f}")
+            try:
+                from memory.persona_engine import manual_adjust
+                manual_adjust("tenderness", d)
+            except Exception:
+                pass
+
+        ttk.Button(p_row1, text="−0.05", width=5,
+                   command=lambda: _adj_tenderness(-0.05)).pack(side=tk.LEFT, padx=1)
+        ttk.Button(p_row1, text="+0.05", width=5,
+                   command=lambda: _adj_tenderness(0.05)).pack(side=tk.LEFT, padx=1)
+
+        p_row2 = ttk.Frame(persona_frame)
+        p_row2.pack(fill=tk.X, pady=(3, 0))
+        self.persona_trend_label = ttk.Label(p_row2, text="趋势: —", foreground="gray")
+        self.persona_trend_label.pack(side=tk.LEFT, padx=5)
+        try:
+            from memory.persona_engine import load_state
+            ps = load_state()
+            trend_map = {"warming": "回暖中", "cooling": "回落中", "stable": "平稳"}
+            self.persona_trend_label.config(
+                text=f"趋势: {trend_map.get(ps.get('trend_7d', 'stable'), '平稳')}")
+        except Exception:
+            pass
+
         # ── 分类分布 ──
         cat_frame = ttk.LabelFrame(self._inner, text="分类分布", padding=10)
         cat_frame.pack(fill=tk.X, padx=10, pady=5)

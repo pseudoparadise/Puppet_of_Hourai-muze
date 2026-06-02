@@ -47,6 +47,9 @@ memory/va_log.jsonl
 # ── 手动 VA 先验（私人生理/情绪数据） ──
 manual_va.json
 
+# ── Persona 情感状态（私人情感数据） ──
+memory/persona_state.json
+
 # ── 数据库 / 索引备份（含私人 embedding） ──
 memory/cards_backup_*.db
 memory/id_map_backup_*.json

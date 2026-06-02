@@ -2374,6 +2374,13 @@ def main():
         except Exception as e:
             print(f"[未解决事项] 跳过: {e}")
 
+        # ── Persona 情感状态 ──
+        try:
+            from memory.persona_engine import persona_prompt_snippet
+            full_context += persona_prompt_snippet() + "\n"
+        except Exception:
+            pass
+
         from clock import beijing_now as _bj_ctx
         full_context += f"【当前系统时间】{_bj_ctx().strftime('%Y-%m-%d %H:%M')}（北京时间）\n"
 
