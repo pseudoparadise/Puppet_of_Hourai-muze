@@ -181,6 +181,16 @@ class DashboardTab(ttk.Frame):
         self.va_arousal_scale.bind("<ButtonRelease-1>", lambda e: self._on_va_slide())
         self.va_arousal_scale.bind("<B1-Motion>", lambda e: self._on_va_slide_live())
 
+        # 混合态开关（月结晶触发条件）
+        emo_row_mixed = ttk.Frame(emo_frame)
+        emo_row_mixed.pack(fill=tk.X, pady=2)
+        self.mixed_state_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(emo_row_mixed, text="混合态 [月结晶]（水+岩联动，人类判断置信100%）",
+                        variable=self.mixed_state_var,
+                        command=self._on_mixed_toggle).pack(side=tk.LEFT, padx=5)
+        ttk.Label(emo_row_mixed, text="连续3张高imp锚定卡命中→触发月笼协奏迸发",
+                  foreground="#8888cc", font=("", 8)).pack(side=tk.LEFT, padx=10)
+
         emo_row4 = ttk.Frame(emo_frame)
         emo_row4.pack(fill=tk.X, pady=(3, 0))
         ttk.Button(emo_row4, text="保存情绪设定", command=self._save_manual_va).pack(side=tk.LEFT, padx=5)
@@ -473,8 +483,12 @@ class DashboardTab(ttk.Frame):
                 self.va_valence_var.set(d.get("valence", 0.0))
                 self.va_arousal_var.set(d.get("arousal", 0.5))
                 self.va_trust_var.set(d.get("trust", 0.8))
+                self.mixed_state_var.set(d.get("mixed_state", False))
             except Exception:
                 pass
+
+    def _on_mixed_toggle(self):
+        self._save_manual_va()
 
     def _save_manual_va(self):
         d = {
@@ -482,6 +496,7 @@ class DashboardTab(ttk.Frame):
             "valence": round(self.va_valence_var.get(), 2),
             "arousal": round(self.va_arousal_var.get(), 2),
             "trust": round(self.va_trust_var.get(), 2),
+            "mixed_state": self.mixed_state_var.get(),
         }
         try:
             with open(self.manual_va_path, "w", encoding="utf-8") as f:
@@ -495,6 +510,7 @@ class DashboardTab(ttk.Frame):
         self.va_valence_var.set(0.0)
         self.va_arousal_var.set(0.5)
         self.va_trust_var.set(0.8)
+        self.mixed_state_var.set(False)
         self._update_va_labels()
         self._save_manual_va()
         self.va_status_label.config(text="已清除，回退模型估测", foreground="gray")

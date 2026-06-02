@@ -9,8 +9,11 @@ NEW: 提取 _score_card() 独立打分函数，为未来重排算法优化留收
 """
 import sqlite3
 import os
+import json
 from encoder import embed, load_index, search_index, DIM
 import numpy as np
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 import random
 from datetime import datetime
 
@@ -923,6 +926,72 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
                     worst_idx, _ = max(non_anchors, key=lambda x: x[1]["score"])
                     result[worst_idx] = teleport_card
                     print(f"[传送锚点] 霸榜卡{dominated_ids} → 传送「{teleport_card['title']}」")
+
+    # ═══════════════════════════════════════════════════════════
+    # 月笼协奏 — 月结晶迸发（混合态专属）
+    # 触发条件: 混合态 active + 候选池 ≥3 张岩属性卡 (imp≥8)
+    # 水底 = 低唤醒情绪基线 | 岩=高imp锚定卡
+    # 迸发×3: 水卡加权 → 水岩共振 → 结晶传送
+    # ═══════════════════════════════════════════════════════════
+    _mixed_state = False
+    try:
+        _mva_path = os.path.join(PROJECT_ROOT, "manual_va.json")
+        if os.path.exists(_mva_path):
+            with open(_mva_path, "r", encoding="utf-8") as _mf:
+                _mva = json.load(_mf)
+            _mixed_state = _mva.get("mixed_state", False)
+    except Exception:
+        pass
+
+    if _mixed_state:
+        # 统计岩属性卡 (imp≥8，含 result 内 + merged 候选池)
+        _rock_cards = [c for c in merged if c.get("importance", 5) >= 8]
+        _rock_in_result = [c for c in result if c.get("importance", 5) >= 8]
+
+        if len(_rock_in_result) >= 3:
+            print(f"[月笼协奏] 混合态+{len(_rock_in_result)}岩 → 迸发月结晶")
+
+            # Burst 1: 水卡加权 — 低唤醒情绪卡 (deep_talks/emotional) +0.15
+            _water_ids = set()
+            for c in merged:
+                if c.get("category") in ("deep_talks", "emotional") and c.get("arousal", 0.5) <= 0.4:
+                    c["score"] = c.get("score", 0) + 0.15
+                    _water_ids.add(c["id"])
+            _water_hit = len(_water_ids)
+            print(f"[月结晶·壹] 水卡加权: {_water_hit} 张 +0.15")
+
+            # Burst 2: 水岩共振 — 既是水底又是岩属性的卡 (emotional/deep_talks + imp≥8) +0.10
+            _crystal_count = 0
+            for c in merged:
+                if c.get("category") in ("deep_talks", "emotional") and c.get("importance", 5) >= 8:
+                    c["score"] = c.get("score", 0) + 0.10
+                    _crystal_count += 1
+            print(f"[月结晶·贰] 水岩共振: {_crystal_count} 张 +0.10")
+
+            # Burst 3: 结晶传送 — 从 水卡 ∩ 岩卡 中随机一张未在 result 的注入
+            _crystal_pool = [
+                c for c in merged
+                if c.get("category") in ("deep_talks", "emotional")
+                and c.get("importance", 5) >= 8
+                and c["id"] not in {r["id"] for r in result}
+            ]
+            if _crystal_pool:
+                import random as _rand_cry
+                _teleport = _rand_cry.choice(_crystal_pool)
+                # 替换 result 中分数最低的非锚定卡
+                _non_anchor_result = [
+                    (i, c) for i, c in enumerate(result)
+                    if c["id"] not in anchor_ids
+                ]
+                if _non_anchor_result:
+                    _worst_idx, _ = max(_non_anchor_result, key=lambda x: x[1]["score"])
+                    result[_worst_idx] = _teleport
+                    print(f"[月结晶·叁] 结晶传送: 「{_teleport['title']}」注入结果")
+
+            # 重排
+            merged.sort(key=lambda x: x["score"], reverse=True)
+            # 更新 result 排序
+            result.sort(key=lambda x: x.get("score", 0), reverse=True)
 
     output = []
     for card in result:
