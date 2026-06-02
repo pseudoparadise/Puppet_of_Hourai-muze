@@ -451,6 +451,17 @@ def main():
             except Exception as e:
                 _log_event("sweep_error", {"error": str(e)[:200]})
 
+            # 每周自省：周日凌晨触发
+            try:
+                bj_now = beijing_now()
+                if bj_now.weekday() == 6:  # 周日
+                    from memory.reflection_engine import run_weekly_reflection
+                    path = run_weekly_reflection()
+                    if path:
+                        _log_event("reflection_generated", {"path": path})
+            except Exception as _re:
+                print(f"[每周自省] 跳过: {_re}")
+
         # ── 深渊审计（每6小时） ──
         if now_ts - last_audit_time > AUDIT_INTERVAL:
             print("[深渊审计] 定时执行...")

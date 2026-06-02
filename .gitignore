@@ -50,6 +50,9 @@ manual_va.json
 # ── Persona 情感状态（私人情感数据） ──
 memory/persona_state.json
 
+# ── DS 自省日记（私密反思内容） ──
+memory/reflections/
+
 # ── 数据库 / 索引备份（含私人 embedding） ──
 memory/cards_backup_*.db
 memory/id_map_backup_*.json

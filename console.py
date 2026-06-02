@@ -259,6 +259,83 @@ class DashboardTab(ttk.Frame):
         except Exception:
             pass
 
+        # ── 每周自省通知 ──
+        refl_frame = ttk.LabelFrame(self._inner, text="DS 每周自省", padding=10)
+        refl_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        refl_row = ttk.Frame(refl_frame)
+        refl_row.pack(fill=tk.X)
+        self.refl_status_label = ttk.Label(refl_row, text="", foreground="gray")
+        self.refl_status_label.pack(side=tk.LEFT, padx=5)
+        self.refl_btn_frame = ttk.Frame(refl_row)
+        self.refl_btn_frame.pack(side=tk.RIGHT, padx=5)
+
+        def _load_refl_status():
+            try:
+                from memory.reflection_engine import get_pending_reflection
+                pending = get_pending_reflection()
+                if pending:
+                    self.refl_status_label.config(
+                        text=f"待审阅: {pending['week']} ({len(pending['text'])}字)",
+                        foreground="orange")
+                    for w in self.refl_btn_frame.winfo_children():
+                        w.destroy()
+                    ttk.Button(self.refl_btn_frame, text="审阅",
+                               command=lambda: _show_refl_editor(pending)).pack(side=tk.LEFT, padx=2)
+                else:
+                    self.refl_status_label.config(
+                        text="无待审自省（周日自动生成）", foreground="gray")
+                    for w in self.refl_btn_frame.winfo_children():
+                        w.destroy()
+            except Exception:
+                self.refl_status_label.config(text="(reflection_engine 未就绪)", foreground="gray")
+
+        def _show_refl_editor(pending):
+            dialog = tk.Toplevel(self)
+            dialog.title(f"DS 每周自省 — {pending['week']}")
+            dialog.geometry("600x450")
+            dialog.resizable(True, True)
+
+            ttk.Label(dialog, text=f"自省报告 — {pending['week']}（可编辑后确认注入 prompt_v1_base.txt）",
+                      font=("", 10, "bold")).pack(pady=10, padx=10)
+
+            editor = tk.Text(dialog, height=15, wrap=tk.WORD, font=("", 10))
+            editor.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+            editor.insert("1.0", pending['text'])
+
+            btn_row = ttk.Frame(dialog)
+            btn_row.pack(fill=tk.X, pady=10, padx=10)
+
+            def _do_inject():
+                new_text = editor.get("1.0", tk.END).strip()
+                if not new_text:
+                    messagebox.showwarning("内容为空", "自省内容不能为空。")
+                    return
+                if not messagebox.askyesno("确认注入",
+                    "确定将这段自省注入 prompt_v1_base.txt 吗？\n\n"
+                    "注入后，DS 的系统人格将包含这段自省，\n"
+                    "影响 DS 在所有对话中的行为。"):
+                    return
+                try:
+                    from memory.reflection_engine import inject_to_base_prompt
+                    inject_to_base_prompt(new_text)
+                    messagebox.showinfo("成功", "自省已注入 prompt_v1_base.txt")
+                    dialog.destroy()
+                    _load_refl_status()
+                except Exception as e:
+                    import traceback; traceback.print_exc()
+                    messagebox.showerror("注入失败", f"{e}")
+
+            def _do_discard():
+                if messagebox.askyesno("确认丢弃", "确定丢弃本周自省吗？\n下次生成需要等到下周日。"):
+                    dialog.destroy()
+
+            ttk.Button(btn_row, text="确认注入", command=_do_inject).pack(side=tk.LEFT, padx=5)
+            ttk.Button(btn_row, text="丢弃", command=_do_discard).pack(side=tk.LEFT, padx=5)
+            ttk.Button(btn_row, text="取消（保留）", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+
+        _load_refl_status()
+
         # ── 分类分布 ──
         cat_frame = ttk.LabelFrame(self._inner, text="分类分布", padding=10)
         cat_frame.pack(fill=tk.X, padx=10, pady=5)
