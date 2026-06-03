@@ -9,6 +9,58 @@ from datetime import datetime
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 # ═══════════════════════════════════════════════════════════════
+# 0. 模式标记 — 工位 / 家 双窗口桥梁
+# ═══════════════════════════════════════════════════════════════
+
+_MODE = None
+_MODE_WORK_CATS = {'todo', 'commitments', 'preferences', 'daily_life'}
+
+def get_mode() -> str:
+    """返回当前模式 'work' 或 'home'。
+    优先级: GHOST_MODE 环境变量 > .mode 文件 > 默认 'home'。
+    """
+    global _MODE
+    if _MODE is not None:
+        return _MODE
+    env_mode = os.environ.get("GHOST_MODE", "").strip().lower()
+    if env_mode in ("work", "home"):
+        _MODE = env_mode
+        return _MODE
+    mode_path = os.path.join(PROJECT_ROOT, ".mode")
+    try:
+        with open(mode_path, "r", encoding="utf-8") as f:
+            file_mode = f.read().strip().lower()
+        if file_mode in ("work", "home"):
+            _MODE = file_mode
+            return _MODE
+    except Exception:
+        pass
+    _MODE = "home"
+    return _MODE
+
+def mode_pass_card(card: dict) -> bool:
+    """工位模式拦截低重要度/非生产类卡片。家模式一律放行。"""
+    if get_mode() != "work":
+        return True
+    imp = card.get("importance", 5)
+    if isinstance(imp, str):
+        try:
+            imp = int(imp)
+        except Exception:
+            imp = 5
+    if imp < 7:
+        return False
+    if card.get("category") not in _MODE_WORK_CATS:
+        return False
+    return True
+
+def mode_retrieval_categories() -> list:
+    """返回当前模式应检索的卡片分类列表。"""
+    if get_mode() == "work":
+        return list(_MODE_WORK_CATS)
+    return []  # 空 = 不限制
+
+# ═══════════════════════════════════════════════════════════════
 # 1. JSON 安全加载（损坏时备份 + 返回默认值）
 # ═══════════════════════════════════════════════════════════════
 

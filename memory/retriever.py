@@ -9,6 +9,7 @@ NEW: 提取 _score_card() 独立打分函数，为未来重排算法优化留收
 """
 import sqlite3
 import os
+import sys
 import json
 from encoder import embed, load_index, search_index, DIM
 import numpy as np
@@ -506,6 +507,24 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
     freq_cap = w.get('frequency_penalty_cap', 0.10)
     frequency_penalty = min(freq_cap, usage * w.get('w_frequency_penalty', 0.01))
 
+    # ── 副作用：写入探针分数供 trace 使用 ──
+    card["_probes"] = {
+        "keyword": round(keyword_score, 4),
+        "semantic": round(semantic_score, 4),
+        "importance": round(importance_score, 4),
+        "anchor": round(anchor_bonus, 4),
+        "diffusion": round(diffusion_bonus, 4),
+        "recency": round(recent_bonus, 4),
+        "decay": round(decay_penalty, 4),
+        "fire": round(fire_burst, 4),
+        "water": round(water_smooth, 4),
+        "growth": round(growth_bonus, 4),
+        "chord_harvest": round(chord_harvest, 4),
+        "treasure": round(treasure_bonus, 4),
+        "presence_rep_penalty": round(presence_repetition_penalty, 4),
+        "freq_penalty": round(frequency_penalty, 4),
+    }
+
     return (
         keyword_score + semantic_score + importance_score +
         anchor_bonus + diffusion_bonus + recent_bonus - decay_penalty +
@@ -661,11 +680,18 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
         except:
             pass
 
+    from shared import mode_retrieval_categories
+    _mode_cats = mode_retrieval_categories()
+
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
 
-    c.execute("SELECT id, keywords, importance, category, content, title, created_at, last_referenced_at, usage_count FROM cards WHERE review_status='final' AND enabled_in_context=1")
+    if _mode_cats:
+        _placeholders = ",".join("?" * len(_mode_cats))
+        c.execute(f"SELECT id, keywords, importance, category, content, title, created_at, last_referenced_at, usage_count FROM cards WHERE review_status='final' AND enabled_in_context=1 AND category IN ({_placeholders})", _mode_cats)
+    else:
+        c.execute("SELECT id, keywords, importance, category, content, title, created_at, last_referenced_at, usage_count FROM cards WHERE review_status='final' AND enabled_in_context=1")
     all_cards = [dict(row) for row in c.fetchall()]
 
     query_lower = query.lower()
@@ -816,7 +842,7 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
             _neighbor_sims = {}
             _neighbor_sources = {}  # nid → source card title
             for _card in _expand_from:
-                for _nid, _nsim in _get_linked(_card["id"]):
+                for _nid, _nsim, *_ in _get_linked(_card["id"]):
                     if _nid not in seen:
                         if _nid not in _neighbor_ids or _nsim > _neighbor_sims.get(_nid, 0):
                             _neighbor_sims[_nid] = _nsim
@@ -1004,10 +1030,38 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
             "category": card["category"],
             "score": round(card["score"], 4),
             "hit_count": card.get("hit_count", 0),
-            "distance": round(card.get("distance", 1.0), 4)
+            "distance": round(card.get("distance", 1.0), 4),
+            "probes": card.get("_probes", {}),
         })
     # ── 追踪本轮召回，供下轮 presence/repetition penalty 使用 ──
     _track_retrieved([c["id"] for c in output])
     # ── 圣遗物自适应：每100次检索自动调参 ──
     artifact_adapt()
+    # ── 写检索 trace 供 console.py 召回反馈面板读取 ──
+    _write_retrieval_trace(query, va_tier, output)
     return output
+
+def _write_retrieval_trace(query: str, va_tier: str, cards: list):
+    """写入检索 trace 到 memory/retrieval_traces.jsonl，供 console.py 召回反馈面板使用。"""
+    import uuid as _uuid_trace
+    from datetime import datetime as _dt_trace, timezone as _tz_trace, timedelta as _td_trace
+    try:
+        trace_path = os.path.join(os.path.dirname(__file__), "retrieval_traces.jsonl")
+        entry = {
+            "trace_id": str(_uuid_trace.uuid4())[:8],
+            "ts": _dt_trace.now(_tz_trace(_td_trace(hours=8))).strftime("%Y-%m-%d %H:%M:%S"),
+            "query": query[:200],
+            "va_tier": va_tier,
+            "cards": cards,
+        }
+        with open(trace_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        import traceback as _tb_trace
+        msg = f"[retrieval_trace 写入失败]\n{_tb_trace.format_exc()}"
+        print(msg, file=sys.stderr)
+        try:
+            import tkinter.messagebox as _mb_trace
+            _mb_trace.showerror("retriever trace 异常", f"写入 retrieval_traces.jsonl 失败:\n{e}")
+        except Exception:
+            pass

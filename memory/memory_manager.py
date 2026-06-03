@@ -10,6 +10,26 @@ import json
 from datetime import datetime, timedelta, timezone
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "cards.db")
+RESOLUTION_LOG_PATH = os.path.join(os.path.dirname(__file__), "resolution_log.jsonl")
+
+
+def _log_resolution(card_id: str, title: str, source: str, details: str = ""):
+    """每次卡片被划掉（resolved=1）时写入审计日志，方便追查李鬼。"""
+    from datetime import datetime, timezone, timedelta
+    entry = {
+        "ts": datetime.now(timezone(timedelta(hours=8))).isoformat(),
+        "card_id": card_id,
+        "title": title,
+        "source": source,
+        "details": details,
+    }
+    try:
+        with open(RESOLUTION_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        import sys
+        print(f"[resolution_log] 写入失败 card_id={card_id}: {e}", file=sys.stderr)
+        print(f"[resolution_log] 尝试写入: {json.dumps(entry, ensure_ascii=False)}", file=sys.stderr)
 
 def renew_card(card_id: str) -> bool:
     """
@@ -247,20 +267,22 @@ def suggest_merges():
         conn.close()
 
 def resolve_expired_cards():
-    """扫描 deadline 相关的 todo/commitments/preferences 卡片，target_date 过期自动标记已解决。
-    milestone/deep_talks 等分类的 target_date 是历史锚点，不过期。"""
+    """扫描 deadline 相关的 todo 卡片，target_date 过期自动标记已解决。
+    commitments/preferences 的 target_date 是历史锚点（承诺日期/偏好形成日期），永不过期。
+    milestone/deep_talks 同理不过期。"""
     conn = sqlite3.connect(DB_PATH)
     try:
         now_utc = datetime.now(timezone.utc)
         today_str = now_utc.strftime('%Y-%m-%d')
         c = conn.cursor()
         c.execute(
-            "SELECT id, title, target_date FROM cards WHERE review_status='final' AND resolved=0 AND target_date IS NOT NULL AND target_date != '' AND target_date < ? AND category IN ('todo', 'commitments', 'preferences')",
+            "SELECT id, title, target_date FROM cards WHERE review_status='final' AND resolved=0 AND target_date IS NOT NULL AND target_date != '' AND target_date < ? AND category = 'todo'",
             (today_str,)
         )
         expired = c.fetchall()
         for cid, title, td in expired:
             c.execute("UPDATE cards SET resolved=1 WHERE id=?", (cid,))
+            _log_resolution(cid, title, "resolve_expired_cards", f"target_date={td} 已过期")
             print(f"[过期解决] 目标日期 {td} 已过 → {cid}「{title}」已自动标记为已解决")
         if expired:
             conn.commit()
@@ -560,7 +582,7 @@ def resolve_card(card_id: str) -> bool:
     conn = sqlite3.connect(DB_PATH)
     try:
         c = conn.cursor()
-        c.execute("SELECT category FROM cards WHERE id=?", (card_id,))
+        c.execute("SELECT category, title FROM cards WHERE id=?", (card_id,))
         row = c.fetchone()
         if row and row[0] in DEEP_CATS:
             print(f"[memory_manager] {card_id} 是{row[0]}卡，不可标记为已解决")
@@ -569,6 +591,7 @@ def resolve_card(card_id: str) -> bool:
         if c.rowcount == 0:
             return False
         conn.commit()
+        _log_resolution(card_id, row[1] if row else card_id, "resolve_card_api", f"category={row[0]}" if row else "")
         print(f"[memory_manager] 卡片 {card_id} 已标记为已解决")
         return True
     except Exception as e:

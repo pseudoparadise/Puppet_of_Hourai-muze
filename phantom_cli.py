@@ -9,6 +9,7 @@ phantom_cli.py — Claude Code ↔ phantom-trigger 桥梁
   python phantom_cli.py status                              总览
   python phantom_cli.py recall "查询文本"                    模拟检索
   python phantom_cli.py links <card_id>                     查 link 邻居
+  python phantom_cli.py reslog --last 20                    查划卡审计日志
 """
 import json
 import os
@@ -225,6 +226,31 @@ def cmd_links(args):
         print(f"link 查询失败: {e}")
 
 
+def cmd_reslog(args):
+    """查看卡片划掉审计日志。args: --last 20 (最近N条)"""
+    log_path = os.path.join(PROJECT_ROOT, "memory", "resolution_log.jsonl")
+    if not os.path.exists(log_path):
+        print("(暂无划卡记录)")
+        return
+    limit = 20
+    if "--last" in args:
+        idx = args.index("--last")
+        try:
+            limit = int(args[idx + 1])
+        except (IndexError, ValueError):
+            pass
+    try:
+        with open(log_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        for line in lines[-limit:]:
+            entry = json.loads(line.strip())
+            print(f"{entry['ts']} | {entry['source']:28s} | {entry['card_id']} | {entry['title']}")
+            if entry.get("details"):
+                print(f"  → {entry['details']}")
+    except Exception as e:
+        print(f"读取日志失败: {e}")
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print(__doc__)
@@ -245,6 +271,8 @@ if __name__ == "__main__":
         cmd_recall(rest)
     elif cmd == "links":
         cmd_links(rest)
+    elif cmd == "reslog":
+        cmd_reslog(rest)
     elif cmd == "compress":
         print("正在压缩滚动总结...")
         try:

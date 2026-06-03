@@ -207,10 +207,13 @@ def _popup_collect_keywords(title: str, content: str, keywords: str, category: s
 
 # ── FIX: 写入待审核卡片（毒点5修复 — 委托 delegate_tools.atomic_write_json） ──
 def write_pending_card(card_draft: dict):
-    from shared import is_garbage_card
+    from shared import is_garbage_card, mode_pass_card
     reason = is_garbage_card(card_draft.get("title", ""), card_draft.get("content", ""))
     if reason:
         print(f"[卡片提议] 拦截: {reason}")
+        return
+    if not mode_pass_card(card_draft):
+        print(f"[mode:work] 拦截「{card_draft.get('title','')}」[{card_draft.get('category','')}] imp={card_draft.get('importance',0)}")
         return
 
     # ── todo 卡统一弹窗审核，不放过任何一个自动写入的待办 ──

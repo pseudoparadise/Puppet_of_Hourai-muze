@@ -486,21 +486,17 @@ class CardManager:
             return
 
         card_id = self.final_tree.item(selected[0], "values")[0]
-        if not messagebox.askyesno("确认", f"确定将卡片 {card_id} 标记为已解决吗？"):
+        title = self.final_tree.item(selected[0], "values")[1]
+        if not messagebox.askyesno("确认", f"确定将卡片「{title}」标记为已解决吗？"):
             return
 
         try:
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            c.execute("UPDATE cards SET resolved = 1 WHERE id = ?", (card_id,))
-            if c.rowcount == 0:
-                messagebox.showerror("失败", f"未找到卡片 {card_id}。")
-                conn.close()
-                return
-            conn.commit()
-            conn.close()
-            messagebox.showinfo("成功", f"卡片 {card_id} 已标记为已解决。")
-            self.load_final()
+            from memory_manager import resolve_card as _resolve_card
+            if _resolve_card(card_id):
+                messagebox.showinfo("成功", f"卡片「{title}」已标记为已解决。")
+                self.load_final()
+            else:
+                messagebox.showerror("失败", f"卡片 {card_id} 无法标记为已解决（可能是深层卡或不存在）。")
         except Exception as e:
             messagebox.showerror("异常", f"操作异常: {e}")
 

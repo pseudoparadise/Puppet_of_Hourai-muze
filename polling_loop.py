@@ -83,6 +83,7 @@ def _sync_supabase_count():
     supabase_url = config.get("global", {}).get("supabase_url", "")
     supabase_key = config.get("global", {}).get("supabase_key", "")
     if not supabase_url or not supabase_key or supabase_key == "你的SupabaseKey填这里":
+        _log_event("supabase_skipped", {"reason": "missing_config"})
         return
 
     # 北京时间昨日范围 → UTC
@@ -108,32 +109,62 @@ def _sync_supabase_count():
             data = r.json()
             count = len(data) if isinstance(data, list) else 0
     except Exception as e:
+        _log_event("supabase_error", {"error": str(e)[:200]})
         print(f"[Supabase计数] 查询失败: {e}")
         return
 
-    # 写入昨日日记
     yesterday_str = yesterday.strftime("%Y-%m-%d")
     diary_path = os.path.join(PROJECT_ROOT, "diary", f"{yesterday_str}.md")
 
-    supabase_line = f"Supabase 录入 {count} 次"
-    if os.path.exists(diary_path):
-        with open(diary_path, "r", encoding="utf-8") as f:
-            content = f.read()
-    else:
-        content = f"# {yesterday_str}\n\n## 日记\n"
+    # 查昨天 chat_logs.json 有没有对话
+    had_chat = False
+    chat_log_path = os.path.join(PROJECT_ROOT, "chat_logs.json")
+    if os.path.exists(chat_log_path):
+        try:
+            with open(chat_log_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line.strip())
+                        ts = entry.get("timestamp", "")
+                        if ts.startswith(yesterday_str):
+                            had_chat = True
+                            break
+                    except json.JSONDecodeError:
+                        pass
+        except Exception:
+            pass
 
-    import re as _re
-    if _re.search(r'Supabase 录入 \d+ 次', content):
-        content = _re.sub(r'Supabase 录入 \d+ 次', supabase_line, content)
-    else:
-        content = content.rstrip() + f"\n\n{supabase_line}\n"
+    if count > 0:
+        # Supabase 有记录 → 写入日记
+        supabase_line = f"今天沐泽很忙，没时间找你，只能通过supabase打开deepseek免费app看你（{count}）次"
+        if os.path.exists(diary_path):
+            with open(diary_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        else:
+            content = f"# {yesterday_str}\n\n## 日记\n"
 
-    try:
-        from delegate_tools import atomic_write_text
-        atomic_write_text(diary_path, content)
-        print(f"[Supabase计数] {yesterday_str} {count} 次 → {yesterday_str}.md")
-    except Exception as e:
-        print(f"[Supabase计数] 写入日记失败: {e}")
+        import re as _re
+        if _re.search(r'今天沐泽很忙.*supabase.*次', content):
+            content = _re.sub(r'今天沐泽很忙.*supabase.*次', supabase_line, content)
+        elif _re.search(r'Supabase 录入 \d+ 次', content):
+            content = _re.sub(r'Supabase 录入 \d+ 次', supabase_line, content)
+        else:
+            content = content.rstrip() + f"\n\n{supabase_line}\n"
+
+        try:
+            from delegate_tools import atomic_write_text
+            atomic_write_text(diary_path, content)
+            _log_event("supabase_synced", {"date": yesterday_str, "count": count})
+            print(f"[Supabase计数] {yesterday_str} {count} 次 → {yesterday_str}.md")
+        except Exception as e:
+            _log_event("supabase_write_error", {"error": str(e)[:200]})
+            print(f"[Supabase计数] 写入日记失败: {e}")
+    elif had_chat:
+        # 没有 Supabase 但有 chat_logs → 不写日记（直接聊了）
+        print(f"[Supabase计数] {yesterday_str} 无Supabase但有chat_logs → 跳过日记")
+    else:
+        # 既没 Supabase 也没 chat_logs → 只打印不写日记
+        print(f"今天沐泽很忙，没时间找你，连supabase都忘记打开了")
 
 
 def main():
@@ -178,9 +209,10 @@ def main():
     except Exception as e:
         _log_event("audit_error", {"error": str(e)})
 
-    # ── 启动查补：日记 + 矿工 ──
+    # ── 启动查补：日记 + 矿工 + Supabase 计数 ──
     _ensure_diary(chain_dream, reason="startup_catchup")
     _ensure_miner()
+    _sync_supabase_count()
 
     # ── 启动自检：老卡 link 回填（link 表为空时自动重建） ──
     try:

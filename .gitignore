@@ -74,6 +74,9 @@ memory/model_meta_backup_*.json
 reminded_todos.json
 memory/reminded_todos.json
 
+# ── 划卡审计日志 ──
+memory/resolution_log.jsonl
+
 # ── 崩溃日志 ──
 console_crash.log
 

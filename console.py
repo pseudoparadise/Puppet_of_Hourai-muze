@@ -191,6 +191,14 @@ class DashboardTab(ttk.Frame):
         ttk.Label(emo_row_mixed, text="连续3张高imp锚定卡命中→触发月笼协奏迸发",
                   foreground="#8888cc", font=("", 8)).pack(side=tk.LEFT, padx=10)
 
+        # Claude Code VA 远程开关
+        emo_row_cc = ttk.Frame(emo_frame)
+        emo_row_cc.pack(fill=tk.X, pady=2)
+        self.claude_va_override_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(emo_row_cc, text="Claude Code → 用手动VA（开=100%手动不调DS | 关=自动估测）",
+                        variable=self.claude_va_override_var,
+                        command=self._save_manual_va).pack(side=tk.LEFT, padx=5)
+
         emo_row4 = ttk.Frame(emo_frame)
         emo_row4.pack(fill=tk.X, pady=(3, 0))
         ttk.Button(emo_row4, text="保存情绪设定", command=self._save_manual_va).pack(side=tk.LEFT, padx=5)
@@ -484,6 +492,7 @@ class DashboardTab(ttk.Frame):
                 self.va_arousal_var.set(d.get("arousal", 0.5))
                 self.va_trust_var.set(d.get("trust", 0.8))
                 self.mixed_state_var.set(d.get("mixed_state", False))
+                self.claude_va_override_var.set(d.get("claude_va_override", False))
             except Exception:
                 pass
 
@@ -497,10 +506,11 @@ class DashboardTab(ttk.Frame):
             "arousal": round(self.va_arousal_var.get(), 2),
             "trust": round(self.va_trust_var.get(), 2),
             "mixed_state": self.mixed_state_var.get(),
+            "claude_va_override": self.claude_va_override_var.get(),
         }
         try:
-            with open(self.manual_va_path, "w", encoding="utf-8") as f:
-                json.dump(d, f, ensure_ascii=False, indent=2)
+            from delegate_tools import atomic_write_json
+            atomic_write_json(self.manual_va_path, d)
             self.va_status_label.config(text="已保存", foreground="green")
         except Exception as e:
             self.va_status_label.config(text=f"保存失败: {e}", foreground="red")
@@ -511,6 +521,7 @@ class DashboardTab(ttk.Frame):
         self.va_arousal_var.set(0.5)
         self.va_trust_var.set(0.8)
         self.mixed_state_var.set(False)
+        self.claude_va_override_var.set(False)
         self._update_va_labels()
         self._save_manual_va()
         self.va_status_label.config(text="已清除，回退模型估测", foreground="gray")
@@ -1051,6 +1062,12 @@ class CardEditTab(ttk.Frame):
                 conn.close()
                 return
             conn.commit()
+            if resolved and not self._card.get("resolved"):
+                try:
+                    from memory.memory_manager import _log_resolution
+                    _log_resolution(card_id, title, "card_edit_save", "console编辑面板手动划掉")
+                except Exception:
+                    pass
             # 内容或keywords改了 → 重算 embedding
             if content != (self._card.get("content") or "") or keywords != (self._card.get("keywords") or ""):
                 try:
@@ -1183,27 +1200,43 @@ class RecallFeedbackTab(ttk.Frame):
             self.stats_label.config(text="暂无检索记录")
             return
 
-        good = bad = 0
-        with open(self.TRACE_PATH, "r", encoding="utf-8") as f:
-            for line in f:
-                try:
-                    t = json.loads(line.strip())
-                    tid = t["trace_id"]
-                    self._traces[tid] = t
-                    cards = t.get("cards", [])
-                    for c in cards:
-                        if c.get("feedback") == "good":
-                            good += 1
-                        elif c.get("feedback") == "bad":
-                            bad += 1
-                    self.tree.insert("", 0, values=(
-                        t.get("ts", "")[:16],
-                        t.get("query", "")[:50],
-                        t.get("va_tier", "?"),
-                        len(cards)
-                    ), iid=tid)
-                except Exception:
-                    pass
+        good = bad = bad_lines = 0
+        try:
+            with open(self.TRACE_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        t = json.loads(line.strip())
+                        tid = t["trace_id"]
+                        self._traces[tid] = t
+                        cards = t.get("cards", [])
+                        for c in cards:
+                            if c.get("feedback") == "good":
+                                good += 1
+                            elif c.get("feedback") == "bad":
+                                bad += 1
+                        self.tree.insert("", 0, values=(
+                            t.get("ts", "")[:16],
+                            t.get("query", "")[:50],
+                            t.get("va_tier", "?"),
+                            len(cards)
+                        ), iid=tid)
+                    except json.JSONDecodeError as e:
+                        bad_lines += 1
+                        print(f"[feedback] JSON 解析失败 (行偏移={e.pos}): {line[:80]}", file=sys.stderr)
+                    except KeyError as e:
+                        bad_lines += 1
+                        print(f"[feedback] 缺少字段 {e}: {line[:80]}", file=sys.stderr)
+        except Exception as e:
+            import traceback as _tb
+            msg = f"[feedback] 读取 retrieval_traces.jsonl 失败:\n{_tb.format_exc()}"
+            print(msg, file=sys.stderr)
+            try:
+                messagebox.showerror("召回反馈异常", f"读取 trace 文件失败:\n{e}\n\n详情已打印到终端")
+            except Exception:
+                pass
+            self.stats_label.config(text=f"加载失败: {e}")
+            return
+
         self.stats_label.config(text=f"✓{good}张  ✗{bad}张  |  共{len(self._traces)}轮检索")
 
     def _on_select(self, event):
