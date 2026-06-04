@@ -772,7 +772,7 @@ class DiaryPersonaTab(ttk.Frame):
             angle = -math.pi / 2 + 2 * math.pi * i / n
             dr = r * val / 100
             pts.extend([cx + dr * math.cos(angle), cy + dr * math.sin(angle)])
-        canvas.create_polygon(pts, outline="#4caf50", fill="#4caf5080", width=2)
+        canvas.create_polygon(pts, outline="#536af5", fill="#d1d8ff", width=2)
         # 标签
         for i, name in enumerate(names):
             angle = -math.pi / 2 + 2 * math.pi * i / n

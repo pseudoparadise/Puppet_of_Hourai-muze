@@ -53,6 +53,12 @@ def review_card_popup(card_draft: dict, source_module: str, evidence: str = "") 
     else:
         root = tk.Tk()
 
+    is_ai = original_card.get("proposed_by") != "muze"
+    header_color = "#cc0000" if is_ai else "#536af5"
+    header_label = f"⚠ AI 自动写卡 — {source_module}" if is_ai else f"人工写卡 — {source_module}"
+    header_hint = "⚠ AI 提议，不审核等会儿补卡累死你" if is_ai else "不审核等会儿补卡累死你"
+    header_hint_color = "#ffcccc" if is_ai else "#d1d8ff"
+
     root.title(f"写卡审核 — {source_module}")
     root.attributes('-topmost', True)
     try:
@@ -64,12 +70,12 @@ def review_card_popup(card_draft: dict, source_module: str, evidence: str = "") 
     root.lift()
     root.focus_force()
 
-    header = tk.Frame(root, bg="#cc0000", height=42)
+    header = tk.Frame(root, bg=header_color, height=42)
     header.pack(fill=tk.X)
-    tk.Label(header, text=f"卡片审核 — {source_module}",
-             font=("Microsoft YaHei", 13, "bold"), fg="white", bg="#cc0000").pack(side=tk.LEFT, padx=15, pady=8)
-    tk.Label(header, text="不审核等会儿补卡累死你",
-             font=("Microsoft YaHei", 9), fg="#ffcccc", bg="#cc0000").pack(side=tk.RIGHT, padx=15, pady=8)
+    tk.Label(header, text=header_label,
+             font=("Microsoft YaHei", 13, "bold"), fg="white", bg=header_color).pack(side=tk.LEFT, padx=15, pady=8)
+    tk.Label(header, text=header_hint,
+             font=("Microsoft YaHei", 9), fg=header_hint_color, bg=header_color).pack(side=tk.RIGHT, padx=15, pady=8)
 
     if evidence:
         ev_frame = tk.LabelFrame(root, text="写卡依据", font=("Microsoft YaHei", 9, "bold"),
