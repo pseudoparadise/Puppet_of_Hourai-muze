@@ -23,6 +23,7 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "cards.db")
 COMPOSITE_THRESHOLD = 0.50
 TRANSITIVE_BONUS = 0.05  # 传递闭包降低的阈值
 LINK_K = 12
+MAX_LINKS_PER_CARD = 10
 
 LINK_CATEGORY_BLOCK = {
     ('deep_talks', 'erotic'), ('erotic', 'deep_talks'),
@@ -268,10 +269,17 @@ def build_links(card_id: str, vec: np.ndarray):
         return 0
     card_a = dict(card_row)
 
+    # 检查已有链接数，不超过上限
+    existing_count = conn.execute(
+        "SELECT COUNT(*) FROM card_links WHERE card_id_a=? OR card_id_b=?", (card_id, card_id)
+    ).fetchone()[0]
+    remaining = max(0, MAX_LINKS_PER_CARD - existing_count)
     created = 0
     now = datetime.now().isoformat()
 
     for faiss_id, l2_dist in zip(faiss_indices, faiss_distances):
+        if remaining <= 0:
+            break
         other_id = _int_id_to_str(int(faiss_id))
         if not other_id or other_id == card_id:
             continue
@@ -283,6 +291,13 @@ def build_links(card_id: str, vec: np.ndarray):
         if not other_row:
             continue
         card_b = dict(other_row)
+
+        # 对方也已满则跳过
+        other_count = conn.execute(
+            "SELECT COUNT(*) FROM card_links WHERE card_id_a=? OR card_id_b=?", (other_id, other_id)
+        ).fetchone()[0]
+        if other_count >= MAX_LINKS_PER_CARD:
+            continue
 
         cosine = float(1.0 - l2_dist ** 2 / 2.0)
         cosine = max(0.0, min(1.0, cosine))
@@ -297,6 +312,7 @@ def build_links(card_id: str, vec: np.ndarray):
 
         if _insert_link(conn, card_id, other_id, score, relation, direction, now):
             created += 1
+            remaining -= 1
             print(f"[link] {card_a['title']} <-> {card_b['title']} "
                   f"(score={score:.3f} cos={cosine:.3f} {relation} {direction})")
 
@@ -418,8 +434,11 @@ def rebuild_all_links():
     total = conn.execute("SELECT COUNT(*) FROM card_links WHERE manual=1").fetchone()[0]
     now = datetime.now().isoformat()
 
-    # 第一遍：直接建边
+    # 第一遍：直接建边（每卡最多 MAX_LINKS_PER_CARD 条）
+    per_card_count = {cid: 0 for cid in all_cards}
     for card_id, card_a in all_cards.items():
+        if per_card_count[card_id] >= MAX_LINKS_PER_CARD:
+            continue
         vec = np.frombuffer(card_a["embedding"], dtype=np.float32)
 
         neighbors = index.search(vec.reshape(1, -1).astype(np.float32), LINK_K + 1)
@@ -429,6 +448,10 @@ def rebuild_all_links():
         for faiss_id, l2_dist in zip(faiss_indices, faiss_distances):
             other_id = _int_id_to_str(int(faiss_id))
             if not other_id or other_id == card_id:
+                continue
+            if per_card_count[card_id] >= MAX_LINKS_PER_CARD:
+                break
+            if per_card_count.get(other_id, 0) >= MAX_LINKS_PER_CARD:
                 continue
             card_b = all_cards.get(other_id)
             if not card_b:
@@ -447,6 +470,8 @@ def rebuild_all_links():
 
             if _insert_link(conn, card_id, other_id, score, relation, direction, now):
                 total += 1
+                per_card_count[card_id] += 1
+                per_card_count[other_id] = per_card_count.get(other_id, 0) + 1
 
     # 第二遍：传递闭包补边
     chain_edges = _apply_transitive_closure(conn, all_cards, now)
