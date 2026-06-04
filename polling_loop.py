@@ -14,6 +14,13 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
+if not os.path.exists(os.path.join(PROJECT_ROOT, "bark_trigger.py")):
+    print(f"[polling_loop] 致命错误：找不到 bark_trigger.py")
+    print(f"  PROJECT_ROOT = {PROJECT_ROOT}")
+    print(f"  cwd = {os.getcwd()}")
+    print(f"  请从项目根目录启动，或检查启动脚本的 working directory 设置")
+    sys.exit(1)
+
 from clock import beijing_now, beijing_today, beijing_yesterday
 
 INTERVAL_MINUTES = 5
@@ -37,11 +44,24 @@ def _log_event(event_type: str, extra: dict = None):
 
 
 def _ensure_diary(chain_dream, reason: str = "scheduled"):
-    """确保昨天（北京时间）的日记已生成。无文件则调用 chain_dream。"""
+    """确保昨天（北京时间）的日记已生成且包含全天工位日志。"""
     yesterday = beijing_yesterday()
     diary_path = os.path.join(PROJECT_ROOT, "diary", f"{yesterday}.md")
+    work_path = os.path.join(PROJECT_ROOT, "diary", "work", f"{yesterday}_work.md")
+
+    need_regenerate = False
     if not os.path.exists(diary_path):
-        print(f"[每日日记] {reason} — {yesterday} 日记不存在，立即生成...")
+        need_regenerate = True
+    elif reason == "scheduled" and os.path.exists(work_path):
+        # 零点定时触发时，如果工位日志比日记新，说明白天日记生成后有新工作，重生成
+        diary_mtime = os.path.getmtime(diary_path)
+        work_mtime = os.path.getmtime(work_path)
+        if work_mtime > diary_mtime:
+            need_regenerate = True
+            print(f"[每日日记] 工位日志晚于日记，重新生成以包含全天工作...")
+
+    if need_regenerate:
+        print(f"[每日日记] {reason} — {yesterday} 生成中...")
         _log_event("diary_scheduled", {"reason": reason, "date": yesterday})
         try:
             chain_dream(yesterday)
@@ -509,6 +529,29 @@ def main():
         # ── 待办提醒扫描 ──
         _check_todo_reminders(beijing_now())
 
+        # ── Proactive gate：健康/位置 主动推送 ──
+        try:
+            from proactive_gate import check_proactive
+            ptitle, pbody = check_proactive()
+            if ptitle:
+                config_path = os.path.join(PROJECT_ROOT, "config.json")
+                if os.path.exists(config_path):
+                    with open(config_path, "r", encoding="utf-8") as _pf:
+                        cfg = json.load(_pf)
+                    bark_key = cfg.get("global", {}).get("bark_device_key", "")
+                    if bark_key and bark_key != "你的BarkKey填这里":
+                        import requests as _req_p
+                        try:
+                            _req_p.get(f"https://api.day.app/{bark_key}/{ptitle}/{pbody}", timeout=10)
+                            _log_event("proactive_push", {"title": ptitle})
+                            from shared import record_bark_push
+                            record_bark_push(f"{ptitle} — {pbody}")
+                            print(f"[Proactive] {ptitle} — {pbody}")
+                        except Exception as _pe:
+                            print(f"[Proactive] Bark推送失败: {_pe}")
+        except Exception as _pg:
+            print(f"[Proactive] gate检查异常: {_pg}")
+
         # 倒计时：消除累积漂移，精确 5 分钟间隔
         elapsed = time.time() - now_ts
         remaining = max(0, INTERVAL_MINUTES * 60 - elapsed)
@@ -522,4 +565,6 @@ def main():
 
 
 if __name__ == "__main__":
+    from crash_reporter import install
+    install()
     main()

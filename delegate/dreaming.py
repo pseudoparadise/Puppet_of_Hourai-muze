@@ -39,42 +39,47 @@ def _parse_utc_ts(ts_str: str) -> datetime | None:
 
 def _get_digest_for_date(target_date: str):
     """
-    读取 chat_logs.json，筛选北京时间 target_date 当天的对话。
-    北京时间 D 日 = UTC(D-1 16:00) ~ UTC(D 16:00)。
+    读取 chat_logs.json + chat_logs_work.json + work_log，
+    筛选北京时间 target_date 当天的全部内容。
     返回 (digest_text | None, target_date)。
     """
     from datetime import timezone as _tz
-    chat_log_path = os.path.join(os.path.dirname(__file__), "..", "chat_logs.json")
-    if not os.path.exists(chat_log_path):
-        return None, target_date
-
-    entries = []
-    with open(chat_log_path, "r", encoding="utf-8") as f:
-        for line in f:
-            try:
-                entries.append(json.loads(line.strip()))
-            except Exception:
-                pass
-
-    if not entries:
-        return None, target_date
-
+    base = os.path.dirname(__file__)
     lines = []
-    for entry in entries:
-        ts_str = entry.get("timestamp", "")
-        dt = _parse_utc_ts(ts_str)
-        if dt is None:
+
+    # 1. 家模式 chat_logs.json
+    for log_file in ["chat_logs.json", "chat_logs_work.json"]:
+        log_path = os.path.join(base, "..", log_file)
+        if not os.path.exists(log_path):
             continue
-        # 转为北京时间，判断是否属于 target_date
-        bj_dt = dt.astimezone(_tz(timedelta(hours=8)))
-        if bj_dt.strftime("%Y-%m-%d") != target_date:
-            continue
-        role = "我" if entry.get("role") == "ghost" else "她"
-        lines.append(f"{role}: {entry.get('content', '')}")
+        with open(log_path, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    entry = json.loads(line.strip())
+                    ts_str = entry.get("timestamp", "")
+                    dt = _parse_utc_ts(ts_str)
+                    if dt is None: continue
+                    bj_dt = dt.astimezone(_tz(timedelta(hours=8)))
+                    if bj_dt.strftime("%Y-%m-%d") != target_date: continue
+                    role = "我" if entry.get("role") == "ghost" else "她"
+                    prefix = "[工位]" if log_file == "chat_logs_work.json" else ""
+                    lines.append(f"{prefix}{role}: {entry.get('content', '')}")
+                except Exception:
+                    pass
+
+    # 2. work_log 工位任务记录
+    work_path = os.path.join(base, "..", "diary", "work", f"{target_date}_work.md")
+    if os.path.exists(work_path):
+        lines.append("--- 今日工位任务 ---")
+        with open(work_path, "r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped:
+                    lines.append(stripped)
 
     if not lines:
         return None, target_date
-    return "\n".join(lines[-50:]), target_date
+    return "\n".join(lines[-80:]), target_date
 
 def _update_rolling_summary(new_summary: str, date_str: str = None):
     """追加/更新滚动总结，并压缩为一段精炼文本（≤500字）。"""
@@ -125,18 +130,31 @@ def _update_rolling_summary(new_summary: str, date_str: str = None):
     from delegate_tools import atomic_write_text
     atomic_write_text(ROLLING_SUMMARY_PATH, raw + "\n")
 
-def _append_pending_card(card: dict):
-    """将卡片草稿写入 pending_cards.json（毒点5修复 — 委托 delegate_tools.atomic_write_json）"""
+def _append_pending_card(card: dict, source_module: str = "dreaming.py", evidence: str = ""):
+    """将卡片草稿写入 pending_cards.json — 强制弹窗审核后方可写入"""
     from shared import is_garbage_card
     reason = is_garbage_card(card.get("title", ""), card.get("content", ""))
     if reason:
         print(f"[dreaming] 拦截: {reason}")
         return
 
+    # ── 强制弹窗审核 ──
+    try:
+        from card_review_popup import review_card_popup
+        evidence_text = evidence or card.get("content", "")[:300]
+        reviewed = review_card_popup(dict(card), source_module, evidence_text)
+        if reviewed is None:
+            print(f"[dreaming] 人类拒绝「{card.get('title','')}」")
+            return
+        card = reviewed
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise RuntimeError(f"[dreaming审核弹窗失败] title={card.get('title','')}: {e}")
+
     from delegate_tools import atomic_write_json
     from shared import load_json_safe
     pending = load_json_safe(PENDING_CARDS_PATH, default=[], label="dreaming")
-    # ── 预存 embedding 向量，供 card_guard 去重直接比对 ──
     if '_embed_vec' not in card:
         try:
             from encoder import embed as _embed_dream
@@ -320,13 +338,17 @@ def chain_dream(target_date: str = None):
             arousal_val = va_result.get("arousal", 0.5)
         except Exception:
             chord_val, valence_val, arousal_val = "", 0.0, 0.5
+        safe_title = card_json.get("title", "auto").replace(" ", "_").replace("/", "_")[:60]
+        cat = card_json.get("category", "interaction")
+        draft_type = "event" if cat in ("milestone", "turning_points", "commitments") else "fact"
         card_draft = {
-            "id": card_json.get("id", f"{_now4().strftime('%Y%m%d')}_auto"),
+            "id": f"{_now4().strftime('%Y%m%d')}_{safe_title}",
             "title": card_json.get("title", ""),
             "content": card_json.get("content", ""),
             "keywords": card_json.get("keywords", ""),
-            "importance": max(card_json.get("importance", 5), 8) if card_json.get("category", "interaction") in {'deep_talks', 'milestone', 'turning_points'} else card_json.get("importance", 5),
-            "category": card_json.get("category", "interaction"),
+            "importance": max(card_json.get("importance", 5), 8) if cat in {'deep_talks', 'milestone', 'turning_points'} else card_json.get("importance", 5),
+            "category": cat,
+            "type": card_json.get("type", draft_type),
             "proposed_by": "dreaming",
             "proposed_at": _now4().isoformat(),
             "review_status": "pending",
@@ -334,7 +356,8 @@ def chain_dream(target_date: str = None):
             "valence": valence_val,
             "arousal": arousal_val
         }
-        _append_pending_card(card_draft)
+        dream_evidence = f"今日总结：\n{summary}\n\n完整对话摘要：\n{digest}"
+        _append_pending_card(card_draft, "dreaming.py（做梦链）", dream_evidence[:500])
         result["step3"] = card_draft
         print(f"[dreaming] 卡片草稿已写入 pending_cards.json: {card_draft['id']}")
     else:
@@ -451,5 +474,7 @@ def weekly_sweep():
 
 
 if __name__ == "__main__":
+    from crash_reporter import install
+    install()
     chain_dream()
     print("OK - dreaming.py 就绪")

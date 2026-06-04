@@ -248,7 +248,8 @@ def _safe_parse_ts(val):
 
 
 def _build_candidate_pool(all_cards: list, anchor_ids: set, va_tier: str,
-                          va_description: str = None, candidate_limit: int = 50) -> list:
+                          va_description: str = None, va_valence: float = None,
+                          candidate_limit: int = 50) -> list:
     """
     构建语义搜索候选池，复杂度从 O(N) 降为 O(K)。
     优先级：锚定集 > VA分档筛选 > 水之共鸣描述匹配
@@ -287,13 +288,19 @@ def _build_candidate_pool(all_cards: list, anchor_ids: set, va_tier: str,
             if card.get('category') in DEEP_CATEGORIES:
                 include = True
         else:
-            # ── 中唤醒：采样非锚定卡，深层卡不受 resolved 限制 ──
+            # ── 中唤醒：开心时日常卡无门槛入池，伤心/中性时保持严格过滤 ──
             if card.get('category') in DEEP_CATEGORIES:
-                include = True  # 深层卡始终进入候选池（已解决的创伤卡也需能被召回）
-            elif card.get('category') in DAILY_CATEGORIES and card.get('usage_count', 0) >= 1:
-                include = True  # 日活卡至少被用过1次的进候选
+                include = True
+            elif card.get('category') in DAILY_CATEGORIES:
+                if va_valence is not None and va_valence < 0:
+                    # 伤心/中性：严格过滤，只放有使用记录的
+                    if card.get('usage_count', 0) >= 1:
+                        include = True
+                else:
+                    # 开心 或 VA不可用：日常卡无门槛入池
+                    include = True
             elif card.get('importance', 5) >= 6:
-                include = True  # 高重要性卡给机会
+                include = True
         if include:
             pool.append(card)
             seen_ids.add(card['id'])
@@ -345,6 +352,9 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
     # ── 分类自适应关键词权重：口癖类↑ 深层类↓ ──
     kw_boost = CATEGORY_KW_BOOST.get(card.get("category", ""), 1.0)
     keyword_score *= kw_boost
+    # ── type 分层权重：moment > quote > event > fact > insight > reflection ──
+    type_boost = {"moment": 1.3, "quote": 1.25, "event": 1.15, "fact": 1.0, "insight": 1.05, "reflection": 1.0}
+    type_mult = type_boost.get(card.get("type", "fact"), 1.0)
     semantic_score = dist_sigmoid * w["w_semantic"]
     importance_score = card.get("importance", 5) * w["w_importance"]
 
@@ -531,7 +541,7 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
         fire_burst + water_smooth + growth_bonus + chord_harvest +
         treasure_bonus
         - presence_repetition_penalty - frequency_penalty
-    ) * resolved_penalty
+    ) * resolved_penalty * type_mult
 
 
 def retrieve(query: str, top_k: int = 3, weights: dict = None,
@@ -568,7 +578,7 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
     effective_weights = copy.deepcopy(w)
     effective_k = top_k
     diversity_enabled = w.get("diversity_enabled", True)
-    semantic_k_mult = 3  # search_index k 倍数
+    semantic_k_mult = 5  # search_index k 倍数
 
     if va_description:
         effective_weights['_va_description'] = va_description
@@ -696,48 +706,8 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
 
     query_lower = query.lower()
 
-    # ── 口癖自动召回：命中口癖卡关键词 → 用 cached query vec + DB embedding 余弦 → 置顶 1 张 ──
-    tic_candidates = []
-    for card in all_cards:
-        title = card.get('title', '')
-        if not (title.startswith('口癖') or title.startswith('梗')):
-            continue
-        kws = [kw.strip().lower() for kw in card.get("keywords", "").split(",") if kw.strip()]
-        if not kws:
-            continue
-        if any(kw in query_lower for kw in kws):
-            tic_candidates.append(card)
-    if tic_candidates:
-        _tic_vec = getattr(retrieve, '_cached_query_vec', None)
-        if _tic_vec is None:
-            _tic_vec = embed(query)
-            retrieve._cached_query_vec = _tic_vec
-        _best_tic_id, _best_tic_sim = None, 0.0
-        for _tc in tic_candidates:
-            try:
-                c.execute("SELECT embedding FROM cards WHERE id=?", (_tc['id'],))
-                _tc_row = c.fetchone()
-                if _tc_row and _tc_row[0]:
-                    _tc_vec = np.frombuffer(_tc_row[0], dtype=np.float32)
-                    _tc_dot = np.dot(_tic_vec, _tc_vec)
-                    _tc_norm = np.linalg.norm(_tic_vec) * np.linalg.norm(_tc_vec)
-                    _tc_sim = float(_tc_dot / _tc_norm) if _tc_norm > 0 else 0.0
-                    if _tc_sim > _best_tic_sim:
-                        _best_tic_sim = _tc_sim
-                        _best_tic_id = _tc['id']
-                        _best_tic = _tc
-            except Exception:
-                pass
-        if _best_tic_id and _best_tic_sim > 0.30:
-            forced_ids.add(_best_tic_id)
-            print(f"[口癖召回] 「{_best_tic['title']}」cos={_best_tic_sim:.3f} → 强制置顶")
-
     keyword_hits = []
     for card in all_cards:
-        # 口癖/梗卡只走口癖扫描器，不走通用关键词
-        _title = card.get('title', '')
-        if _title.startswith('口癖') or _title.startswith('梗'):
-            continue
         kws = [kw.strip().lower() for kw in card.get("keywords", "").split(",") if kw.strip()]
         hit_count = sum(1 for kw in kws if kw in query_lower)
         if hit_count > 0:
@@ -745,9 +715,14 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
             card["distance"] = 1.0
             card["score"] = _score_card(card, hit_count, 1.0, effective_weights, anchor_ids, va_tier)
             keyword_hits.append(card)
+            # 口癖/梗卡：关键词命中 → 给 bonus，不看 ID 前缀
+            _title = card.get('title', '')
+            if '口癖' in _title or '梗' in _title:
+                card['score'] += 3.0
+                print(f"[口癖召回] 「{_title}」关键词命中 → +3.0 bonus (score={card['score']:.1f})")
 
     # ── EL-4: 虫洞跳跃 — 构建候选池，语义搜索仅限候选池内 ──
-    candidate_pool = _build_candidate_pool(all_cards, anchor_ids, va_tier, va_description)
+    candidate_pool = _build_candidate_pool(all_cards, anchor_ids, va_tier, va_description, va_valence)
     candidate_ids = {c["id"] for c in candidate_pool}
 
     semantic_hits = []
@@ -759,7 +734,7 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
                 retrieve._cached_query_vec = query_vec
             index = load_index()
             if index.ntotal > 0:
-                candidates = search_index(index, query_vec, k=min(10, max(effective_k * semantic_k_mult, 5)))
+                candidates = search_index(index, query_vec, k=max(effective_k * semantic_k_mult, 5))
                 keyword_ids = {c["id"] for c in keyword_hits}
                 for cid, dist in candidates:
                     if cid in keyword_ids:
@@ -791,7 +766,10 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
 
     # ── 硬编码召回：触发关键词 → 强制置顶对应卡片，无视评分 ──
     for fid in forced_ids:
-        if fid not in seen:
+        if fid in seen:
+            seen[fid]["score"] = 99.0
+            print(f"[强制召回] {seen[fid].get('title', fid)} 分数拉满置顶")
+        else:
             try:
                 conn = sqlite3.connect(db_path)
                 conn.row_factory = sqlite3.Row
@@ -1065,3 +1043,122 @@ def _write_retrieval_trace(query: str, va_tier: str, cards: list):
             _mb_trace.showerror("retriever trace 异常", f"写入 retrieval_traces.jsonl 失败:\n{e}")
         except Exception:
             pass
+
+
+# ── 反馈系统：召回反馈面板使用的 API ──
+
+_WEIGHTS_PATH = os.path.join(os.path.dirname(__file__), "retrieval_weights.json")
+_TRACE_PATH = os.path.join(os.path.dirname(__file__), "retrieval_traces.jsonl")
+
+_WEIGHT_KEYS = ["w_keyword", "w_semantic", "w_importance", "w_anchor",
+                "w_diffusion", "w_recency", "w_decay", "w_va", "w_fire", "w_water"]
+
+
+def _load_weights() -> dict:
+    if os.path.exists(_WEIGHTS_PATH):
+        try:
+            with open(_WEIGHTS_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_weights(w: dict):
+    from delegate_tools import atomic_write_json
+    atomic_write_json(_WEIGHTS_PATH, w)
+
+
+def get_effective_weights() -> dict:
+    """返回当前有效权重（SCORING_CONFIG + 人工反馈微调）。"""
+    stored = _load_weights()
+    effective = dict(SCORING_CONFIG)
+    for k in _WEIGHT_KEYS:
+        if k in stored:
+            effective[k] = stored[k]
+        else:
+            effective[k] = SCORING_CONFIG.get(k, 0)
+    return {k: round(v, 3) for k, v in effective.items() if k.startswith("w_")}
+
+
+def record_feedback(trace_id: str, card_id: str, is_good: bool):
+    """在 retrieval_traces.jsonl 中标记某张卡的反馈。"""
+    if not os.path.exists(_TRACE_PATH):
+        return
+    lines = []
+    updated = False
+    with open(_TRACE_PATH, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                entry = json.loads(line.strip())
+                if entry.get("trace_id") == trace_id:
+                    for c in entry.get("cards", []):
+                        if c.get("id") == card_id:
+                            c["feedback"] = "good" if is_good else "bad"
+                            updated = True
+                            break
+                lines.append(json.dumps(entry, ensure_ascii=False))
+            except Exception:
+                lines.append(line.strip())
+    if updated:
+        with open(_TRACE_PATH, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        print(f"[retriever] 反馈已记录: trace={trace_id} card={card_id} {'✓' if is_good else '✗'}")
+
+
+def apply_feedback_adjustments() -> dict:
+    """汇总所有反馈，微调探针权重。返回 {'good': N, 'bad': N}。"""
+    if not os.path.exists(_TRACE_PATH):
+        return {"good": 0, "bad": 0}
+
+    good_cards = []
+    bad_cards = []
+
+    with open(_TRACE_PATH, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                entry = json.loads(line.strip())
+            except Exception:
+                continue
+            for c in entry.get("cards", []):
+                fb = c.get("feedback", "")
+                probes = c.get("probes", {})
+                if fb == "good":
+                    good_cards.append(probes)
+                elif fb == "bad":
+                    bad_cards.append(probes)
+
+    if not good_cards and not bad_cards:
+        return {"good": 0, "bad": 0}
+
+    deltas = {k: 0.0 for k in _WEIGHT_KEYS}
+
+    for probes in good_cards:
+        sorted_probes = sorted(
+            [(k, v) for k, v in probes.items() if k in _WEIGHT_KEYS],
+            key=lambda x: x[1], reverse=True
+        )
+        for k, v in sorted_probes[:3]:
+            if v > 0:
+                deltas[k] += 0.015
+
+    for probes in bad_cards:
+        sorted_probes = sorted(
+            [(k, v) for k, v in probes.items() if k in _WEIGHT_KEYS],
+            key=lambda x: x[1], reverse=True
+        )
+        for k, v in sorted_probes[:3]:
+            if v > 0:
+                deltas[k] -= 0.02
+
+    stored = _load_weights()
+    for k in _WEIGHT_KEYS:
+        base = stored.get(k, SCORING_CONFIG.get(k, 0))
+        adjusted = base + deltas[k]
+        lo = SCORING_CONFIG.get(k, 0) * 0.3
+        hi = SCORING_CONFIG.get(k, 0) * 3.0
+        stored[k] = round(max(lo, min(hi, adjusted)), 3)
+
+    _save_weights(stored)
+    print(f"[retriever] 权重微调完成: ✓{len(good_cards)}张 ✗{len(bad_cards)}张 → {get_effective_weights()}")
+    return {"good": len(good_cards), "bad": len(bad_cards)}

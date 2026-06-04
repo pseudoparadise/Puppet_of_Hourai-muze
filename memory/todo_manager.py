@@ -42,7 +42,8 @@ class TodoManager:
         toolbar.pack(fill=tk.X, padx=5, pady=5)
         ttk.Button(toolbar, text="刷新", command=self.load_todos).pack(side=tk.LEFT, padx=3)
         ttk.Button(toolbar, text="标记完成", command=self.resolve_selected).pack(side=tk.LEFT, padx=3)
-        ttk.Button(toolbar, text="查看卡片详情", command=self.show_card_detail).pack(side=tk.LEFT, padx=3)
+        ttk.Button(toolbar, text="踢出待办", command=self.kick_from_todo).pack(side=tk.LEFT, padx=3)
+        ttk.Button(toolbar, text="查看详情", command=self.show_card_detail).pack(side=tk.LEFT, padx=3)
         # 自动刷新
         self.auto_refresh = tk.BooleanVar(value=False)
         ttk.Checkbutton(toolbar, text="30s自动刷新", variable=self.auto_refresh,
@@ -63,8 +64,9 @@ class TodoManager:
         self.status_label.pack(side=tk.RIGHT, padx=10)
 
         # Treeview
-        columns = ("quadrant", "title", "status", "source", "category", "deadline", "importance", "chord")
+        columns = ("人", "quadrant", "title", "status", "source", "category", "deadline", "importance", "chord")
         self.tree = ttk.Treeview(self.parent_frame, columns=columns, show="headings", selectmode="browse")
+        self.tree.heading("人", text="人", command=lambda: self.sort_by("人"))
         self.tree.heading("quadrant", text="象限", command=lambda: self.sort_by("quadrant"))
         self.tree.heading("title", text="标题", command=lambda: self.sort_by("title"))
         self.tree.heading("status", text="状态", command=lambda: self.sort_by("status"))
@@ -74,8 +76,9 @@ class TodoManager:
         self.tree.heading("importance", text="重要度", command=lambda: self.sort_by("importance"))
         self.tree.heading("chord", text="和弦", command=lambda: self.sort_by("chord"))
 
+        self.tree.column("人", width=25, anchor=tk.CENTER)
         self.tree.column("quadrant", width=85)
-        self.tree.column("title", width=220)
+        self.tree.column("title", width=200)
         self.tree.column("status", width=55)
         self.tree.column("source", width=45)
         self.tree.column("category", width=70)
@@ -88,6 +91,7 @@ class TodoManager:
         # 右键菜单
         self.context_menu = tk.Menu(self.parent_frame, tearoff=0)
         self.context_menu.add_command(label="标记完成", command=self.resolve_selected)
+        self.context_menu.add_command(label="踢出待办", command=self.kick_from_todo)
         self.context_menu.add_separator()
         self.context_menu.add_command(label="查看详情", command=self.show_card_detail)
         self.tree.bind("<Button-3>", self.show_context_menu)
@@ -121,7 +125,8 @@ class TodoManager:
             ch = t['chord'] if t['chord'] else "—"
             source = "📅" if t.get('synced_from') == 'diary' else "💬"
             status = "⏳待审核" if t.get('status') == 'pending' else ""
-            values = (t['quadrant'], t['title'], status, source, t['category'], td, t['importance'], ch)
+            human_mark = "✍" if t.get('human_touched') else ""
+            values = (human_mark, t['quadrant'], t['title'], status, source, t['category'], td, t['importance'], ch)
             item = self.tree.insert("", tk.END, values=values)
             # 配色：pending 用浅黄色
             if t.get('status') == 'pending':
@@ -158,8 +163,7 @@ class TodoManager:
             self.status_label.config(text="请先点选一项")
             return
         values = self.tree.item(sel[0])['values']
-        title = values[1]
-        # 从 todos 中找到匹配的卡片
+        title = values[2]
         match = [t for t in self.todos if t['title'] == title]
         if not match:
             return
@@ -172,12 +176,59 @@ class TodoManager:
         else:
             self.status_label.config(text="标记失败，请检查卡片状态")
 
+    def kick_from_todo(self):
+        sel = self.tree.selection()
+        if not sel:
+            self.status_label.config(text="请先点选一项")
+            return
+        values = self.tree.item(sel[0])['values']
+        title = values[2]
+        match = [t for t in self.todos if t['title'] == title]
+        if not match:
+            return
+        card = match[0]
+        if not messagebox.askyesno("踢出待办",
+            f"将此卡踢出待办池（分类 {card['category']} → interaction）？\n\n"
+            f"{card['title']}\n{card['quadrant']}\n\n"
+            f"卡片不会被删除，仅从待办象限中移除。"):
+            return
+
+        if card.get('status') == 'pending':
+            self._kick_pending(card)
+        else:
+            self._kick_final(card)
+        self.load_todos()
+
+    def _kick_pending(self, card):
+        pending_path = os.path.join(os.path.dirname(__file__), "pending_cards.json")
+        if not os.path.exists(pending_path):
+            return
+        try:
+            with open(pending_path, "r", encoding="utf-8") as f:
+                pending = json.load(f)
+        except Exception:
+            return
+        for pc in pending:
+            if pc.get("id") == card["id"]:
+                pc["category"] = "interaction"
+                break
+        from delegate_tools import atomic_write_json
+        atomic_write_json(pending_path, pending)
+        self.status_label.config(text=f"已踢出: {card['title'][:30]}")
+
+    def _kick_final(self, card):
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("UPDATE cards SET category='interaction', human_touched=1 WHERE id=?", (card["id"],))
+        conn.commit()
+        conn.close()
+        self.status_label.config(text=f"已踢出: {card['title'][:30]}")
+
     def show_card_detail(self):
         sel = self.tree.selection()
         if not sel:
             return
         values = self.tree.item(sel[0])['values']
-        title = values[1]
+        title = values[2]
         match = [t for t in self.todos if t['title'] == title]
         if not match:
             return
@@ -239,7 +290,8 @@ class TodoManager:
             ch = t['chord'] if t['chord'] else "—"
             source = "📅" if t.get('synced_from') == 'diary' else "💬"
             status = "⏳待审核" if t.get('status') == 'pending' else ""
-            values = (t['quadrant'], t['title'], status, source, t['category'], td, t['importance'], ch)
+            human_mark = "✍" if t.get('human_touched') else ""
+            values = (human_mark, t['quadrant'], t['title'], status, source, t['category'], td, t['importance'], ch)
             item = self.tree.insert("", tk.END, values=values)
             if t.get('status') == 'pending':
                 self.tree.tag_configure('pending', background='#fffacd', foreground='#cc8800')

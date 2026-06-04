@@ -297,7 +297,7 @@ def get_todo_list() -> list:
     try:
         c = conn.cursor()
         c.execute("""
-            SELECT id, title, category, importance, target_date, chord, valence, arousal, resolved, COALESCE(synced_from,'') as synced_from
+            SELECT id, title, category, importance, target_date, chord, valence, arousal, resolved, COALESCE(synced_from,'') as synced_from, COALESCE(human_touched,0) as human_touched
             FROM cards
             WHERE review_status='final' AND resolved=0
               AND category IN ('todo', 'commitments', 'daily_life')
@@ -308,7 +308,7 @@ def get_todo_list() -> list:
         rows = c.fetchall()
         todos = []
         for row in rows:
-            cid, title, cat, imp, td, chord, val, aro, res, synced_from = row
+            cid, title, cat, imp, td, chord, val, aro, res, synced_from, human_touched = row
             # 艾森豪威尔分类
             now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
             if imp >= 8:
@@ -336,6 +336,7 @@ def get_todo_list() -> list:
                 "chord": chord or "", "valence": val, "arousal": aro,
                 "quadrant": quad, "resolved": bool(res),
                 "synced_from": synced_from or "",
+                "human_touched": bool(human_touched),
             })
         return todos
     except Exception as e:
@@ -417,6 +418,7 @@ def get_pending_todos() -> list:
             "resolved": False,
             "synced_from": "",
             "status": "pending",
+            "human_touched": bool(pc.get("human_touched", 0)),
         })
     return todos
 

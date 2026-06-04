@@ -5,6 +5,8 @@ CREATE TABLE IF NOT EXISTS cards (
     keywords TEXT NOT NULL DEFAULT '',
     embedding BLOB,
     importance INTEGER NOT NULL DEFAULT 5 CHECK(importance BETWEEN 1 AND 10),
+    type TEXT NOT NULL DEFAULT 'fact'
+        CHECK(type IN ('fact','event','quote','moment','insight','reflection')),
     category TEXT NOT NULL DEFAULT 'interaction'
         CHECK(category IN (
             'milestone','commitments','turning_points','deep_talks',
@@ -21,6 +23,7 @@ CREATE TABLE IF NOT EXISTS cards (
     arousal REAL NOT NULL DEFAULT 0.5,
     chord TEXT NOT NULL DEFAULT '',
     target_date TEXT,
+    human_touched INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

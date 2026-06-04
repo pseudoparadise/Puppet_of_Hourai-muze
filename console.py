@@ -2,9 +2,14 @@
 console.py — phantom-trigger 统一控制台
 用法: python console.py
 """
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+_sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), "memory"))
+from crash_reporter import install as _install_crash
+_install_crash()
+
 import json
-import os
-import sys
+import sys, os
 import time
 import socket
 import sqlite3
@@ -12,9 +17,6 @@ import subprocess
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime, timedelta, timezone
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "memory"))
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(PROJECT_ROOT, "memory", "cards.db")
@@ -656,9 +658,38 @@ class DiaryPersonaTab(ttk.Frame):
             self.diary_list.insert(tk.END, f"(错误: {e})")
 
         # ── Persona ──
-        right_frame = ttk.LabelFrame(self, text="Persona / 基座", padding=5)
+        right_frame = ttk.LabelFrame(self, text="Persona / 维度", padding=5)
         right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=5, pady=5)
 
+        # 维度雷达 + 滑块区
+        dim_frame = ttk.LabelFrame(right_frame, text="7维画像", padding=5)
+        dim_frame.pack(fill=tk.BOTH, expand=True, pady=3)
+
+        self.radar_canvas = tk.Canvas(dim_frame, width=220, height=220, bg="#fafafa", highlightthickness=0)
+        self.radar_canvas.pack(side=tk.LEFT, padx=5)
+
+        self.dim_vars = {}
+        slider_frame = ttk.Frame(dim_frame)
+        slider_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        for name in ["幽默", "温情", "包容", "创造力", "直率", "严肃", "任务导向"]:
+            row = ttk.Frame(slider_frame)
+            row.pack(fill=tk.X, pady=1)
+            ttk.Label(row, text=name, width=6, anchor=tk.W).pack(side=tk.LEFT)
+            var = tk.IntVar(value=50)
+            ttk.Scale(row, from_=0, to=100, variable=var, orient=tk.HORIZONTAL,
+                      command=lambda v, n=name: self._on_slider(n, int(float(v)))).pack(side=tk.LEFT, fill=tk.X, expand=True)
+            ttk.Label(row, textvariable=var, width=3).pack(side=tk.LEFT)
+            self.dim_vars[name] = var
+
+        dim_btn_row = ttk.Frame(dim_frame)
+        dim_btn_row.pack(fill=tk.X, pady=(5, 0))
+        ttk.Button(dim_btn_row, text="保存维度", command=self._save_dimensions).pack(side=tk.LEFT, padx=2)
+        ttk.Button(dim_btn_row, text="从选中日记校准", command=self._calibrate_from_diary).pack(side=tk.LEFT, padx=2)
+        ttk.Button(dim_btn_row, text="自动校准(7天)", command=self._auto_calibrate).pack(side=tk.LEFT, padx=2)
+
+        self._load_dimensions()
+
+        # 基座人格
         persona_files = [
             ("动态人格", os.path.join(PROJECT_ROOT, "persona", "prompt_v1.txt")),
             ("基座人格", os.path.join(PROJECT_ROOT, "persona", "prompt_v1_base.txt")),
@@ -666,11 +697,11 @@ class DiaryPersonaTab(ttk.Frame):
         for label, path in persona_files:
             frm = ttk.LabelFrame(right_frame, text=label, padding=5)
             frm.pack(fill=tk.BOTH, expand=True, pady=3)
-            txt = tk.Text(frm, height=6, wrap=tk.WORD)
+            txt = tk.Text(frm, height=4, wrap=tk.WORD)
             txt.pack(fill=tk.BOTH, expand=True)
             if os.path.exists(path):
                 with open(path, "r", encoding="utf-8") as f:
-                    content = f.read()[:2000]
+                    content = f.read()[:1500]
                 txt.insert(tk.END, content)
             else:
                 txt.insert(tk.END, "(文件不存在)")
@@ -689,6 +720,110 @@ class DiaryPersonaTab(ttk.Frame):
         self.roll_txt = tk.Text(roll_frame, height=4, wrap=tk.WORD)
         self.roll_txt.pack(fill=tk.BOTH, expand=True)
         self._load_rolling()
+
+    def _load_dimensions(self):
+        try:
+            from persona.dimensions import get_dimensions
+            dims = get_dimensions()
+            for d in dims:
+                name = d["name"]
+                if name in self.dim_vars:
+                    self.dim_vars[name].set(d["value"])
+            self._draw_radar()
+        except Exception as e:
+            print(f"[console] 加载维度失败: {e}")
+
+    def _save_dimensions(self):
+        try:
+            from persona.dimensions import set_dimension
+            for name, var in self.dim_vars.items():
+                set_dimension(name, var.get())
+            self._draw_radar()
+            messagebox.showinfo("保存", "维度已保存到 state.json")
+        except Exception as e:
+            messagebox.showerror("保存失败", str(e))
+
+    def _on_slider(self, name, value):
+        self._draw_radar()
+
+    def _draw_radar(self):
+        import math
+        canvas = self.radar_canvas
+        canvas.delete("all")
+        names = ["幽默", "温情", "包容", "创造力", "直率", "严肃", "任务导向"]
+        n = len(names)
+        cx, cy, r = 110, 110, 85
+        # 背景网格
+        for level in range(1, 6):
+            lr = r * level / 5
+            pts = []
+            for i in range(n):
+                angle = -math.pi / 2 + 2 * math.pi * i / n
+                pts.extend([cx + lr * math.cos(angle), cy + lr * math.sin(angle)])
+            canvas.create_polygon(pts, outline="#ddd", fill="", width=1)
+        # 轴线
+        for i in range(n):
+            angle = -math.pi / 2 + 2 * math.pi * i / n
+            canvas.create_line(cx, cy, cx + r * math.cos(angle), cy + r * math.sin(angle), fill="#ddd")
+        # 数据多边形
+        pts = []
+        for i, name in enumerate(names):
+            val = self.dim_vars.get(name, tk.IntVar(value=50)).get()
+            angle = -math.pi / 2 + 2 * math.pi * i / n
+            dr = r * val / 100
+            pts.extend([cx + dr * math.cos(angle), cy + dr * math.sin(angle)])
+        canvas.create_polygon(pts, outline="#4caf50", fill="#4caf5080", width=2)
+        # 标签
+        for i, name in enumerate(names):
+            angle = -math.pi / 2 + 2 * math.pi * i / n
+            val = self.dim_vars.get(name, tk.IntVar(value=50)).get()
+            lx = cx + (r + 18) * math.cos(angle) - 15
+            ly = cy + (r + 18) * math.sin(angle) - 8
+            canvas.create_text(lx, ly, text=f"{name}\n{val}", font=("Microsoft YaHei", 7), fill="#333")
+
+    def _calibrate_from_diary(self):
+        sel = self.diary_list.curselection()
+        if not sel:
+            messagebox.showinfo("提示", "请先在左侧选中一篇日记")
+            return
+        fname = self.diary_list.get(sel[0])
+        path = os.path.join(PROJECT_ROOT, "diary", fname)
+        if not os.path.exists(path):
+            return
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+        # 简单情感分析：统计积极/消极词
+        positive = sum(content.count(w) for w in ["开心", "高兴", "好", "爱", "笑", "温暖", "漂亮", "舒服", "棒"])
+        negative = sum(content.count(w) for w in ["难过", "累", "哭", "崩溃", "痛", "烦", "焦虑", "怕", "讨厌"])
+        total = positive + negative or 1
+        # 积极多 → 温情↑ 幽默↑; 消极多 → 包容↑ 严肃↓
+        if positive > negative * 1.5:
+            if "温情" in self.dim_vars:
+                self.dim_vars["温情"].set(min(95, self.dim_vars["温情"].get() + 3))
+            if "幽默" in self.dim_vars:
+                self.dim_vars["幽默"].set(min(95, self.dim_vars["幽默"].get() + 2))
+        elif negative > positive * 1.5:
+            if "包容" in self.dim_vars:
+                self.dim_vars["包容"].set(min(95, self.dim_vars["包容"].get() + 3))
+            if "严肃" in self.dim_vars:
+                self.dim_vars["严肃"].set(max(5, self.dim_vars["严肃"].get() - 2))
+        self._draw_radar()
+        result = f"积极词{positive} 消极词{negative}"
+        self._save_dimensions()
+        messagebox.showinfo("校准完成", f"{fname}\n{result}\n维度已自动微调并保存。")
+
+    def _auto_calibrate(self):
+        try:
+            from persona.dimensions import apply_calibration
+            applied = apply_calibration()
+            if applied:
+                self._load_dimensions()
+                msg = "\n".join(f"{k}: {v['from']} → {v['to']}" for k, v in applied.items())
+                messagebox.showinfo("自动校准完成", f"以下维度已调整:\n{msg}")
+            else:
+                messagebox.showinfo("自动校准", "最近7天卡片不足，无法校准。")
+        except Exception as e:
+            messagebox.showerror("校准失败", str(e))
 
     def _load_rolling(self):
         rolling_path = os.path.join(PROJECT_ROOT, "memory", "rolling_summary.md")
@@ -887,7 +1022,7 @@ class CardEditTab(ttk.Frame):
         row0.pack(fill=tk.X, pady=2)
         ttk.Label(row0, text="ID:", width=8).pack(side=tk.LEFT)
         self.var_id = tk.StringVar()
-        ttk.Entry(row0, textvariable=self.var_id, state="readonly", width=50).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Entry(row0, textvariable=self.var_id, width=50).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         row1 = ttk.Frame(f)
         row1.pack(fill=tk.X, pady=2)
@@ -1027,11 +1162,14 @@ class CardEditTab(ttk.Frame):
         if not self._card:
             self.status_var.set("请先搜索并选中一张卡片")
             return
-        card_id = self._card["id"]
+        old_id = self._card["id"]
+        new_id = self.var_id.get().strip()
 
         title = self.var_title.get().strip()
         raw_quote = self.raw_text.get("1.0", tk.END).strip()
         summary = self.summary_text.get("1.0", tk.END).strip()
+        old_content = self._card.get("content") or ""
+        old_keywords = self._card.get("keywords") or ""
         content = f"原话：{raw_quote} | 概括：{summary}" if raw_quote else f"概括：{summary}"
         keywords = self.var_keywords.get().strip()
         category = self.var_category.get()
@@ -1041,45 +1179,81 @@ class CardEditTab(ttk.Frame):
         chord = self.var_chord.get().strip()
         enabled = 1 if self.var_enabled.get() else 0
         resolved = 1 if self.var_resolved.get() else 0
+        id_changed = new_id != old_id
+        content_changed = content != old_content
 
+        if not new_id:
+            self.status_var.set("ID不能为空")
+            return
         if not title:
             self.status_var.set("标题不能为空")
             return
 
-        if not messagebox.askyesno("确认保存", f"确定保存对卡片「{title}」的修改吗？\n\n此操作直接写入数据库。"):
-            return
+        if id_changed:
+            if not messagebox.askyesno("确认修改ID",
+                f"卡片ID将从\n「{old_id}」\n改为\n「{new_id}」\n\n"
+                f"此操作会同步更新卡片库、关联边和 FAISS 索引。是否继续？"):
+                return
+        else:
+            if not messagebox.askyesno("确认保存", f"确定保存对卡片「{title}」的修改吗？\n\n此操作直接写入数据库。"):
+                return
 
         conn = sqlite3.connect(DB_PATH)
         try:
             c = conn.cursor()
+
+            if id_changed:
+                c.execute("SELECT COUNT(*) FROM cards WHERE id=?", (new_id,))
+                if c.fetchone()[0] > 0:
+                    messagebox.showerror("ID冲突", f"卡片ID「{new_id}」已存在，请换一个。")
+                    conn.close()
+                    return
+                c.execute("UPDATE cards SET id=? WHERE id=?", (new_id, old_id))
+                c.execute("UPDATE card_links SET card_id_a=? WHERE card_id_a=?", (new_id, old_id))
+                c.execute("UPDATE card_links SET card_id_b=? WHERE card_id_b=?", (new_id, old_id))
+                effective_id = new_id
+            else:
+                effective_id = old_id
+
             c.execute(
                 "UPDATE cards SET title=?, content=?, keywords=?, importance=?, category=?, "
-                "valence=?, arousal=?, chord=?, enabled_in_context=?, resolved=? WHERE id=?",
-                (title, content, keywords, importance, category, valence, arousal, chord, enabled, resolved, card_id)
+                "valence=?, arousal=?, chord=?, enabled_in_context=?, resolved=?, human_touched=1 WHERE id=?",
+                (title, content, keywords, importance, category, valence, arousal, chord, enabled, resolved, effective_id)
             )
             if c.rowcount == 0:
                 messagebox.showerror("失败", "未找到对应卡片。")
                 conn.close()
                 return
             conn.commit()
+
             if resolved and not self._card.get("resolved"):
                 try:
                     from memory.memory_manager import _log_resolution
-                    _log_resolution(card_id, title, "card_edit_save", "console编辑面板手动划掉")
+                    _log_resolution(effective_id, title, "card_edit_save", "console编辑面板手动划掉")
                 except Exception:
                     pass
-            # 内容或keywords改了 → 重算 embedding
-            if content != (self._card.get("content") or "") or keywords != (self._card.get("keywords") or ""):
+
+            if id_changed:
                 try:
-                    self._re_embed(card_id, title, content, keywords)
+                    self._reindex_rename(old_id, new_id)
+                except Exception as e:
+                    import traceback as _tb_ri
+                    _tb_ri.print_exc()
+                    messagebox.showerror("FAISS重索引异常", f"{type(e).__name__}: {e}")
+
+            if content_changed:
+                try:
+                    self._re_embed(effective_id, title, content, keywords)
                 except Exception as e:
                     import traceback as _tb_re
                     _tb_re.print_exc()
                     messagebox.showerror("卡片编辑-re-embed异常", f"{type(e).__name__}: {e}")
-            self._card = {**self._card, "title": title, "content": content, "keywords": keywords,
-                          "category": category, "importance": importance, "valence": valence,
-                          "arousal": arousal, "chord": chord, "enabled_in_context": enabled, "resolved": resolved}
-            self.status_var.set(f"已保存: {card_id}")
+
+            self._card = {**self._card, "id": effective_id, "title": title, "content": content,
+                          "keywords": keywords, "category": category, "importance": importance,
+                          "valence": valence, "arousal": arousal, "chord": chord,
+                          "enabled_in_context": enabled, "resolved": resolved}
+            self.status_var.set(f"已保存: {effective_id}")
             messagebox.showinfo("成功", f"卡片「{title}」已保存。")
             self._search()
         except Exception as e:
@@ -1109,6 +1283,23 @@ class CardEditTab(ttk.Frame):
         add_to_index(index, card_id, vec)
         save_index(index)
         print(f"[editor] embedding 已更新: {card_id}")
+
+    def _reindex_rename(self, old_id, new_id):
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT embedding FROM cards WHERE id=?", (new_id,))
+        row = c.fetchone()
+        conn.close()
+        if not row or not row[0]:
+            return
+        from memory.encoder import load_index, save_index, remove_from_index, add_to_index
+        import numpy as np
+        vec = np.frombuffer(row[0], dtype=np.float32)
+        remove_from_index(old_id)
+        index = load_index()
+        add_to_index(index, new_id, vec)
+        save_index(index)
+        print(f"[editor] FAISS 索引已迁移: {old_id} → {new_id}")
 
 
 class RecallFeedbackTab(ttk.Frame):
@@ -1493,10 +1684,12 @@ class HumanWriteCardTab(ttk.Frame):
             "keywords": keywords,
             "user_raw": raw_quote,
             "category": category,
+            "type": "fact",
             "importance": importance,
             "proposed_by": "muze",
             "proposed_at": datetime.now(timezone.utc).isoformat(),
             "review_status": "pending",
+            "human_touched": 1,
             "chord": chord,
             "valence": valence,
             "arousal": arousal,
@@ -1538,13 +1731,21 @@ class HumanWriteCardTab(ttk.Frame):
                 _db_conn.close()
             except Exception:
                 pass
-        if _dup_info:
-            if not messagebox.askyesno("重复卡片确认",
-                f"检测到相似卡片:\n{_dup_info}\n\n"
-                f"即将写入:\n标题: {title}\n内容: {content[:80]}\n\n"
-                f"是否保留两张完全一样的卡片？"):
-                self.status_var.set("已取消（重复卡片）")
+        # ── 强制审核弹窗 ──
+        try:
+            from card_review_popup import review_card_popup
+            evidence = f"人类手动写卡: {title}\n概括: {summary[:100]}"
+            if _dup_info:
+                evidence += f"\n⚠️ 重复检测: {_dup_info}"
+            reviewed = review_card_popup(card, "console.py人类写卡", evidence)
+            if reviewed is None:
+                self.status_var.set("已拒绝")
                 return
+            card = reviewed
+        except Exception as e:
+            import traceback as _tb_rp
+            _tb_rp.print_exc()
+            raise RuntimeError(f"[console写卡审核弹窗失败] title={title}: {e}")
 
         pending.append(card)
         try:
@@ -1629,19 +1830,13 @@ class Console:
 
 
 if __name__ == "__main__":
-    import traceback as _tb_global
+    from crash_reporter import install, crash_print
+    install()
 
     root = tk.Tk()
 
     def _tk_error_handler(exc_type, exc_val, exc_tb):
-        msg = "".join(_tb_global.format_exception(exc_type, exc_val, exc_tb))
-        print(f"[console CRASH] {msg}", file=sys.stderr)
-        try:
-            with open(os.path.join(PROJECT_ROOT, "console_crash.log"), "a", encoding="utf-8") as _cf:
-                _cf.write(f"\n=== {datetime.now().isoformat()} ===\n{msg}\n")
-        except Exception:
-            pass
-        messagebox.showerror("console 异常", f"{exc_type.__name__}: {exc_val}\n\n详情已写入 console_crash.log")
+        crash_print(exc_val, "console.py Tk回调异常")
 
     root.report_callback_exception = _tk_error_handler
 

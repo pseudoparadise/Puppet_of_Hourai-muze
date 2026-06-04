@@ -9,6 +9,7 @@ config.json
 config.yaml
 chat_logs.json
 chat_logs_backup.json
+chat_logs_work.json
 state.json
 trigger.log
 trigger_error.log
@@ -95,6 +96,47 @@ chat_logs_*.json
 
 # ── 系统垃圾 ──
 %SystemDrive%/
+
+# ── 家/工位 PS1 启动脚本（含 API Key） ──
+家.ps1
+工位.ps1
+
+# ── MuMu 广告歼灭战工具（2026-06-03） ──
+mumu_hook.c
+mumu_hook.dll
+mumu_adfree.py
+mumu_memwipe.py
+mumu_nuke.py
+mumu_html_ads.py
+fake_ad_server.py
+catch_the_ghost.py
+mumu_ui.xml
+_vm0.txt
+_vm1.txt
+block_mumu_ads.ps1
+lawnchair_orig.apk
+_scan_urls.py
+_scan_bin.py
+_patch_rcc.py
+_patch_vip.py
+_mumu_launcher.py
+_mumu_hide_vip.py
+_test_file.py
+_rcc_patcher.py
+
+# ── 调试日志 ──
+ghost_hunt.log
+
+# ── 模式文件（本地不提交） ──
+.mode
+
+# ── IO Feedling（含 API Key，不提交） ──
+io/
+.feedling.env
+
+# ── Proactive gate 数据（含位置/健康信息，不提交） ──
+shortcut_data/
+proactive_state.json
 
 # ── IDE ──
 .vscode/

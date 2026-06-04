@@ -30,13 +30,15 @@ def approve_card(card):
     conn = sqlite3.connect(DB_PATH)
     try:
         conn.execute("""
-            INSERT OR REPLACE INTO cards (id, title, content, keywords, embedding, importance, category, review_status, enabled_in_context, chord, valence, arousal, target_date, user_raw)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'final', 1, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO cards (id, title, content, keywords, embedding, importance, category, type, review_status, enabled_in_context, chord, valence, arousal, target_date, user_raw, human_touched)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'final', 1, ?, ?, ?, ?, ?, ?)
         """, (
             card["id"], card["title"], card["content"], card["keywords"],
             None, card.get("importance", 5), card.get("category", "interaction"),
+            card.get("type", "fact"),
             card.get("chord") or "", card.get("valence", 0.0), card.get("arousal", 0.5),
-            card.get("target_date"), card.get("user_raw", "")
+            card.get("target_date"), card.get("user_raw", ""),
+            card.get("human_touched", 0)
         ))
         conn.commit()
 

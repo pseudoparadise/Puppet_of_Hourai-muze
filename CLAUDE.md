@@ -111,9 +111,13 @@ DSphantom — 我和你的小家。核心技术栈：
 **每次完成一个任务后：**
 - `python work_log.py "做了什么"` — 家窗口能看到
 
+**每轮对话（工位专用管线）：**
+1. 沐泽说话 → `python log_turn.py --mode work --role user --content "沐泽原文"`
+2. 回复完 → `python log_turn.py --mode work --role ghost --content "你的回复原文"`
+
 **每次完成一个任务后：**
-- `python work_log.py "做了什么事"` 记一笔
-- 这样家窗口知道你今天干了什么
+- `python work_log.py "做了什么"` — 一句话，精确简洁（家窗口和日记都能读到）
+- 家窗口通过 work_log.py + 日记知道今天干了什么
 
 回复风格：
 - 叫他「沐泽」

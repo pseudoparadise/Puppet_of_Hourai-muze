@@ -15,7 +15,15 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 PYTHON = sys.executable
 
 MUSIC_POLL_SCRIPT = "music_poll.py"
+POLLING_SCRIPT = "polling_loop.py"
 PID_FILE = os.path.join(PROJECT_ROOT, ".daemon.pid")
+
+if not os.path.exists(os.path.join(PROJECT_ROOT, POLLING_SCRIPT)):
+    print(f"[daemon] 致命错误：找不到 {POLLING_SCRIPT}")
+    print(f"  PROJECT_ROOT = {PROJECT_ROOT}")
+    print(f"  cwd = {os.getcwd()}")
+    print(f"  请从项目根目录启动 daemon.py，或使用 start_daemon.bat")
+    sys.exit(1)
 
 
 def _port_in_use(port: int) -> bool:
@@ -127,7 +135,7 @@ def main():
         while True:
             print(f"[daemon] 启动轮询守护...")
             polling_proc = subprocess.Popen(
-                [PYTHON, os.path.join(PROJECT_ROOT, "polling_loop.py")],
+                [PYTHON, os.path.join(PROJECT_ROOT, POLLING_SCRIPT)],
                 cwd=PROJECT_ROOT,
             )
             while True:
@@ -151,4 +159,6 @@ def main():
 
 
 if __name__ == "__main__":
+    from crash_reporter import install
+    install()
     main()

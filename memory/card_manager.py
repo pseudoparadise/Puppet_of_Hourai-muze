@@ -209,8 +209,8 @@ class CardManager:
             vec_bytes = vec.tobytes()
             print(f"[CardManager] 入库: id={card.get('id')} title={card.get('title')} cat={card.get('category')} imp={card.get('importance')} kw={card.get('keywords','')[:40]}")
             conn.execute("""
-                INSERT OR REPLACE INTO cards (id, title, content, keywords, embedding, importance, category, review_status, chord, valence, arousal, target_date, user_raw)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'final', ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO cards (id, title, content, keywords, embedding, importance, category, type, review_status, chord, valence, arousal, target_date, user_raw, human_touched)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'final', ?, ?, ?, ?, ?, ?)
             """, (
                 card["id"],
                 card["title"],
@@ -219,11 +219,13 @@ class CardManager:
                 vec_bytes,
                 card.get("importance", 5),
                 card.get("category", "interaction"),
+                card.get("type", "fact"),
                 card.get("chord") or "",
                 card.get("valence", 0.0),
                 card.get("arousal", 0.5),
                 card.get("target_date"),
-                card.get("user_raw", "")
+                card.get("user_raw", ""),
+                card.get("human_touched", 0)
             ))
 
             # ── FIX: 不再 create_index() 覆盖！改为 load→add→save ──

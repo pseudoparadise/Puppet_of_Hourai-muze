@@ -155,6 +155,16 @@ def main():
     else:
         print("[miner] 无可写入内容。")
 
+    # ── 每周维度自动校准 ──
+    try:
+        from persona.dimensions import apply_calibration
+        applied = apply_calibration(days=7)
+        if applied:
+            parts = [f'{k}({v["from"]}->{v["to"]})' for k, v in applied.items()]
+            print(f'[miner] 维度校准: {", ".join(parts)}')
+    except Exception as e:
+        print(f"[miner] 维度校准跳过: {e}")
+
 
 if __name__ == "__main__":
     main()

@@ -206,7 +206,7 @@ def _popup_collect_keywords(title: str, content: str, keywords: str, category: s
 
 
 # ── FIX: 写入待审核卡片（毒点5修复 — 委托 delegate_tools.atomic_write_json） ──
-def write_pending_card(card_draft: dict):
+def write_pending_card(card_draft: dict, source_module: str = "trigger.py", evidence: str = ""):
     from shared import is_garbage_card, mode_pass_card
     reason = is_garbage_card(card_draft.get("title", ""), card_draft.get("content", ""))
     if reason:
@@ -216,25 +216,19 @@ def write_pending_card(card_draft: dict):
         print(f"[mode:work] 拦截「{card_draft.get('title','')}」[{card_draft.get('category','')}] imp={card_draft.get('importance',0)}")
         return
 
-    # ── todo 卡统一弹窗审核，不放过任何一个自动写入的待办 ──
-    if card_draft.get("category") == "todo" and card_draft.get("proposed_by") != "muze":
-        try:
-            import tkinter.messagebox as _mb_todo
-            _todo_preview = card_draft.get("title", "")[:40]
-            _todo_content = card_draft.get("content", "")[:120]
-            _todo_answer = _mb_todo.askyesno(
-                "待办卡片审核",
-                f"AI 提议写入待办卡片:\n\n"
-                f"标题: {_todo_preview}\n"
-                f"内容: {_todo_content}\n"
-                f"目标日期: {card_draft.get('target_date', '无')}\n\n"
-                f"是否通过并写入待审核池？"
-            )
-            if not _todo_answer:
-                print(f"[卡片提议] 用户拒绝 todo 卡「{card_draft.get('title', '')}」")
-                return
-        except Exception:
-            pass  # 无 GUI 降级：照常写入
+    # ── 强制弹窗审核（所有卡片，不只是 todo） ──
+    try:
+        from card_review_popup import review_card_popup
+        evidence_text = evidence or card_draft.get("content", "")[:300]
+        reviewed = review_card_popup(dict(card_draft), source_module, evidence_text)
+        if reviewed is None:
+            print(f"[卡片提议] 人类拒绝「{card_draft.get('title','')}」")
+            return
+        card_draft = reviewed
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise RuntimeError(f"[卡片审核弹窗失败] source={source_module} title={card_draft.get('title','')}: {e}")
 
     from delegate_tools import atomic_write_json
     pending_path = os.path.join(PROJECT_ROOT, "memory", "pending_cards.json")
@@ -2578,4 +2572,6 @@ def main():
             print(f"日志写入异常: {e}")
 
 if __name__ == "__main__":
+    from crash_reporter import install
+    install()
     main()

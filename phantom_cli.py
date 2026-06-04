@@ -127,7 +127,7 @@ def cmd_diary(args):
 
     from datetime import datetime, timedelta
     diary_dir = os.path.join(PROJECT_ROOT, "diary")
-    for d_offset in range(days):
+    for d_offset in range(1, days + 1):
         d = (datetime.now() - timedelta(days=d_offset)).strftime("%Y-%m-%d")
         md = os.path.join(diary_dir, f"{d}.md")
         ev = os.path.join(diary_dir, f"{d}_events.json")
@@ -145,7 +145,7 @@ def cmd_diary(args):
                 items = eis.get(key, [])
                 if items:
                     print(f"    {label}: {len(items)} 项")
-    if not any(os.path.exists(os.path.join(diary_dir, f"{(datetime.now() - timedelta(days=d)).strftime('%Y-%m-%d')}.md")) for d in range(days)):
+    if not any(os.path.exists(os.path.join(diary_dir, f"{(datetime.now() - timedelta(days=d)).strftime('%Y-%m-%d')}.md")) for d in range(1, days + 1)):
         print("  无日记")
 
 
