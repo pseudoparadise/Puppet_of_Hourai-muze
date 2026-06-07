@@ -16,7 +16,7 @@ BJT = timezone(timedelta(hours=8))
 REFLECTION_DIR = os.path.join(os.path.dirname(__file__), "reflections")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
 CHAT_LOG_PATH = os.path.join(PROJECT_ROOT, "chat_logs.json")
-BASE_PROMPT_PATH = os.path.join(PROJECT_ROOT, "persona", "prompt_v1_base.txt")
+BASE_PROMPT_PATH = os.path.join(PROJECT_ROOT, "persona", "prompt_v1.txt")
 
 
 def ensure_dir():

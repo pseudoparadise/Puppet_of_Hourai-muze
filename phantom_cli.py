@@ -197,7 +197,7 @@ def cmd_recall(args):
     sys.path.insert(0, PROJECT_ROOT)
     sys.path.insert(0, os.path.join(PROJECT_ROOT, "memory"))
     from memory.retriever import retrieve
-    cards = retrieve(query, top_k=5)
+    cards = retrieve(query, top_k=5, trace_tag="phantom_cli")
     for c in cards:
         print(f"  [{c['category']}] {c['title']} (score={c['score']:.1f})")
         print(f"    id={c['id']} hits={c['hit_count']} dist={c['distance']}")

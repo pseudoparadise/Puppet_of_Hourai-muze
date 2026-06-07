@@ -86,6 +86,7 @@ def preflight(user_input: str, json_mode: bool = False, skip_va: bool = False) -
             va_description=va_description,
             va_valence=va.get("valence") if va else None,
             va_arousal=va.get("arousal") if va else None,
+            trace_tag="preflight",
         )
         # touch cards
         try:

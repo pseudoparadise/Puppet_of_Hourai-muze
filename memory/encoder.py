@@ -160,19 +160,18 @@ def embed(text: str, max_retries: int = 3) -> np.ndarray:
     raise ConnectionError(f"embed 调用失败（已重试 {max_retries} 次）: {last_error}")
 
 def build_embed_text(card: dict) -> str:
-    """构建 embedding 输入文本：title + keywords + user_raw + content。
-    erotic 类卡片不改动，保持旧格式（title + content）。
-    """
+    """构建 embedding 输入文本：title + keywords + user_raw。
+    概括/总结是给 LLM 读的，不参与语义向量检索。"""
     title = card.get("title", "")
     keywords = card.get("keywords", "")
     user_raw = card.get("user_raw", "")
-    content = card.get("content", "")
     category = card.get("category", "")
 
     if category == "erotic":
+        content = card.get("content", "")
         return (title + " " + (content or ""))[:512]
 
-    parts = [p for p in [title, keywords, user_raw, content] if p]
+    parts = [p for p in [title, keywords, user_raw] if p]
     return " ".join(parts)[:1024]
 
 

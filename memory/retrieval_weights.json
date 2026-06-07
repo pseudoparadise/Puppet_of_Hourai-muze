@@ -1,0 +1,17 @@
+{
+  "w_keyword": 1.5,
+  "w_semantic": 1.0,
+  "w_importance": 0.5,
+  "w_anchor": 0.2,
+  "w_diffusion": 0.15,
+  "w_recency": 0.3,
+  "w_decay": 0.2,
+  "w_va": 0.2,
+  "w_fire": 0.25,
+  "w_water": 0.2,
+  "w_presence_penalty": 0.06,
+  "w_repetition_penalty": 0.15,
+  "w_frequency_penalty": 0.03,
+  "frequency_penalty_cap": 0.2,
+  "teleport_rate": 0.15
+}

@@ -805,6 +805,7 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
             _cpl_vec = getattr(retrieve, '_cached_query_vec', None)
             if _cpl_vec is None:
                 _cpl_vec = _embed_cpl(user_input)
+                retrieve._cached_query_vec = _cpl_vec  # type: ignore
             _cpl_idx = _load_idx_cpl()
             if _cpl_idx.ntotal > 0:
                 _cpl_neighbors = _search_cpl(_cpl_idx, _cpl_vec, k=10)
@@ -1110,6 +1111,7 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
             _exp_vec = getattr(retrieve, '_cached_query_vec', None)
             if _exp_vec is None:
                 _exp_vec = _embed_exp(user_input)
+                retrieve._cached_query_vec = _exp_vec  # type: ignore
             _exp_idx = _load_idx_exp()
             if _exp_idx.ntotal > 0:
                 _exp_neighbors = _search_exp(_exp_idx, _exp_vec, k=5)
@@ -1684,7 +1686,9 @@ def main():
 
         # ── /pro /flash 傻瓜式一键切换模型 ──
         if user_input.strip().lower() in ("/pro", "/flash"):
-            new_model = "deepseek-v4-pro" if user_input.strip().lower() == "/pro" else "deepseek-v4-flash"
+            flash_default = config["global"].get("model", "deepseek-v4-flash")
+            pro_default = config["global"].get("pro_model", flash_default)
+            new_model = pro_default if user_input.strip().lower() == "/pro" else flash_default
             CHAT_MODEL = new_model
             # 写回 config.json
             try:
@@ -2031,7 +2035,8 @@ def main():
                             va_arousal=va.get('arousal') if va else None,
                             weights=_phase_weights if _phase_weights else CUSTOM_WEIGHTS,
                             chord_bpm=va.get('chord_bpm'), chord_dynamic=va.get('chord_dynamic'),
-                            chord_name=va.get('chord_name'))
+                            chord_name=va.get('chord_name'),
+                            trace_tag="trigger")
             if top_cards:
                 memory_lines = ["【本轮相关记忆】"]
                 for card in top_cards:

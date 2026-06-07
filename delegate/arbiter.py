@@ -67,7 +67,7 @@ def judge(user_input: str, pending_cards: list = None, recent_cards: list = None
             config = json.load(f)
 
         api_key = config["global"]["deepseek_api_key"]
-        model = "deepseek-v4-flash"  # 裁决用 flash 即可，纯逻辑
+        model = config["global"].get("model", "deepseek-v4-flash")
 
         # 精简 pending/recent 信息
         pending_summary = []

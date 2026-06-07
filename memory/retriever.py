@@ -32,11 +32,13 @@ SCORING_CONFIG = {
     "w_water": 0.2,         # 水元素平滑修正权重（微调↑ 0.15→0.2）
     "diversity_enabled": True,  # 是否启用多样性约束
     "min_categories": 2,    # 最小跨类别数
-    # ── 三个温和 penalty（打破马太效应，0.01~0.10 级别） ──
-    "w_presence_penalty": 0.03,   # 本轮/上轮刚出现过的卡 → 微弱扣分
-    "w_repetition_penalty": 0.08, # 近3轮出现2+次 → 中度扣分
-    "w_frequency_penalty": 0.01,  # 每个 usage_count 带来的负向拉力
-    "frequency_penalty_cap": 0.10, # frequency penalty 上限
+    # ── penalty（打破马太效应） ──
+    "w_presence_penalty": 0.06,   # 本轮/上轮刚出现过的卡 → 扣分
+    "w_repetition_penalty": 0.15, # 近3轮出现2+次 → 扣分
+    "w_frequency_penalty": 0.03,  # 每个 usage_count 带来的负向拉力
+    "frequency_penalty_cap": 0.20, # frequency penalty 上限
+    # ── 传送锚点 ──
+    "teleport_rate": 0.15,        # 霸榜卡传送概率
 }
 
 # 独立的状态计数器，不再污染权重配置（毒点23修复）
@@ -547,7 +549,8 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
 def retrieve(query: str, top_k: int = 3, weights: dict = None,
              va_tier: str = "mid", va_description: str = None, va_valence: float = None,
              va_arousal: float = None,
-             chord_bpm: int = None, chord_dynamic: str = None, chord_name: str = None) -> list:
+             chord_bpm: int = None, chord_dynamic: str = None, chord_name: str = None,
+             trace_tag: str = "", query_vec: np.ndarray = None) -> list:
     db_path = os.path.join(os.path.dirname(__file__), "cards.db")
 
     # ── 硬编码召回：特定完整短语 → 强制召回对应卡片，无视评分 ──
@@ -569,8 +572,12 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
 
 
     # ── VA 唤醒度三层分档：调整检索策略 ──
-    # ── 以 SCORING_CONFIG 为基底合并 weights，确保 w_keyword 等必要键始终存在 ──
+    # ── 以 SCORING_CONFIG 为基底，合并 retrieval_weights.json + 调用方 weights ──
     w = dict(SCORING_CONFIG)
+    stored = _load_weights()
+    for k in _WEIGHT_KEYS:
+        if k in stored:
+            w[k] = stored[k]
     if weights:
         w.update(weights)
     # ── 毒点32修复：deepcopy 避免跨调用污染原始配置 ──
@@ -611,13 +618,15 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
     phase_cfg = effective_weights.pop('_phase_cfg', None)
 
     # ── 混合态检测：embedding 极性判断替代 COGNITIVE_KW 关键词列表 ──
-    # 如果 query embedding 更靠近"认知/技术"语义空间且 VA 高唤醒 → 混合态
+    # 复用 query_vec，避免重复 embed
     mixed_mode = False
     if va_tier == "high":
         try:
             from encoder import embed as _embed_mix
-            _qv = _embed_mix(query)
-            # 延迟加载参考向量（只 embed 一次，蹭后续 FAISS 搜索复用）
+            _qv = query_vec if query_vec is not None else getattr(retrieve, '_cached_query_vec', None)
+            if _qv is None:
+                _qv = _embed_mix(query)
+                retrieve._cached_query_vec = _qv  # type: ignore
             _COG_REF = getattr(retrieve, '_cog_ref_vec', None)
             _EMO_REF = getattr(retrieve, '_emo_ref_vec', None)
             if _COG_REF is None:
@@ -678,6 +687,11 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
         semantic_k_mult = 2
         effective_weights['_deep_boost'] = True
 
+    # ── 语义主导缩放：mid 时非语义权重缩到 3%，让 cosine 主导排名 ──
+    if va_tier == "mid":
+        for k in ("w_importance", "w_anchor", "w_recency", "w_diffusion", "w_decay"):
+            effective_weights[k] = w.get(k, 0) * 0.03
+
     # 加载锚定卡片集合
     anchor_ids = set()
     anchor_path = os.path.join(os.path.dirname(__file__), "anchor_set.json")
@@ -728,13 +742,13 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
     semantic_hits = []
     if len(keyword_hits) < top_k:
         try:
-            query_vec = getattr(retrieve, '_cached_query_vec', None)
-            if query_vec is None:
-                query_vec = embed(query)
-                retrieve._cached_query_vec = query_vec
+            qv = query_vec if query_vec is not None else getattr(retrieve, '_cached_query_vec', None)
+            if qv is None:
+                qv = embed(query)
+                retrieve._cached_query_vec = qv
             index = load_index()
             if index.ntotal > 0:
-                candidates = search_index(index, query_vec, k=max(effective_k * semantic_k_mult, 5))
+                candidates = search_index(index, qv, k=max(effective_k * semantic_k_mult, 5))
                 keyword_ids = {c["id"] for c in keyword_hits}
                 for cid, dist in candidates:
                     if cid in keyword_ids:
@@ -839,8 +853,8 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
                     f"AND review_status='final' AND enabled_in_context=1",
                     list(_neighbor_ids)
                 )
-                # 拿缓存的 query vec 做邻居相关性过滤
-                _query_vec = getattr(retrieve, '_cached_query_vec', None)
+                # 拿 query vec（优先传入 > 缓存）做邻居相关性过滤
+                _query_vec = query_vec if query_vec is not None else getattr(retrieve, '_cached_query_vec', None)
                 _linked = 0
                 for _row in _clink.fetchall():
                     _ncard = dict(_row)
@@ -911,8 +925,8 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
     if va_tier == "high":
         result = result[:3]
 
-    # ── 传送锚点：霸榜卡触发传送，10%概率用冰封/锚定卡替换最低分 ──
-    if result and random.random() < 0.10:
+    # ── 传送锚点：霸榜卡触发传送 ──
+    if result and random.random() < w.get("teleport_rate", 0.15):
         # 检测霸榜：任意卡在近3轮都出现
         dominated_ids = set()
         for cid in set(c["id"] for c in result):
@@ -1016,22 +1030,45 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
     # ── 圣遗物自适应：每100次检索自动调参 ──
     artifact_adapt()
     # ── 写检索 trace 供 console.py 召回反馈面板读取 ──
-    _write_retrieval_trace(query, va_tier, output)
+    _write_retrieval_trace(query, va_tier, output, trace_tag)
     return output
 
-def _write_retrieval_trace(query: str, va_tier: str, cards: list):
-    """写入检索 trace 到 memory/retrieval_traces.jsonl，供 console.py 召回反馈面板使用。"""
+def _write_retrieval_trace(query: str, va_tier: str, cards: list, tag: str = ""):
+    """写入检索 trace 到 memory/retrieval_traces.jsonl，供 console.py 召回反馈面板使用。
+    5 秒内相同查询跳过。"""
     import uuid as _uuid_trace
     from datetime import datetime as _dt_trace, timezone as _tz_trace, timedelta as _td_trace
     try:
         trace_path = os.path.join(os.path.dirname(__file__), "retrieval_traces.jsonl")
+
+        now_dt = _dt_trace.now(_tz_trace(_td_trace(hours=8)))
+        query_key = query[:60].strip()
+
+        if os.path.exists(trace_path):
+            with open(trace_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            if lines:
+                try:
+                    last = json.loads(lines[-1].strip())
+                    last_ts = last.get("ts", "")
+                    last_query = last.get("query", "")[:60].strip()
+                    if last_query == query_key and last_ts:
+                        last_dt = _dt_trace.strptime(last_ts, "%Y-%m-%d %H:%M:%S")
+                        last_dt = last_dt.replace(tzinfo=_tz_trace(_td_trace(hours=8)))
+                        if (now_dt - last_dt).total_seconds() < 5:
+                            return
+                except Exception:
+                    pass
+
         entry = {
             "trace_id": str(_uuid_trace.uuid4())[:8],
-            "ts": _dt_trace.now(_tz_trace(_td_trace(hours=8))).strftime("%Y-%m-%d %H:%M:%S"),
+            "ts": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
             "query": query[:200],
             "va_tier": va_tier,
             "cards": cards,
         }
+        if tag:
+            entry["tag"] = tag
         with open(trace_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception as e:
@@ -1051,7 +1088,9 @@ _WEIGHTS_PATH = os.path.join(os.path.dirname(__file__), "retrieval_weights.json"
 _TRACE_PATH = os.path.join(os.path.dirname(__file__), "retrieval_traces.jsonl")
 
 _WEIGHT_KEYS = ["w_keyword", "w_semantic", "w_importance", "w_anchor",
-                "w_diffusion", "w_recency", "w_decay", "w_va", "w_fire", "w_water"]
+                "w_diffusion", "w_recency", "w_decay", "w_va", "w_fire", "w_water",
+                "w_presence_penalty", "w_repetition_penalty", "w_frequency_penalty",
+                "frequency_penalty_cap", "teleport_rate"]
 
 
 def _load_weights() -> dict:
@@ -1078,7 +1117,7 @@ def get_effective_weights() -> dict:
             effective[k] = stored[k]
         else:
             effective[k] = SCORING_CONFIG.get(k, 0)
-    return {k: round(v, 3) for k, v in effective.items() if k.startswith("w_")}
+    return {k: round(v, 3) for k, v in effective.items()}
 
 
 def record_feedback(trace_id: str, card_id: str, is_good: bool):

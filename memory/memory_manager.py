@@ -132,7 +132,7 @@ def update_active_status():
     finally:
         conn.close()
 
-def check_duplicates(new_content: str, threshold: float = 0.85) -> list:
+def check_duplicates(new_content: str, threshold: float = 0.85, new_vec = None) -> list:
     try:
         from encoder import embed, load_index, search_index
     except ImportError:
@@ -140,7 +140,8 @@ def check_duplicates(new_content: str, threshold: float = 0.85) -> list:
         return []
 
     try:
-        new_vec = embed(new_content)
+        if new_vec is None:
+            new_vec = embed(new_content)
         index = load_index()
         if index.ntotal == 0:
             return []

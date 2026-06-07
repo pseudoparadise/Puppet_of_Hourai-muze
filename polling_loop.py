@@ -437,6 +437,7 @@ def main():
     last_heartbeat = time.time()
     last_audit_time = time.time()  # 深渊审计
     last_housekeeping = 0  # 日常维护（日记/矿工/周收拢）
+    last_work_extract = 0  # 工作日志增量提取
 
     cycle_count = 0
 
@@ -513,6 +514,19 @@ def main():
                         _log_event("reflection_generated", {"path": path})
             except Exception as _re:
                 print(f"[每周自省] 跳过: {_re}")
+
+        # ── 工作日志增量提取（每1小时，12:00-03:00 之间触发） ──
+        WORK_EXTRACT_INTERVAL = 3600
+        if now_ts - last_work_extract > WORK_EXTRACT_INTERVAL:
+            last_work_extract = now_ts
+            bj_hour = beijing_now().hour
+            if bj_hour >= 12 or bj_hour < 3:
+                try:
+                    from work_log import from_claude_sessions as _wl_sessions
+                    _wl_sessions(beijing_today())
+                    _wl_sessions(beijing_yesterday())
+                except Exception:
+                    pass
 
         # ── 深渊审计（每6小时） ──
         if now_ts - last_audit_time > AUDIT_INTERVAL:

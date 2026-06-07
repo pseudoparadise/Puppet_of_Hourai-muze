@@ -39,16 +39,15 @@ def _parse_utc_ts(ts_str: str) -> datetime | None:
 
 def _get_digest_for_date(target_date: str):
     """
-    读取 chat_logs.json + chat_logs_work.json + work_log，
-    筛选北京时间 target_date 当天的全部内容。
+    工作条目 + 家模式对话。工位技术聊天不进日记，只取 chat_logs.json。
     返回 (digest_text | None, target_date)。
     """
     from datetime import timezone as _tz
     base = os.path.dirname(__file__)
-    lines = []
+    home_lines = []
+    work_lines = []
 
-    # 1. 家模式 chat_logs.json
-    for log_file in ["chat_logs.json", "chat_logs_work.json"]:
+    for log_file in ["chat_logs.json"]:
         log_path = os.path.join(base, "..", log_file)
         if not os.path.exists(log_path):
             continue
@@ -62,24 +61,28 @@ def _get_digest_for_date(target_date: str):
                     bj_dt = dt.astimezone(_tz(timedelta(hours=8)))
                     if bj_dt.strftime("%Y-%m-%d") != target_date: continue
                     role = "我" if entry.get("role") == "ghost" else "她"
-                    prefix = "[工位]" if log_file == "chat_logs_work.json" else ""
-                    lines.append(f"{prefix}{role}: {entry.get('content', '')}")
+                    home_lines.append(f"{role}: {entry.get('content', '')}")
                 except Exception:
                     pass
 
-    # 2. work_log 工位任务记录
     work_path = os.path.join(base, "..", "diary", "work", f"{target_date}_work.md")
     if os.path.exists(work_path):
-        lines.append("--- 今日工位任务 ---")
         with open(work_path, "r", encoding="utf-8") as f:
             for line in f:
                 stripped = line.strip()
                 if stripped:
-                    lines.append(stripped)
+                    work_lines.append(stripped)
 
-    if not lines:
+    if not home_lines and not work_lines:
         return None, target_date
-    return "\n".join(lines[-80:]), target_date
+
+    parts = []
+    if work_lines:
+        parts.append("## 今天沐泽和DS一起完成了这些工作（工位干活也是陪伴，是互相成就）\n" + "\n".join(work_lines))
+    if home_lines:
+        parts.append("## 今天家里的对话\n" + "\n".join(home_lines[-60:]))
+
+    return "\n\n".join(parts), target_date
 
 def _update_rolling_summary(new_summary: str, date_str: str = None):
     """追加/更新滚动总结，并压缩为一段精炼文本（≤500字）。"""
@@ -157,16 +160,18 @@ def _append_pending_card(card: dict, source_module: str = "dreaming.py", evidenc
     pending = load_json_safe(PENDING_CARDS_PATH, default=[], label="dreaming")
     if '_embed_vec' not in card:
         try:
-            from encoder import embed as _embed_dream
-            _dv = _embed_dream(card.get('title', '') + ' ' + card.get('content', ''))
+            from encoder import embed as _embed_dream, build_embed_text as _bet_dream
+            _dv = _embed_dream(_bet_dream(card))
             card['_embed_vec'] = _dv.tolist()
         except Exception:
             pass
     pending.append(card)
-    # ── 交叉检查：语义去重 ──
+    # ── 交叉检查：语义去重（复用 _embed_vec，不重复调 API） ──
     try:
         from memory.memory_manager import check_duplicates
-        dups = check_duplicates(card.get("content", ""))
+        import numpy as _np_dedup_dream
+        _pre_vec = _np_dedup_dream.array(card['_embed_vec'], dtype=_np_dedup_dream.float32) if '_embed_vec' in card else None
+        dups = check_duplicates(card.get("content", ""), new_vec=_pre_vec)
         if dups:
             print(f"[dreaming] 去重拦截: {dups}")
             return
@@ -226,7 +231,7 @@ def chain_dream(target_date: str = None):
         _update_rolling_summary(summary, digest_date)
         return result
 
-    step1_context = f"今日对话摘要：\n{digest}\n当前日期：{digest_date}"
+    step1_context = f"以下是沐泽今天的工作内容和对话记录，请据此写日记：\n\n{digest}\n\n当前日期：{digest_date}"
     diary_raw = delegate(diary_prompt, step1_context)
     print(f"[dreaming] Step1 日记: {diary_raw[:100]}...")
 

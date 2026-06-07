@@ -74,6 +74,7 @@ memory/model_meta_backup_*.json
 # ── 待办提醒状态 ──
 reminded_todos.json
 memory/reminded_todos.json
+memory/work_log_state.json
 
 # ── 划卡审计日志 ──
 memory/resolution_log.jsonl

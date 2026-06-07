@@ -142,7 +142,6 @@ class DashboardTab(ttk.Frame):
         emo_frame = ttk.LabelFrame(self._inner, text="手动情绪 (VA先验 — 设了就走我的，没设就走模型)", padding=10)
         emo_frame.pack(fill=tk.X, padx=10, pady=5)
         self.manual_va_path = os.path.join(PROJECT_ROOT, "manual_va.json")
-        self._load_manual_va()
 
         emo_row1 = ttk.Frame(emo_frame)
         emo_row1.pack(fill=tk.X)
@@ -207,6 +206,7 @@ class DashboardTab(ttk.Frame):
         ttk.Button(emo_row4, text="清除手动情绪", command=self._clear_manual_va).pack(side=tk.LEFT, padx=5)
         self.va_status_label = ttk.Label(emo_row4, text="", foreground="gray")
         self.va_status_label.pack(side=tk.LEFT, padx=10)
+        self._load_manual_va()
         self._update_va_labels()
 
         # ── Persona 情感状态 ──
@@ -316,7 +316,7 @@ class DashboardTab(ttk.Frame):
             dialog.geometry("600x450")
             dialog.resizable(True, True)
 
-            ttk.Label(dialog, text=f"自省报告 — {pending['week']}（可编辑后确认注入 prompt_v1_base.txt）",
+            ttk.Label(dialog, text=f"自省报告 — {pending['week']}（可编辑后确认注入 prompt_v1.txt）",
                       font=("", 10, "bold")).pack(pady=10, padx=10)
 
             editor = tk.Text(dialog, height=15, wrap=tk.WORD, font=("", 10))
@@ -332,14 +332,14 @@ class DashboardTab(ttk.Frame):
                     messagebox.showwarning("内容为空", "自省内容不能为空。")
                     return
                 if not messagebox.askyesno("确认注入",
-                    "确定将这段自省注入 prompt_v1_base.txt 吗？\n\n"
+                    "确定将这段自省注入 prompt_v1.txt 吗？\n\n"
                     "注入后，DS 的系统人格将包含这段自省，\n"
                     "影响 DS 在所有对话中的行为。"):
                     return
                 try:
                     from memory.reflection_engine import inject_to_base_prompt
                     inject_to_base_prompt(new_text)
-                    messagebox.showinfo("成功", "自省已注入 prompt_v1_base.txt")
+                    messagebox.showinfo("成功", "自省已注入 prompt_v1.txt")
                     dialog.destroy()
                     _load_refl_status()
                 except Exception as e:
@@ -692,7 +692,7 @@ class DiaryPersonaTab(ttk.Frame):
         # 基座人格
         persona_files = [
             ("动态人格", os.path.join(PROJECT_ROOT, "persona", "prompt_v1.txt")),
-            ("基座人格", os.path.join(PROJECT_ROOT, "persona", "prompt_v1_base.txt")),
+            ("基座人格", os.path.join(PROJECT_ROOT, "persona", "prompt_v1.txt")),
         ]
         for label, path in persona_files:
             frm = ttk.LabelFrame(right_frame, text=label, padding=5)
@@ -1170,6 +1170,7 @@ class CardEditTab(ttk.Frame):
         summary = self.summary_text.get("1.0", tk.END).strip()
         old_content = self._card.get("content") or ""
         old_keywords = self._card.get("keywords") or ""
+        old_user_raw = self._card.get("user_raw") or ""
         content = f"原话：{raw_quote} | 概括：{summary}" if raw_quote else f"概括：{summary}"
         keywords = self.var_keywords.get().strip()
         category = self.var_category.get()
@@ -1180,7 +1181,7 @@ class CardEditTab(ttk.Frame):
         enabled = 1 if self.var_enabled.get() else 0
         resolved = 1 if self.var_resolved.get() else 0
         id_changed = new_id != old_id
-        content_changed = content != old_content
+        embed_changed = keywords != old_keywords or raw_quote != old_user_raw
 
         if not new_id:
             self.status_var.set("ID不能为空")
@@ -1216,9 +1217,9 @@ class CardEditTab(ttk.Frame):
                 effective_id = old_id
 
             c.execute(
-                "UPDATE cards SET title=?, content=?, keywords=?, importance=?, category=?, "
+                "UPDATE cards SET title=?, content=?, keywords=?, user_raw=?, importance=?, category=?, "
                 "valence=?, arousal=?, chord=?, enabled_in_context=?, resolved=?, human_touched=1 WHERE id=?",
-                (title, content, keywords, importance, category, valence, arousal, chord, enabled, resolved, effective_id)
+                (title, content, keywords, raw_quote, importance, category, valence, arousal, chord, enabled, resolved, effective_id)
             )
             if c.rowcount == 0:
                 messagebox.showerror("失败", "未找到对应卡片。")
@@ -1241,7 +1242,7 @@ class CardEditTab(ttk.Frame):
                     _tb_ri.print_exc()
                     messagebox.showerror("FAISS重索引异常", f"{type(e).__name__}: {e}")
 
-            if content_changed:
+            if id_changed or embed_changed:
                 try:
                     self._re_embed(effective_id, title, content, keywords)
                 except Exception as e:
@@ -1312,12 +1313,14 @@ class RecallFeedbackTab(ttk.Frame):
     def _build(self):
         top = ttk.Frame(self)
         top.pack(fill=tk.X, padx=10, pady=5)
-        ttk.Button(top, text="刷新列表", command=self._load).pack(side=tk.LEFT, padx=5)
-        ttk.Button(top, text="应用反馈微调", command=self._apply).pack(side=tk.LEFT, padx=5)
+        ttk.Button(top, text="刷新列表", command=self._load).pack(side=tk.LEFT, padx=4, ipadx=6, ipady=2)
+        ttk.Button(top, text="删除选中", command=self._delete_selected).pack(side=tk.LEFT, padx=4, ipadx=6, ipady=2)
+        ttk.Button(top, text="清空全部", command=self._delete_all).pack(side=tk.LEFT, padx=4, ipadx=6, ipady=2)
+        ttk.Button(top, text="应用反馈微调", command=self._apply).pack(side=tk.LEFT, padx=4, ipadx=6, ipady=2)
         self.auto_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(top, text="5轮自动微调", variable=self.auto_var).pack(side=tk.LEFT, padx=10)
-        self.stats_label = ttk.Label(top, text="", foreground="gray")
-        self.stats_label.pack(side=tk.LEFT, padx=15)
+        self.stats_label = tk.Label(top, text="", fg="#666", font=("Microsoft YaHei", 10))
+        self.stats_label.pack(side=tk.RIGHT, padx=15)
 
         # 左右分栏
         panes = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
@@ -1326,15 +1329,21 @@ class RecallFeedbackTab(ttk.Frame):
         # 左侧：检索轮次列表
         left = ttk.Frame(panes)
         panes.add(left, weight=1)
-        self.tree = ttk.Treeview(left, columns=("ts", "query", "va", "count"), show="headings", height=20)
+        self.tree = ttk.Treeview(left, columns=("ts", "query", "va", "count", "tag"), show="headings", height=20)
         self.tree.heading("ts", text="时间")
         self.tree.heading("query", text="查询")
         self.tree.heading("va", text="VA档")
         self.tree.heading("count", text="卡片数")
-        self.tree.column("ts", width=100)
-        self.tree.column("query", width=130)
+        self.tree.heading("tag", text="源")
+        self.tree.column("ts", width=95)
+        self.tree.column("query", width=110)
         self.tree.column("va", width=45)
         self.tree.column("count", width=45)
+        self.tree.column("tag", width=55)
+        self.tree.tag_configure("preflight", background="#71a2cb", foreground="white")
+        self.tree.tag_configure("trigger", background="#2a39f4", foreground="white")
+        self.tree.tag_configure("bark", background="#536af5", foreground="white")
+        self.tree.configure(selectmode="extended")
         self.tree.pack(fill=tk.BOTH, expand=True)
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
 
@@ -1364,10 +1373,10 @@ class RecallFeedbackTab(ttk.Frame):
         # 底栏按钮
         bottom = ttk.Frame(right)
         bottom.pack(fill=tk.X, pady=5)
-        ttk.Button(bottom, text="✓ 准确", command=lambda: self._mark("good")).pack(side=tk.LEFT, padx=5)
-        ttk.Button(bottom, text="✗ 不准", command=lambda: self._mark("bad")).pack(side=tk.LEFT, padx=5)
-        ttk.Button(bottom, text="清除标记", command=lambda: self._mark(None)).pack(side=tk.LEFT, padx=5)
-        self.fb_status = ttk.Label(bottom, text="", foreground="gray")
+        ttk.Button(bottom, text="✓ 准确", command=lambda: self._mark("good")).pack(side=tk.LEFT, padx=4, ipadx=8, ipady=2)
+        ttk.Button(bottom, text="✗ 不准", command=lambda: self._mark("bad")).pack(side=tk.LEFT, padx=4, ipadx=8, ipady=2)
+        ttk.Button(bottom, text="清除标记", command=lambda: self._mark(None)).pack(side=tk.LEFT, padx=4, ipadx=8, ipady=2)
+        self.fb_status = tk.Label(bottom, text="", fg="#666", font=("Microsoft YaHei", 10))
         self.fb_status.pack(side=tk.LEFT, padx=10)
 
         # QA 上下文面板
@@ -1377,8 +1386,116 @@ class RecallFeedbackTab(ttk.Frame):
         self.qa_text.pack(fill=tk.BOTH, expand=True)
         self.qa_text.config(state=tk.DISABLED)
 
+        # 权重微调控件
+        wt_frame = ttk.LabelFrame(right, text="检索权重微调 (写入 retrieval_weights.json)", padding=5)
+        wt_frame.pack(fill=tk.X, pady=5)
+        self._wt_vars = {}
+        self._wt_labels = {
+            "w_presence_penalty": ("出现扣分", 0.0, 0.30, 0.01),
+            "w_repetition_penalty": ("重复扣分", 0.0, 0.40, 0.01),
+            "w_frequency_penalty": ("频次扣分", 0.0, 0.10, 0.005),
+            "frequency_penalty_cap": ("扣分上限", 0.0, 0.50, 0.01),
+            "teleport_rate": ("传送概率", 0.0, 0.50, 0.01),
+        }
+        wt_inner = ttk.Frame(wt_frame)
+        wt_inner.pack(fill=tk.X)
+        col = 0
+        for key, (label, vmin, vmax, step) in self._wt_labels.items():
+            f = ttk.Frame(wt_inner)
+            f.pack(side=tk.LEFT, padx=4)
+            ttk.Label(f, text=label, font=("", 8)).pack()
+            var = tk.DoubleVar()
+            sb = ttk.Spinbox(f, textvariable=var, from_=vmin, to=vmax, increment=step, width=6)
+            sb.pack()
+            self._wt_vars[key] = var
+            col += 1
+        btn_row = ttk.Frame(wt_frame)
+        btn_row.pack(fill=tk.X, pady=(3, 0))
+        ttk.Button(btn_row, text="加载当前值", command=self._load_weights).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_row, text="保存并生效", command=self._save_weights).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_row, text="恢复默认", command=self._reset_weights).pack(side=tk.LEFT, padx=3)
+        self._wt_status = tk.Label(btn_row, text="", fg="#666", font=("", 8))
+        self._wt_status.pack(side=tk.LEFT, padx=8)
+
         self._traces = {}
         self._load()
+
+    def _delete_selected(self):
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showinfo("未选中", "请在左侧列表选中要删除的 trace（可 Ctrl/Shift 多选）。")
+            return
+        if not messagebox.askyesno("确认删除", f"确定删除选中的 {len(selected)} 条检索记录吗？\n\n此操作不可撤销。"):
+            return
+        for tid in selected:
+            self._traces.pop(tid, None)
+        self._rewrite_traces()
+        self._load()
+        self.stats_label.config(text=f"已删除 {len(selected)} 条")
+
+    def _delete_all(self):
+        if not self._traces:
+            return
+        if not messagebox.askyesno("确认清空", f"确定删除全部 {len(self._traces)} 条检索记录吗？\n\n此操作不可撤销。"):
+            return
+        self._traces.clear()
+        self._rewrite_traces()
+        self._load()
+        self.stats_label.config(text="已清空全部检索记录")
+
+    def _rewrite_traces(self):
+        import json as _json_trace
+        lines = []
+        if os.path.exists(self.TRACE_PATH):
+            with open(self.TRACE_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        t = _json_trace.loads(line.strip())
+                        if t.get("trace_id") in self._traces:
+                            lines.append(line)
+                    except Exception:
+                        pass
+        with open(self.TRACE_PATH, "w", encoding="utf-8") as f:
+            for line in lines:
+                f.write(line)
+
+    def _load_weights(self):
+        try:
+            from memory.retriever import get_effective_weights, SCORING_CONFIG
+            eff = get_effective_weights()
+            for key, var in self._wt_vars.items():
+                val = eff.get(key, SCORING_CONFIG.get(key, 0))
+                var.set(round(val, 3))
+            self._wt_status.config(text="已加载", fg="#666")
+        except Exception as e:
+            self._wt_status.config(text=f"加载失败: {e}", fg="red")
+
+    def _save_weights(self):
+        try:
+            import json, os
+            path = os.path.join(os.path.dirname(__file__), "memory", "retrieval_weights.json")
+            data = {}
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            for key, var in self._wt_vars.items():
+                data[key] = round(var.get(), 3)
+            from delegate_tools import atomic_write_json
+            atomic_write_json(path, data)
+            self._wt_status.config(text="已保存，下次检索生效", fg="#4caf50")
+        except Exception as e:
+            self._wt_status.config(text=f"保存失败: {e}", fg="red")
+
+    def _reset_weights(self):
+        if not messagebox.askyesno("恢复默认", "确定恢复所有检索权重到默认值吗？"):
+            return
+        try:
+            from memory.retriever import SCORING_CONFIG
+            for key, var in self._wt_vars.items():
+                var.set(round(SCORING_CONFIG.get(key, 0), 3))
+            self._wt_status.config(text="已填入默认值，请点「保存并生效」", fg="#ff9800")
+        except Exception as e:
+            self._wt_status.config(text=f"恢复失败: {e}", fg="red")
 
     def _load(self):
         self._traces = {}
@@ -1405,12 +1522,16 @@ class RecallFeedbackTab(ttk.Frame):
                                 good += 1
                             elif c.get("feedback") == "bad":
                                 bad += 1
+                        tag = t.get("tag", "")
+                        TAG_LABELS = {"preflight": "[家]", "trigger": "[工位]", "bark": "[bark]", "phantom_cli": "[手动]"}
+                        tag_label = TAG_LABELS.get(tag, tag)
                         self.tree.insert("", 0, values=(
                             t.get("ts", "")[:16],
                             t.get("query", "")[:50],
                             t.get("va_tier", "?"),
-                            len(cards)
-                        ), iid=tid)
+                            len(cards),
+                            tag_label,
+                        ), iid=tid, tags=(tag,) if tag else ())
                     except json.JSONDecodeError as e:
                         bad_lines += 1
                         print(f"[feedback] JSON 解析失败 (行偏移={e.pos}): {line[:80]}", file=sys.stderr)
@@ -1526,23 +1647,33 @@ class RecallFeedbackTab(ttk.Frame):
                 except json.JSONDecodeError:
                     pass
 
-        # 找最接近 trace 时间戳的 user 消息
         best_idx = -1
-        best_score = 999
         for i, e in enumerate(entries):
-            ets = e.get("timestamp", "")
-            if query and query[:30] in str(e.get("content", "")):
+            content = str(e.get("content", ""))
+            if query and len(query) >= 8 and query[:30] in content:
                 best_idx = i
                 break
-            # 备选：时间戳最接近
-            if ts and ets:
-                try:
-                    dist = abs(len(ets) - len(ts))
-                    if dist < best_score:
-                        best_score = dist
-                        best_idx = i
-                except:
-                    pass
+
+        if best_idx < 0 and ts and entries:
+            try:
+                from datetime import datetime as _dt_qa
+                trace_dt = _dt_qa.strptime(ts[:19], "%Y-%m-%d %H:%M:%S")
+                best_idx = len(entries) - 1
+                best_dist = 999999
+                for i, e in enumerate(entries):
+                    ets = e.get("timestamp", "")
+                    if not ets:
+                        continue
+                    try:
+                        entry_dt = _dt_qa.fromisoformat(ets.replace("+0000", "+00:00").replace("Z", "+00:00"))
+                        dist = abs((trace_dt - entry_dt.replace(tzinfo=None)).total_seconds())
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_idx = i
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
         if best_idx < 0:
             self.qa_text.insert(tk.END, f"(未找到匹配对话)\n查询: {query}")

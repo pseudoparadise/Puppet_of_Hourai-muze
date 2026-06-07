@@ -268,7 +268,7 @@ def main():
             [line.split(": ", 1)[1] for line in today_chat.split("\n") if ": " in line]
         )
         try:
-            top_cards = _retrieve_func(full_context_for_search, top_k=3)
+            top_cards = _retrieve_func(full_context_for_search, top_k=3, trace_tag="bark")
             if top_cards:
                 memory_lines = ["【近期相关记忆】"]
                 for card in top_cards:
@@ -358,16 +358,19 @@ def main():
                     pass
             if msg and bark_key and bark_key != "你的BarkKey填这里":
                 print(f"推送内容: {msg}")
-                bark_url = f"https://api.day.app/{bark_key}/{msg}"
+                from urllib.parse import quote
+                bark_url = f"https://api.day.app/{bark_key}/{quote(msg, safe='')}"
                 try:
                     bark_resp = requests.get(bark_url, timeout=10)
-                    print(f"Bark 推送结果: {bark_resp.status_code}")
+                    print(f"Bark 推送结果: {bark_resp.status_code} body={bark_resp.text[:100]}")
                     bark_sent = (bark_resp.status_code == 200)
                     if bark_sent:
                         from shared import record_bark_push
                         record_bark_push(msg, state=state)
                 except Exception as e:
                     print(f"Bark 推送失败: {e}")
+                    import traceback as _tb_bark
+                    _tb_bark.print_exc()
             elif msg:
                 print(f"[模拟推送] Bark key 未配置，消息预览: {msg}")
         else:

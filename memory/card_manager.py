@@ -253,17 +253,22 @@ class CardManager:
             conn.close()
 
     def build_final_tab(self):
-        # 分类过滤栏
+        # 分类过滤栏 + 关键词搜索
         filter_frame = ttk.Frame(self.final_frame)
         filter_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(filter_frame, text="分类筛选:").pack(side=tk.LEFT, padx=5)
+        ttk.Label(filter_frame, text="分类:").pack(side=tk.LEFT, padx=2)
         self.final_cat_filter = ttk.Combobox(filter_frame, values=[
             "全部","milestone","commitments","turning_points","deep_talks",
             "interaction","preferences","real_world","daily_life","emotional","habits","erotic","todo"
-        ], state="readonly", width=14)
+        ], state="readonly", width=12)
         self.final_cat_filter.set("全部")
-        self.final_cat_filter.pack(side=tk.LEFT, padx=5)
+        self.final_cat_filter.pack(side=tk.LEFT, padx=2)
         self.final_cat_filter.bind("<<ComboboxSelected>>", lambda e: self.load_final())
+        ttk.Label(filter_frame, text=" 搜索:").pack(side=tk.LEFT, padx=2)
+        self.final_search_var = tk.StringVar()
+        self.final_search_entry = ttk.Entry(filter_frame, textvariable=self.final_search_var, width=16)
+        self.final_search_entry.pack(side=tk.LEFT, padx=2)
+        self.final_search_var.trace_add("write", lambda *a: self.load_final())
 
         btn_frame = ttk.Frame(self.final_frame)
         btn_frame.pack(fill=tk.X, pady=5)
@@ -274,6 +279,7 @@ class CardManager:
         ttk.Button(btn_frame, text="回填向量", command=self.backfill_embeddings).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="关联卡片", command=self.manual_link_cards).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="一键断连", command=self.break_card_link).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="调权重", command=self.adjust_link_weight).pack(side=tk.LEFT, padx=5)
 
         columns = ("id", "title", "category", "importance", "links", "valence", "arousal", "days_remaining", "enabled", "resolved", "vec", "content")
         self.final_tree = ttk.Treeview(self.final_frame, columns=columns, show="headings", height=12)
@@ -319,19 +325,25 @@ class CardManager:
         cat_filter = getattr(self, 'final_cat_filter', None)
         cat_filter_val = cat_filter.get() if cat_filter else "全部"
 
+        cat_filter = getattr(self, 'final_cat_filter', None)
+        cat_filter_val = cat_filter.get() if cat_filter else "全部"
+        kw = getattr(self, 'final_search_var', tk.StringVar()).get().strip()
+
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         try:
             c = conn.cursor()
-            c.execute("""
-                SELECT id, title, category, importance,
-                       valence, arousal,
-                       created_at, last_referenced_at, enabled_in_context, resolved,
-                       embedding IS NOT NULL as has_vec,
-                       COALESCE(content,'') as content
-                FROM cards WHERE review_status='final'
-                ORDER BY created_at DESC
-            """)
+            sql = "SELECT id, title, category, importance, valence, arousal, created_at, last_referenced_at, enabled_in_context, resolved, embedding IS NOT NULL as has_vec, COALESCE(content,'') as content FROM cards WHERE review_status='final'"
+            params = []
+            if cat_filter_val and cat_filter_val != "全部":
+                sql += " AND category=?"
+                params.append(cat_filter_val)
+            if kw:
+                sql += " AND (title LIKE ? OR keywords LIKE ? OR content LIKE ? OR id LIKE ?)"
+                like = f"%{kw}%"
+                params.extend([like, like, like, like])
+            sql += " ORDER BY created_at DESC"
+            c.execute(sql, params)
             rows = c.fetchall()
             from datetime import datetime, timezone as _tz
             now = datetime.now(_tz.utc).replace(tzinfo=None)
@@ -752,63 +764,166 @@ class CardManager:
             messagebox.showinfo("无关联", f"「{title}」目前没有任何 link 边。")
             return
 
-        # 构建选择弹窗
+        # 构建多选弹窗
         dialog = tk.Toplevel(self.root)
         dialog.title(f"断连 — {title}")
-        dialog.geometry("550x350")
+        dialog.geometry("550x380")
         dialog.resizable(False, False)
 
-        ttk.Label(dialog, text=f"「{title}」的关联卡片（点击选中后断开）：",
+        ttk.Label(dialog, text=f"「{title}」的关联卡片（勾选后批量断开）：",
                   font=("", 10, "bold")).pack(pady=10, padx=10)
 
-        list_frame = ttk.Frame(dialog)
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-
-        lb = tk.Listbox(list_frame, height=10)
-        lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll = ttk.Scrollbar(list_frame, command=lb.yview)
+        cvs = tk.Canvas(dialog, height=200)
+        cvs.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        inner = ttk.Frame(cvs)
+        cvs.create_window((0, 0), window=inner, anchor=tk.NW)
+        scroll = ttk.Scrollbar(cvs, orient=tk.VERTICAL, command=cvs.yview)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        lb.config(yscrollcommand=scroll.set)
+        cvs.configure(yscrollcommand=scroll.set)
 
-        for nid, sim, direction, manual in neighbors:
+        conn_title = sqlite3.connect(DB_PATH)
+        conn_title.row_factory = sqlite3.Row
+        check_vars = {}
+        for i, (nid, sim, direction, manual) in enumerate(neighbors):
             arrow = {'forward': '→', 'backward': '←', 'parallel': '≈', 'unknown': '—'}[direction]
             manual_tag = " [手动]" if manual else ""
-            conn = sqlite3.connect(DB_PATH)
-            conn.row_factory = sqlite3.Row
-            nr = conn.execute("SELECT title FROM cards WHERE id=?", (nid,)).fetchone()
-            conn.close()
+            nr = conn_title.execute("SELECT title FROM cards WHERE id=?", (nid,)).fetchone()
             ntitle = nr["title"] if nr else nid
-            lb.insert(tk.END, f"{arrow} {ntitle} (score={sim:.3f}{manual_tag})")
+            var = tk.BooleanVar(value=False)
+            cb = ttk.Checkbutton(inner, text=f"{arrow} {ntitle}  (sim={sim:.3f}{manual_tag})", variable=var)
+            cb.pack(anchor=tk.W, pady=1)
+            check_vars[i] = (var, nid, f"{arrow} {ntitle}  (sim={sim:.3f}{manual_tag})")
+        conn_title.close()
+        inner.update_idletasks()
+        cvs.configure(scrollregion=cvs.bbox("all"))
 
-        def do_break():
-            sel = lb.curselection()
-            if not sel:
+        def do_bulk_break():
+            selected = [(nid, lbl) for i, (var, nid, lbl) in check_vars.items() if var.get()]
+            if not selected:
+                messagebox.showwarning("未勾选", "请先勾选要断开的关联。")
                 return
-            idx = sel[0]
-            nid, sim, direction, manual = neighbors[idx]
-            conn = sqlite3.connect(DB_PATH)
-            conn.row_factory = sqlite3.Row
-            nr = conn.execute("SELECT title FROM cards WHERE id=?", (nid,)).fetchone()
-            conn.close()
-            ntitle = nr["title"] if nr else nid
-
-            if not messagebox.askyesno("确认断连",
-                f"确定断开以下关联吗？\n\n"
+            names = "\n".join(f"  {lbl}" for _, lbl in selected)
+            if not messagebox.askyesno("确认批量断连",
+                f"确定断开以下 {len(selected)} 条关联吗？\n\n"
                 f"  {title}\n"
-                f"  ↔ (断开)\n"
-                f"  {ntitle}\n\n"
-                f"此操作不可撤销，重建 link 不会恢复。"):
+                f"  ↔\n{names}\n\n"
+                f"此操作不可撤销。"):
                 return
+            broken = 0
+            for nid, _ in selected:
+                if break_link(card_id, nid):
+                    broken += 1
+            messagebox.showinfo("完成", f"已断开 {broken}/{len(selected)} 条关联。")
+            self.load_final()
+            dialog.destroy()
 
-            if break_link(card_id, nid):
-                messagebox.showinfo("成功", f"已断开：{title} ↔ {ntitle}")
-                self.load_final()
-                dialog.destroy()
-            else:
-                messagebox.showerror("失败", "断开操作未生效。")
+        btn_row = ttk.Frame(dialog)
+        btn_row.pack(pady=10)
+        ttk.Button(btn_row, text="全选", command=lambda: [v[0].set(True) for v in check_vars.values()]).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_row, text="全不选", command=lambda: [v[0].set(False) for v in check_vars.values()]).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_row, text="批量断开", command=do_bulk_break).pack(side=tk.LEFT, padx=10)
+        ttk.Button(btn_row, text="取消", command=dialog.destroy).pack(side=tk.LEFT, padx=3)
 
-        ttk.Button(dialog, text="断开选中边", command=do_break).pack(pady=10)
-        ttk.Button(dialog, text="取消", command=dialog.destroy).pack(pady=(0, 10))
+    def adjust_link_weight(self):
+        selected = self.final_tree.selection()
+        if not selected:
+            messagebox.showwarning("未选中", "请先在卡片库里点选一张卡片。")
+            return
+        card_id = selected[0]
+        title = self.final_tree.item(card_id, "values")[1]
+        from linker import get_linked_with_similarity
+        neighbors = get_linked_with_similarity(card_id)
+        if not neighbors:
+            messagebox.showinfo("无关联", f"「{title}」目前没有任何 link 边。")
+            return
+
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"调整权重 — {title}")
+        dialog.geometry("600x400")
+        dialog.configure(bg="#fafafa")
+
+        header = tk.Frame(dialog, bg="#536af5", height=32)
+        header.pack(fill=tk.X)
+        tk.Label(header, text=f"「{title}」的 link 权重调整", font=("Microsoft YaHei", 11, "bold"),
+                 fg="white", bg="#536af5").pack(side=tk.LEFT, padx=15, pady=5)
+
+        columns = ("direction", "neighbor", "similarity", "manual")
+        tree = ttk.Treeview(dialog, columns=columns, show="headings", height=10)
+        tree.heading("direction", text="方向"); tree.column("direction", width=45)
+        tree.heading("neighbor", text="关联卡片"); tree.column("neighbor", width=250)
+        tree.heading("similarity", text="当前权重"); tree.column("similarity", width=70)
+        tree.heading("manual", text="类型"); tree.column("manual", width=60)
+        tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 5))
+
+        ARROWS = {'forward': '→', 'backward': '←', 'parallel': '≈', 'unknown': '—'}
+        for nid, sim, direction, manual in neighbors:
+            nr = conn.execute("SELECT title FROM cards WHERE id=?", (nid,)).fetchone()
+            ntitle = nr["title"] if nr else nid
+            tree.insert("", tk.END, iid=nid, values=(
+                ARROWS.get(direction, '—'), ntitle, f"{sim:.3f}",
+                "手动" if manual else "自动"
+            ))
+        conn.close()
+
+        if tree.get_children():
+            first = tree.get_children()[0]
+            tree.selection_set(first)
+            tree.focus(first)
+
+        ctrl = ttk.Frame(dialog)
+        ctrl.pack(fill=tk.X, padx=10, pady=5)
+        ttk.Label(ctrl, text="新权重:", font=("", 10)).pack(side=tk.LEFT, padx=5)
+        spin_var = tk.DoubleVar(value=0.70)
+        ttk.Spinbox(ctrl, textvariable=spin_var, from_=0.10, to=1.00, increment=0.01,
+                    width=6, font=("", 11)).pack(side=tk.LEFT, padx=5)
+
+        status_var = tk.StringVar(value="点击上方行选中要调整的 link，设置新权重后点「确认」")
+        tk.Label(ctrl, textvariable=status_var, fg="#888", font=("", 8)).pack(side=tk.LEFT, padx=15)
+
+        def on_tree_select(event):
+            sel = tree.selection()
+            if sel:
+                vals = tree.item(sel[0], "values")
+                spin_var.set(float(vals[2]))
+                status_var.set(f"已选中: {vals[1][:30]} (当前 {vals[2]})")
+        tree.bind("<<TreeviewSelect>>", on_tree_select)
+
+        def do_adjust():
+            sel = tree.selection()
+            if not sel:
+                status_var.set("请先在表格里点击选中一条 link")
+                return
+            nid = sel[0]
+            vals = tree.item(nid, "values")
+            old_sim = float(vals[2])
+            new_sim = spin_var.get()
+            if abs(new_sim - old_sim) < 0.001:
+                status_var.set("权重未变化，无需调整")
+                return
+            if not messagebox.askyesno("确认", f"调整权重:\n\n  {title}\n  {vals[0]} {vals[1]}\n\n  {old_sim:.3f} → {new_sim:.3f}"):
+                return
+            a, b = min(card_id, nid), max(card_id, nid)
+            c2 = sqlite3.connect(DB_PATH)
+            cur = c2.cursor()
+            cur.execute("UPDATE card_links SET similarity=?, manual=1 WHERE card_id_a=? AND card_id_b=?",
+                        (new_sim, a, b))
+            ok = cur.rowcount > 0
+            if not ok:
+                cur.execute("INSERT INTO card_links (card_id_a, card_id_b, similarity, relation, direction, manual, created_at) VALUES (?, ?, ?, 'manual:weight', 'unknown', 1, datetime('now'))",
+                            (a, b, new_sim))
+            c2.commit()
+            c2.close()
+            tree.set(nid, "similarity", f"{new_sim:.3f}")
+            tree.set(nid, "manual", "手动")
+            status_var.set(f"已更新: {vals[1][:30]} → {new_sim:.3f}")
+        tree.bind("<Double-1>", lambda e: do_adjust())
+
+        btn_row = ttk.Frame(dialog)
+        btn_row.pack(pady=8)
+        ttk.Button(btn_row, text="确认调整", command=do_adjust).pack(side=tk.LEFT, padx=5, ipadx=10, ipady=2)
+        ttk.Button(btn_row, text="刷新并关闭", command=lambda: [self.load_final(), dialog.destroy()]).pack(side=tk.LEFT, padx=5, ipadx=10, ipady=2)
 
 
 if __name__ == "__main__":

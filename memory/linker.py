@@ -59,8 +59,54 @@ def ensure_link_table():
             pass
     conn.execute("CREATE INDEX IF NOT EXISTS idx_links_a ON card_links(card_id_a)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_links_b ON card_links(card_id_b)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS broken_links (
+            card_id_a TEXT,
+            card_id_b TEXT,
+            broken_at TEXT NOT NULL,
+            PRIMARY KEY (card_id_a, card_id_b)
+        )
+    """)
     conn.commit()
     conn.close()
+
+
+def _is_broken(conn, a: str, b: str) -> bool:
+    a, b = _normalize_pair(a, b)
+    return conn.execute(
+        "SELECT COUNT(*) FROM broken_links WHERE card_id_a=? AND card_id_b=?",
+        (a, b)
+    ).fetchone()[0] > 0
+
+
+def _prune_excess_links(conn):
+    """保证每卡总 link 数 ≤ MAX_LINKS_PER_CARD。只砍 auto 边，手动边不动。"""
+    rows = conn.execute(
+        "SELECT DISTINCT card_id FROM ("
+        "  SELECT card_id_a as card_id FROM card_links"
+        "  UNION ALL SELECT card_id_b FROM card_links"
+        ")"
+    ).fetchall()
+    trimmed = 0
+    for (cid,) in rows:
+        total_count = conn.execute(
+            "SELECT COUNT(*) FROM card_links WHERE card_id_a=? OR card_id_b=?", (cid, cid)
+        ).fetchone()[0]
+        if total_count <= MAX_LINKS_PER_CARD:
+            continue
+        excess = total_count - MAX_LINKS_PER_CARD
+        auto_edges = conn.execute(
+            "SELECT card_id_b as neighbor, similarity FROM card_links WHERE card_id_a=? AND manual=0 "
+            "UNION ALL SELECT card_id_a as neighbor, similarity FROM card_links WHERE card_id_b=? AND manual=0 "
+            "ORDER BY similarity ASC",
+            (cid, cid)
+        ).fetchall()
+        for neighbor, sim in auto_edges[:excess]:
+            a, b = _normalize_pair(cid, neighbor)
+            conn.execute("DELETE FROM card_links WHERE card_id_a=? AND card_id_b=? AND manual=0", (a, b))
+            trimmed += 1
+    if trimmed:
+        print(f"[link] 修剪: {trimmed} 条超出上限的边")
 
 
 def _normalize_pair(a: str, b: str) -> tuple:
@@ -172,6 +218,8 @@ def _compute_link_score(cosine: float, card_a: dict, card_b: dict) -> tuple:
 
 def _insert_link(conn, card_id_a, card_id_b, score, relation, direction, now, manual=0):
     a, b = _normalize_pair(card_id_a, card_id_b)
+    if _is_broken(conn, a, b):
+        return 0
     conn.execute(
         "INSERT OR IGNORE INTO card_links "
         "(card_id_a, card_id_b, similarity, relation, direction, manual, created_at) "
@@ -182,8 +230,8 @@ def _insert_link(conn, card_id_a, card_id_b, score, relation, direction, now, ma
 
 
 def _apply_transitive_closure(conn, all_cards, now):
-    """传递闭包：如果 A-B 和 B-C 都是 precedes/accompanies 边，
-    则为 A-C 降低阈值尝试建边。"""
+    """传递闭包：如果 A-B 和 B-C 都存在边，
+    则为 A-C 降低阈值尝试建边。broken_links 和 上限由 _insert_link/_prune 保证。"""
     edges = conn.execute(
         "SELECT card_id_a, card_id_b, similarity, direction FROM card_links"
     ).fetchall()
@@ -195,12 +243,12 @@ def _apply_transitive_closure(conn, all_cards, now):
 
     new_edges = 0
     checked = set()
+
     for node_a in list(adjacency.keys()):
         for node_b in list(adjacency.get(node_a, {}).keys()):
             for node_c in list(adjacency.get(node_b, {}).keys()):
                 if node_c == node_a:
                     continue
-                # 确保 A-C 还没边
                 if node_c in adjacency.get(node_a, {}):
                     continue
                 pair = (min(node_a, node_c), max(node_a, node_c))
@@ -217,14 +265,12 @@ def _apply_transitive_closure(conn, all_cards, now):
                 ):
                     continue
 
-                # 用 embedding 算 cosine
                 va = np.frombuffer(card_a["embedding"], dtype=np.float32)
                 vc = np.frombuffer(card_c["embedding"], dtype=np.float32)
                 cosine = float(np.dot(va, vc))
 
                 score, relation, direction = _compute_link_score(cosine, card_a, card_c)
 
-                # 传递闭包：降低阈值
                 if score >= COMPOSITE_THRESHOLD - TRANSITIVE_BONUS:
                     relation += "+chain"
                     if _insert_link(conn, node_a, node_c, score, relation, direction, now):
@@ -269,17 +315,10 @@ def build_links(card_id: str, vec: np.ndarray):
         return 0
     card_a = dict(card_row)
 
-    # 检查已有链接数，不超过上限
-    existing_count = conn.execute(
-        "SELECT COUNT(*) FROM card_links WHERE card_id_a=? OR card_id_b=?", (card_id, card_id)
-    ).fetchone()[0]
-    remaining = max(0, MAX_LINKS_PER_CARD - existing_count)
-    created = 0
     now = datetime.now().isoformat()
 
+    candidates = []
     for faiss_id, l2_dist in zip(faiss_indices, faiss_distances):
-        if remaining <= 0:
-            break
         other_id = _int_id_to_str(int(faiss_id))
         if not other_id or other_id == card_id:
             continue
@@ -292,13 +331,6 @@ def build_links(card_id: str, vec: np.ndarray):
             continue
         card_b = dict(other_row)
 
-        # 对方也已满则跳过
-        other_count = conn.execute(
-            "SELECT COUNT(*) FROM card_links WHERE card_id_a=? OR card_id_b=?", (other_id, other_id)
-        ).fetchone()[0]
-        if other_count >= MAX_LINKS_PER_CARD:
-            continue
-
         cosine = float(1.0 - l2_dist ** 2 / 2.0)
         cosine = max(0.0, min(1.0, cosine))
 
@@ -310,10 +342,14 @@ def build_links(card_id: str, vec: np.ndarray):
         if score < COMPOSITE_THRESHOLD:
             continue
 
+        candidates.append((other_id, score, relation, direction, card_b["title"], cosine))
+
+    candidates.sort(key=lambda x: x[1], reverse=True)
+    created = 0
+    for other_id, score, relation, direction, other_title, cosine in candidates[:MAX_LINKS_PER_CARD]:
         if _insert_link(conn, card_id, other_id, score, relation, direction, now):
             created += 1
-            remaining -= 1
-            print(f"[link] {card_a['title']} <-> {card_b['title']} "
+            print(f"[link] {card_a['title']} <-> {other_title} "
                   f"(score={score:.3f} cos={cosine:.3f} {relation} {direction})")
 
     # 传递闭包：扫描新卡是否构成新的 A→新卡→C 或 A→新卡 桥接
@@ -321,8 +357,10 @@ def build_links(card_id: str, vec: np.ndarray):
         "SELECT id, embedding, title, category, keywords, target_date "
         "FROM cards WHERE review_status='final' AND embedding IS NOT NULL"
     ).fetchall()
-    all_cards = {r["id"]: dict(r) for r in all_rows}
-    chain_created = _apply_transitive_closure(conn, all_cards, now)
+    all_cards_map = {r["id"]: dict(r) for r in all_rows}
+    chain_created = _apply_transitive_closure(conn, all_cards_map, now)
+
+    _prune_excess_links(conn)
 
     conn.commit()
     conn.close()
@@ -369,7 +407,7 @@ def remove_links(card_id: str, include_manual: bool = False):
 
 
 def create_manual_link(card_id_a: str, card_id_b: str, relation: str = 'manual:causal') -> bool:
-    """手动创建因果边。不受分类防火墙限制，rebulid 不删除。"""
+    """手动创建因果边。不受分类防火墙限制，rebulid 不删除。清除已记录的断连。"""
     ensure_link_table()
     conn = sqlite3.connect(DB_PATH)
 
@@ -389,6 +427,7 @@ def create_manual_link(card_id_a: str, card_id_b: str, relation: str = 'manual:c
         "VALUES (?, ?, 0.999, ?, ?, 1, ?)",
         (a, b, relation, direction, now)
     )
+    conn.execute("DELETE FROM broken_links WHERE card_id_a=? AND card_id_b=?", (a, b))
     conn.commit()
     conn.close()
     print(f"[link] manual: {card_id_a} <-> {card_id_b} ({relation} {direction})")
@@ -396,10 +435,14 @@ def create_manual_link(card_id_a: str, card_id_b: str, relation: str = 'manual:c
 
 
 def break_link(card_id_a: str, card_id_b: str) -> bool:
-    """断开两张卡之间的 link 边（含手动边）。"""
+    """断开两张卡之间的 link 边（含手动边）。记录到 broken_links 防止被 rebuild 重建。"""
     conn = sqlite3.connect(DB_PATH)
     a, b = _normalize_pair(card_id_a, card_id_b)
     conn.execute("DELETE FROM card_links WHERE card_id_a=? AND card_id_b=?", (a, b))
+    conn.execute(
+        "INSERT OR IGNORE INTO broken_links (card_id_a, card_id_b, broken_at) VALUES (?, ?, ?)",
+        (a, b, datetime.now().isoformat())
+    )
     conn.commit()
     affected = conn.total_changes
     conn.close()
@@ -409,7 +452,7 @@ def break_link(card_id_a: str, card_id_b: str) -> bool:
 
 
 def rebuild_all_links():
-    """全量重建所有卡片的 link graph（含传递闭包 + 方向边）。"""
+    """全量重建所有卡片的 link graph（top-10 + 传递闭包 + 方向边）。"""
     ensure_link_table()
     from encoder import load_index, _int_id_to_str
 
@@ -431,53 +474,54 @@ def rebuild_all_links():
         return 0
 
     conn.execute("DELETE FROM card_links WHERE manual=0")
-    total = conn.execute("SELECT COUNT(*) FROM card_links WHERE manual=1").fetchone()[0]
+    manual_total = conn.execute("SELECT COUNT(*) FROM card_links WHERE manual=1").fetchone()[0]
     now = datetime.now().isoformat()
 
-    # 第一遍：直接建边（每卡最多 MAX_LINKS_PER_CARD 条）
-    per_card_count = {cid: 0 for cid in all_cards}
+    # 第一遍：每卡独立对其 FAISS 近邻打分，各取 top 10
     for card_id, card_a in all_cards.items():
-        if per_card_count[card_id] >= MAX_LINKS_PER_CARD:
-            continue
         vec = np.frombuffer(card_a["embedding"], dtype=np.float32)
-
         neighbors = index.search(vec.reshape(1, -1).astype(np.float32), LINK_K + 1)
         faiss_indices = neighbors[1][0]
         faiss_distances = neighbors[0][0]
 
+        candidates = []
         for faiss_id, l2_dist in zip(faiss_indices, faiss_distances):
             other_id = _int_id_to_str(int(faiss_id))
             if not other_id or other_id == card_id:
                 continue
-            if per_card_count[card_id] >= MAX_LINKS_PER_CARD:
-                break
-            if per_card_count.get(other_id, 0) >= MAX_LINKS_PER_CARD:
-                continue
             card_b = all_cards.get(other_id)
             if not card_b:
+                continue
+            if not _categories_compatible(card_a.get("category", ""), card_b.get("category", "")):
                 continue
 
             cosine = float(1.0 - l2_dist ** 2 / 2.0)
             cosine = max(0.0, min(1.0, cosine))
-
-            if not _categories_compatible(card_a.get("category", ""), card_b.get("category", "")):
-                continue
-
             score, relation, direction = _compute_link_score(cosine, card_a, card_b)
 
-            if score < COMPOSITE_THRESHOLD:
-                continue
+            if score >= COMPOSITE_THRESHOLD:
+                candidates.append((other_id, score, relation, direction, card_b["title"], cosine))
 
-            if _insert_link(conn, card_id, other_id, score, relation, direction, now):
-                total += 1
-                per_card_count[card_id] += 1
-                per_card_count[other_id] = per_card_count.get(other_id, 0) + 1
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        for other_id, score, relation, direction, other_title, cosine in candidates[:MAX_LINKS_PER_CARD]:
+            _insert_link(conn, card_id, other_id, score, relation, direction, now)
+
+    direct_total = conn.execute(
+        "SELECT COUNT(*) FROM card_links WHERE manual=0"
+    ).fetchone()[0]
 
     # 第二遍：传递闭包补边
     chain_edges = _apply_transitive_closure(conn, all_cards, now)
-    total += chain_edges
+
+    # 修剪超出上限的边
+    _prune_excess_links(conn)
+
+    final_auto = conn.execute(
+        "SELECT COUNT(*) FROM card_links WHERE manual=0"
+    ).fetchone()[0]
+    total = final_auto + manual_total
 
     conn.commit()
     conn.close()
-    print(f"[link] 全量重建完成: {total} 条边 (阈值={COMPOSITE_THRESHOLD}, 传递+{chain_edges})")
+    print(f"[link] 全量重建完成: {total} 条边 (直连{final_auto}, 手动{manual_total}, 传递+{chain_edges})")
     return total
