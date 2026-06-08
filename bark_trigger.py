@@ -132,20 +132,35 @@ def _get_last_active_time(config, state, now):
     except Exception:
         pass
 
-    # 取两者中最新；都失败则降级为 1 小时前
-    if supabase_time and state_time:
-        if supabase_time >= state_time:
-            last_time = supabase_time
-            source = "Supabase"
-        else:
-            last_time = state_time
-            source = "state.json (实时)"
-    elif supabase_time:
-        last_time = supabase_time
-        source = "Supabase"
-    elif state_time:
-        last_time = state_time
-        source = "state.json"
+    # 读 chat_logs.json 最后一条时间（Claude Code + log_turn.py 路径）
+    chatlog_time = None
+    try:
+        chat_log_path = os.path.join(os.path.dirname(__file__), "chat_logs.json")
+        if os.path.exists(chat_log_path):
+            with open(chat_log_path, "r", encoding="utf-8") as f:
+                last_line = None
+                for line in f:
+                    if line.strip():
+                        last_line = line
+            if last_line:
+                entry = json.loads(last_line.strip())
+                raw_ts = entry.get("timestamp", "")
+                if raw_ts:
+                    chatlog_time = parse_time(raw_ts)
+    except Exception:
+        pass
+
+    # 取三者中最新；都失败则降级为 1 小时前
+    candidates = []
+    if supabase_time:
+        candidates.append((supabase_time, "Supabase"))
+    if state_time:
+        candidates.append((state_time, "state.json"))
+    if chatlog_time:
+        candidates.append((chatlog_time, "chat_logs.json"))
+    if candidates:
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        last_time, source = candidates[0]
     else:
         last_time = now - timedelta(hours=1)
         source = "降级(默认1h前)"

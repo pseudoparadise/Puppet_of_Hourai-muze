@@ -110,23 +110,28 @@ def touch_cards(card_ids: list):
         conn.close()
 
 def update_active_status():
-    """定期调用，更新卡片活跃状态"""
+    """定期调用，更新卡片活跃状态。
+    只禁用真正沉睡的卡：不在核心类别、不重要、且60天+未被引用。不再先杀全家。"""
     conn = sqlite3.connect(DB_PATH)
     try:
         c = conn.cursor()
         now_utc = datetime.now(timezone.utc)
-        c.execute("UPDATE cards SET enabled_in_context = 0 WHERE review_status = 'final'")
+        # 只禁用满足以下全部条件的卡：
+        #   非核心类别 且 重要度<7 且 60天+未被引用
+        # 条件不满足 = 不碰，保持原状
         c.execute("""
-            UPDATE cards SET enabled_in_context = 1
+            UPDATE cards SET enabled_in_context = 0
             WHERE review_status = 'final'
-            AND (
-                category IN ('milestone', 'commitments', 'deep_talks', 'preferences', 'todo')
-                OR importance >= 8
-                OR (julianday(?) - julianday(COALESCE(last_referenced_at, created_at) || '+00:00')) <= 30
-            )
+            AND category NOT IN ('milestone', 'commitments', 'deep_talks', 'preferences', 'todo', 'interaction', 'emotional', 'turning_points', 'habits')
+            AND importance < 7
+            AND (julianday(?) - julianday(COALESCE(last_referenced_at, created_at) || '+00:00')) > 60
         """, (now_utc.isoformat(),))
+        disabled = c.rowcount
+        if disabled > 0:
+            print(f"[memory_manager] 禁用了 {disabled} 张沉睡卡 (60天+未引用, imp<7, 非核心类别)")
+        else:
+            print(f"[memory_manager] 活跃状态检查完毕，无需禁用。")
         conn.commit()
-        print(f"[memory_manager] 活跃状态已更新，当前时间: {now_utc.isoformat()}")
     except Exception as e:
         print(f"[memory_manager] 活跃状态更新失败: {e}")
     finally:

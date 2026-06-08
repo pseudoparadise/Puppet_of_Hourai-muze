@@ -14,9 +14,17 @@ from datetime import datetime, timezone, timedelta
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 _HOME = os.environ.get("USERPROFILE") or os.environ.get("HOME") or os.path.expanduser("~")
-CLAUDE_PROJECT_DIR = os.path.join(_HOME, ".claude", "projects", "C--Users-23807-ghost-trigger")
-if not os.path.isdir(CLAUDE_PROJECT_DIR):
-    CLAUDE_PROJECT_DIR = "C:/Users/23807/.claude/projects/C--Users-23807-ghost-trigger"
+CLAUDE_PROJECT_DIRS = [
+    os.path.join(_HOME, ".claude", "projects", "C--Users-23807-ghost-trigger"),
+    os.path.join(_HOME, ".claude", "projects", "C--Users-23807"),
+]
+CLAUDE_PROJECT_DIRS = [d for d in CLAUDE_PROJECT_DIRS if os.path.isdir(d)]
+if not CLAUDE_PROJECT_DIRS:
+    CLAUDE_PROJECT_DIRS = [
+        "C:/Users/23807/.claude/projects/C--Users-23807-ghost-trigger",
+        "C:/Users/23807/.claude/projects/C--Users-23807",
+    ]
+    CLAUDE_PROJECT_DIRS = [d for d in CLAUDE_PROJECT_DIRS if os.path.isdir(d)]
 
 def beijing_now():
     return datetime.now(timezone(timedelta(hours=8)))
@@ -74,50 +82,52 @@ def from_claude_sessions(date_str: str = None):
     if date_str is None:
         date_str = beijing_now().strftime("%Y-%m-%d")
 
-    if not os.path.isdir(CLAUDE_PROJECT_DIR):
-        print(f"[work_log] Claude session 目录不存在: {CLAUDE_PROJECT_DIR}")
+    if not CLAUDE_PROJECT_DIRS:
+        print(f"[work_log] 无可用 Claude session 目录")
         return 0
 
     state = _load_extract_state()
     day_state = state.get(date_str, {})
     cursor = day_state.get("chat_cursor", "")  # 上次读到的时间戳
 
-    jsonl_files = sorted(_glob.glob(os.path.join(CLAUDE_PROJECT_DIR, "*.jsonl")))
-    if not jsonl_files:
-        print(f"[work_log] 无 session JSONL 文件")
-        return 0
-
-    entries = []
-    newest_ts = cursor
-    for jf in jsonl_files:
-        try:
-            with open(jf, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    ts = entry.get("timestamp", "")
-                    if not ts.startswith(date_str):
-                        continue
-                    if cursor and ts <= cursor:
-                        continue
-                    etype = entry.get("type", "")
-                    text = ""
-                    if etype in ("user", "assistant"):
-                        text = _extract_text_from_message(entry.get("message", {}))
-                    if not text:
-                        continue
-                    role = "ghost" if etype == "assistant" else "user"
-                    entries.append({"timestamp": ts, "role": role, "content": text})
-                    if ts > newest_ts:
-                        newest_ts = ts
-        except Exception as e:
-            print(f"[work_log] 读 session 文件 {os.path.basename(jf)} 出错: {e}")
+    all_entries = []
+    for project_dir in CLAUDE_PROJECT_DIRS:
+        jsonl_files = sorted(_glob.glob(os.path.join(project_dir, "*.jsonl")))
+        if not jsonl_files:
             continue
+        for jf in jsonl_files:
+            try:
+                with open(jf, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        ts = entry.get("timestamp", "")
+                        if not ts.startswith(date_str):
+                            continue
+                        if cursor and ts <= cursor:
+                            continue
+                        etype = entry.get("type", "")
+                        text = ""
+                        if etype in ("user", "assistant"):
+                            text = _extract_text_from_message(entry.get("message", {}))
+                        if not text:
+                            continue
+                        role = "ghost" if etype == "assistant" else "user"
+                        all_entries.append({"timestamp": ts, "role": role, "content": text})
+            except Exception as e:
+                print(f"[work_log] 读 session 文件 {os.path.basename(jf)} 出错: {e}")
+                continue
+
+    entries = sorted(all_entries, key=lambda x: x["timestamp"])
+    newest_ts = cursor
+    for e in entries:
+        if e["timestamp"] > newest_ts:
+            newest_ts = e["timestamp"]
 
     if not entries:
         print(f"[work_log] {date_str} 无新对话 (cursor={cursor[:19] if cursor else '起始'})")
@@ -249,10 +259,12 @@ def from_chat(date_str: str = None):
             f.write(line + "\n")
             written += 1
 
+    prev = state.get(date_str, {})
     state[date_str] = {
         "at": beijing_now().replace(tzinfo=None).isoformat(),
         "count": written,
         "msg_count": len(ghost_texts),
+        "chat_cursor": prev.get("chat_cursor", ""),
     }
     _save_extract_state(state)
 

@@ -56,9 +56,7 @@ def mode_pass_card(card: dict) -> bool:
 
 def mode_retrieval_categories() -> list:
     """返回当前模式应检索的卡片分类列表。"""
-    if get_mode() == "work":
-        return list(_MODE_WORK_CATS)
-    return []  # 空 = 不限制
+    return []  # 空 = 不限制（全类别）
 
 # ═══════════════════════════════════════════════════════════════
 # 1. JSON 安全加载（损坏时备份 + 返回默认值）

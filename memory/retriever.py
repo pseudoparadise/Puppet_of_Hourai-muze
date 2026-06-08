@@ -23,7 +23,7 @@ SCORING_CONFIG = {
     "w_keyword": 1.5,       # 关键词命中权重
     "w_semantic": 1.0,      # 语义相似度权重
     "w_importance": 0.5,    # 重要度权重
-    "w_anchor": 0.2,        # 岩之定锚权重（importance>=8 时激活）
+    "w_anchor": 0.08,       # 岩之定锚权重（importance>=8，已削至小数点后微调）
     "w_diffusion": 0.15,    # 风之扩散随机加成上限（微调↑ 0.1→0.15）
     "w_recency": 0.3,       # 雷之突进时间加权系数
     "w_decay": 0.2,         # 冰之冻结衰减系数（微调↑ 0.15→0.2）
@@ -251,7 +251,7 @@ def _safe_parse_ts(val):
 
 def _build_candidate_pool(all_cards: list, anchor_ids: set, va_tier: str,
                           va_description: str = None, va_valence: float = None,
-                          candidate_limit: int = 50) -> list:
+                          va_arousal: float = None, candidate_limit: int = 50) -> list:
     """
     构建语义搜索候选池，复杂度从 O(N) 降为 O(K)。
     优先级：锚定集 > VA分档筛选 > 水之共鸣描述匹配
@@ -322,15 +322,19 @@ def _build_candidate_pool(all_cards: list, anchor_ids: set, va_tier: str,
     if not pool:
         pool = list(all_cards)
 
-    # ── 毒点24修复：中唤醒模式随机采样，避免新卡因插入顺序被排除 ──
-    if va_tier == 'mid' and len(pool) > candidate_limit:
-        import random as _random
+    # ── 毒点24修复：截断时按 VA 坐标距离排序，离当前情绪最近的卡优先进池 ──
+    if len(pool) > candidate_limit:
+        import math as _math
         anchors_in_pool = [c for c in pool if c['id'] in anchor_ids]
         non_anchors = [c for c in pool if c['id'] not in anchor_ids]
-        sampled = anchors_in_pool + _random.sample(non_anchors, min(len(non_anchors), candidate_limit - len(anchors_in_pool)))
-        return sampled[:candidate_limit]
-    else:
-        return pool[:candidate_limit]
+        if va_valence is not None and va_arousal is not None:
+            qv, qa = va_valence, va_arousal
+            non_anchors.sort(key=lambda c: _math.sqrt(
+                (qv - (c.get('valence') or 0)) ** 2 + (qa - (c.get('arousal') or 0.5)) ** 2
+            ))
+        non_anchors = non_anchors[:candidate_limit - len(anchors_in_pool)]
+        return (anchors_in_pool + non_anchors)[:candidate_limit]
+    return pool
 
 
 def _score_card(card: dict, hit_count: int, distance: float, weights: dict = None, anchor_ids: set = None, va_tier: str = "mid", **kwargs) -> float:
@@ -360,10 +364,10 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
     semantic_score = dist_sigmoid * w["w_semantic"]
     importance_score = card.get("importance", 5) * w["w_importance"]
 
-    # 岩之定锚：importance >= 8 的卡片获得额外锚定加成
+    # 岩之定锚：importance >= 8 的卡片获得微弱锚定加成
     anchor_bonus = 0
     if card.get('importance', 5) >= 8:
-        anchor_bonus = w['w_anchor'] * (card['importance'] / 10.0)
+        anchor_bonus = w.get('w_anchor', 0.08) * (card['importance'] / 10.0) * 0.3
 
     # 冰之锚定：锚定集合中的卡片获得额外加成
     if anchor_ids and card.get('id') in anchor_ids:
@@ -372,6 +376,10 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
     # ── P1-4: 低唤醒深度卡锚定加成 ──
     if w.get('_deep_boost') and card.get('category') in DEEP_CATEGORIES:
         anchor_bonus += w.get('w_anchor', 0.2) * 0.5
+
+    # ── P1-5: emotional 类语义加成（关键词稀疏，靠语义浮出水面） ──
+    if card.get('category') == 'emotional':
+        semantic_score *= 2.5
 
     # 风之扩散：随机探索加成（模拟风元素的大范围探索）
     diffusion_bonus = 0
@@ -687,10 +695,9 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
         semantic_k_mult = 2
         effective_weights['_deep_boost'] = True
 
-    # ── 语义主导缩放：mid 时非语义权重缩到 3%，让 cosine 主导排名 ──
-    if va_tier == "mid":
-        for k in ("w_importance", "w_anchor", "w_recency", "w_diffusion", "w_decay"):
-            effective_weights[k] = w.get(k, 0) * 0.03
+    # ── 语义主导缩放：扰动项缩到 3%，保留 importance 不砍（它是定海神针） ──
+    for k in ("w_anchor", "w_recency", "w_diffusion", "w_decay"):
+        effective_weights[k] = w.get(k, 0) * 0.03
 
     # 加载锚定卡片集合
     anchor_ids = set()
@@ -713,9 +720,9 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
 
     if _mode_cats:
         _placeholders = ",".join("?" * len(_mode_cats))
-        c.execute(f"SELECT id, keywords, importance, category, content, title, created_at, last_referenced_at, usage_count FROM cards WHERE review_status='final' AND enabled_in_context=1 AND category IN ({_placeholders})", _mode_cats)
+        c.execute(f"SELECT id, keywords, importance, category, content, title, created_at, last_referenced_at, usage_count, valence, arousal FROM cards WHERE review_status='final' AND enabled_in_context=1 AND category IN ({_placeholders})", _mode_cats)
     else:
-        c.execute("SELECT id, keywords, importance, category, content, title, created_at, last_referenced_at, usage_count FROM cards WHERE review_status='final' AND enabled_in_context=1")
+        c.execute("SELECT id, keywords, importance, category, content, title, created_at, last_referenced_at, usage_count, valence, arousal FROM cards WHERE review_status='final' AND enabled_in_context=1")
     all_cards = [dict(row) for row in c.fetchall()]
 
     query_lower = query.lower()
@@ -736,7 +743,7 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
                 print(f"[口癖召回] 「{_title}」关键词命中 → +3.0 bonus (score={card['score']:.1f})")
 
     # ── EL-4: 虫洞跳跃 — 构建候选池，语义搜索仅限候选池内 ──
-    candidate_pool = _build_candidate_pool(all_cards, anchor_ids, va_tier, va_description, va_valence)
+    candidate_pool = _build_candidate_pool(all_cards, anchor_ids, va_tier, va_description, va_valence, va_arousal)
     candidate_ids = {c["id"] for c in candidate_pool}
 
     semantic_hits = []
@@ -757,7 +764,7 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
                     if cid not in candidate_ids:
                         continue
                     c.execute(
-                        "SELECT id, keywords, importance, category, content, title, created_at, last_referenced_at, usage_count "
+                        "SELECT id, keywords, importance, category, content, title, created_at, last_referenced_at, usage_count, valence, arousal "
                         "FROM cards WHERE id=? AND review_status='final' AND enabled_in_context=1",
                         (cid,)
                     )
@@ -848,7 +855,7 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
                 _placeholders = ",".join(["?" for _ in _neighbor_ids])
                 _clink.execute(
                     f"SELECT id, keywords, importance, category, content, title, "
-                    f"created_at, last_referenced_at, usage_count, embedding "
+                    f"created_at, last_referenced_at, usage_count, valence, arousal, embedding "
                     f"FROM cards WHERE id IN ({_placeholders}) "
                     f"AND review_status='final' AND enabled_in_context=1",
                     list(_neighbor_ids)
@@ -887,9 +894,23 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
                     ))
                 _conn_link.close()
                 if _linked:
-                    print(f"[link扩散] {_linked} 张邻居卡注入候选池 (decay={LINK_DECAY})")
-                    for _dt, _ds, _dsim, _dscore in _diffused_cards:
-                        print(f"  -> [{_dt}] <- {_ds}  (link_cos={_dsim:.3f} score={_dscore})")
+                    # 运维日志：写入 retrieval_traces 文件，不吐 stdout 泄漏卡片顺序
+                    _verbose = trace_tag not in ("preflight", "bark")
+                    if _verbose:
+                        print(f"[link扩散] {_linked} 张邻居卡注入候选池 (decay={LINK_DECAY})")
+                        for _dt, _ds, _dsim, _dscore in _diffused_cards:
+                            print(f"  -> [{_dt}] <- {_ds}  (link_cos={_dsim:.3f} score={_dscore})")
+                    # 始终写 trace log
+                    try:
+                        _trace_path = os.path.join(os.path.dirname(__file__), "retrieval_traces.jsonl")
+                        _entry = {
+                            "tag": trace_tag, "linked": _linked,
+                            "neighbors": [{"title": _dt, "source": _ds, "cos": round(_dsim, 4), "score": round(_dscore, 2)} for _dt, _ds, _dsim, _dscore in _diffused_cards]
+                        }
+                        with open(_trace_path, "a", encoding="utf-8") as _tf:
+                            _tf.write(json.dumps(_entry, ensure_ascii=False) + "\n")
+                    except Exception:
+                        pass
         except Exception as _ld_e:
             print(f"[link扩散] 跳过: {_ld_e}")
 
@@ -921,9 +942,9 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
 
     result = result[:effective_k]
 
-    # ── P2-3: 高唤醒模式Top-3硬截断 ──
+    # ── P2-3: 高唤醒模式Top-5截断（扩到5给VA匹配卡留空间） ──
     if va_tier == "high":
-        result = result[:3]
+        result = result[:5]
 
     # ── 传送锚点：霸榜卡触发传送 ──
     if result and random.random() < w.get("teleport_rate", 0.15):
@@ -1108,8 +1129,14 @@ def _save_weights(w: dict):
     atomic_write_json(_WEIGHTS_PATH, w)
 
 
+# ── 语义主导缩放下被 ×0.03 的扰动项 ──
+_PERTURBATION_KEYS = {"w_anchor", "w_recency", "w_diffusion", "w_decay",
+                      "w_presence_penalty", "w_repetition_penalty", "w_frequency_penalty",
+                      "frequency_penalty_cap", "teleport_rate"}
+
+
 def get_effective_weights() -> dict:
-    """返回当前有效权重（SCORING_CONFIG + 人工反馈微调）。"""
+    """返回当前存储权重（SCORING_CONFIG + 人工反馈微调，不含 ×0.03 缩放）。"""
     stored = _load_weights()
     effective = dict(SCORING_CONFIG)
     for k in _WEIGHT_KEYS:
@@ -1179,7 +1206,8 @@ def apply_feedback_adjustments() -> dict:
         )
         for k, v in sorted_probes[:3]:
             if v > 0:
-                deltas[k] += 0.015
+                step = 0.003 if k in _PERTURBATION_KEYS else 0.015
+                deltas[k] += step
 
     for probes in bad_cards:
         sorted_probes = sorted(
@@ -1188,7 +1216,8 @@ def apply_feedback_adjustments() -> dict:
         )
         for k, v in sorted_probes[:3]:
             if v > 0:
-                deltas[k] -= 0.02
+                step = 0.005 if k in _PERTURBATION_KEYS else 0.02
+                deltas[k] -= step
 
     stored = _load_weights()
     for k in _WEIGHT_KEYS:

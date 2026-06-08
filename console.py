@@ -1386,29 +1386,43 @@ class RecallFeedbackTab(ttk.Frame):
         self.qa_text.pack(fill=tk.BOTH, expand=True)
         self.qa_text.config(state=tk.DISABLED)
 
-        # 权重微调控件
+        # 权重微调控件（Canvas + Scrollbar 滑动窗口）
         wt_frame = ttk.LabelFrame(right, text="检索权重微调 (写入 retrieval_weights.json)", padding=5)
         wt_frame.pack(fill=tk.X, pady=5)
+        wt_canvas = tk.Canvas(wt_frame, height=100, highlightthickness=0, bg="#fafafa")
+        wt_scroll = ttk.Scrollbar(wt_frame, orient=tk.HORIZONTAL, command=wt_canvas.xview)
+        wt_inner = ttk.Frame(wt_canvas)
+        wt_canvas.create_window((0, 0), window=wt_inner, anchor=tk.NW)
+        wt_canvas.configure(xscrollcommand=wt_scroll.set)
+        wt_canvas.pack(fill=tk.X)
+        wt_scroll.pack(fill=tk.X)
+
         self._wt_vars = {}
-        self._wt_labels = {
-            "w_presence_penalty": ("出现扣分", 0.0, 0.30, 0.01),
-            "w_repetition_penalty": ("重复扣分", 0.0, 0.40, 0.01),
-            "w_frequency_penalty": ("频次扣分", 0.0, 0.10, 0.005),
-            "frequency_penalty_cap": ("扣分上限", 0.0, 0.50, 0.01),
-            "teleport_rate": ("传送概率", 0.0, 0.50, 0.01),
+        all_labels = {
+            "w_semantic": ("语义", 0.0, 3.0, 0.02),
+            "w_keyword": ("关键词", 0.0, 3.0, 0.02),
+            "w_importance": ("重要度", 0.0, 3.0, 0.01),
+            "w_anchor": ("锚定×.03", 0.0, 0.50, 0.002),
+            "w_recency": ("时间×.03", 0.0, 1.0, 0.005),
+            "w_diffusion": ("扩散×.03", 0.0, 0.50, 0.002),
+            "w_decay": ("衰减×.03", 0.0, 0.50, 0.002),
+            "w_presence_penalty": ("出现扣", 0.0, 0.30, 0.005),
+            "w_repetition_penalty": ("重复扣", 0.0, 0.40, 0.005),
+            "w_frequency_penalty": ("频次扣", 0.0, 0.10, 0.002),
+            "frequency_penalty_cap": ("扣分上限", 0.0, 0.50, 0.005),
+            "teleport_rate": ("传送", 0.0, 0.50, 0.005),
         }
-        wt_inner = ttk.Frame(wt_frame)
-        wt_inner.pack(fill=tk.X)
-        col = 0
-        for key, (label, vmin, vmax, step) in self._wt_labels.items():
+        for key, (label, vmin, vmax, step) in all_labels.items():
             f = ttk.Frame(wt_inner)
-            f.pack(side=tk.LEFT, padx=4)
-            ttk.Label(f, text=label, font=("", 8)).pack()
+            f.pack(side=tk.LEFT, padx=2)
+            ttk.Label(f, text=label, font=("", 7)).pack()
             var = tk.DoubleVar()
             sb = ttk.Spinbox(f, textvariable=var, from_=vmin, to=vmax, increment=step, width=6)
             sb.pack()
             self._wt_vars[key] = var
-            col += 1
+        wt_inner.update_idletasks()
+        wt_canvas.configure(scrollregion=wt_canvas.bbox("all"))
+
         btn_row = ttk.Frame(wt_frame)
         btn_row.pack(fill=tk.X, pady=(3, 0))
         ttk.Button(btn_row, text="加载当前值", command=self._load_weights).pack(side=tk.LEFT, padx=3)
@@ -1479,7 +1493,7 @@ class RecallFeedbackTab(ttk.Frame):
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
             for key, var in self._wt_vars.items():
-                data[key] = round(var.get(), 3)
+                data[key] = round(var.get(), 4)
             from delegate_tools import atomic_write_json
             atomic_write_json(path, data)
             self._wt_status.config(text="已保存，下次检索生效", fg="#4caf50")
