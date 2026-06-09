@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 # ── FIX: 导入 load_index / save_index 而不仅是 create_index ──
 from encoder import embed, load_index, add_to_index, save_index, remove_from_index
+from preflight import _reset_degradation_counter
 
 PENDING_PATH = os.path.join(os.path.dirname(__file__), "pending_cards.json")
 DB_PATH = os.path.join(os.path.dirname(__file__), "cards.db")
@@ -48,9 +49,14 @@ class CardManager:
         self.dormant_frame = ttk.Frame(notebook)
         notebook.add(self.dormant_frame, text="已休眠卡片")
 
+        # ── 退化状态标签页 ──
+        self.degradation_frame = ttk.Frame(notebook)
+        notebook.add(self.degradation_frame, text="退化状态")
+
         self.build_pending_tab()
         self.build_final_tab()
         self.build_dormant_tab()
+        self.build_degradation_tab()
 
     def build_pending_tab(self):
         btn_frame = ttk.Frame(self.pending_frame)
@@ -632,7 +638,7 @@ class CardManager:
             return
 
         card_id = selected[0]
-        if not messagebox.askyesno("确认", f"确定复权卡片 {card_id} 吗？\n它将重新加入活跃记忆库。"):
+        if not messagebox.askyesno("确认", f"确定复权卡片 {card_id} 吗？\n它将重新加入活跃记忆库，退化轮数将清零。"):
             return
 
         conn = sqlite3.connect(DB_PATH)
@@ -641,7 +647,9 @@ class CardManager:
             c.execute("UPDATE cards SET enabled_in_context = 1 WHERE id = ?", (card_id,))
             conn.commit()
             if c.rowcount > 0:
-                messagebox.showinfo("成功", f"卡片 {card_id} 已复权。")
+                # ── 同步清空退化轮数，复活后从 FULL(首次曝光) 重新开始 ──
+                _reset_degradation_counter(card_id)
+                messagebox.showinfo("成功", f"卡片 {card_id} 已复权。\n退化轮数已清零，下次检索将以完整内容重新曝光。")
                 self.load_dormant()
                 self.load_final()
             else:

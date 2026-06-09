@@ -27,6 +27,7 @@ INTERVAL_MINUTES = 5
 HEARTBEAT_INTERVAL = 30 * 60  # 心跳间隔：30分钟
 DIARY_INTERVAL = 24 * 3600     # 日记最小间隔：24小时
 AUDIT_INTERVAL = 6 * 3600      # 审计间隔：6小时
+ARCHIVE_INTERVAL = 24 * 3600   # 日记归档间隔：24小时
 
 
 def _log_event(event_type: str, extra: dict = None):
@@ -49,14 +50,16 @@ def _ensure_diary(chain_dream, reason: str = "scheduled"):
     diary_path = os.path.join(PROJECT_ROOT, "diary", f"{yesterday}.md")
     work_path = os.path.join(PROJECT_ROOT, "diary", "work", f"{yesterday}_work.md")
 
+    now_ts = time.time()
     need_regenerate = False
     if not os.path.exists(diary_path):
         need_regenerate = True
     elif reason == "scheduled" and os.path.exists(work_path):
         # 零点定时触发时，如果工位日志比日记新，说明白天日记生成后有新工作，重生成
+        # 但加冷却：同一天日记上次生成时间在6小时内不再重生成
         diary_mtime = os.path.getmtime(diary_path)
         work_mtime = os.path.getmtime(work_path)
-        if work_mtime > diary_mtime:
+        if work_mtime > diary_mtime and (now_ts - diary_mtime) > 6 * 3600:
             need_regenerate = True
             print(f"[每日日记] 工位日志晚于日记，重新生成以包含全天工作...")
 
@@ -323,13 +326,15 @@ def main():
                         trace("bark_scan", f"命中「{ctitle}」→ {target_time.strftime('%H:%M')} (diff={diff}min)")
                 except Exception:
                     pass
-            # 今天到期的纯日期（全天待办，早9点提醒）
+            # 今天到期的纯日期（全天待办）
             elif tdate == today_str:
-                if 8 <= now_local.hour <= 10:
+                # 首次提醒: 8-10am 窗口 / 或从未提醒过(重启补发)
+                never_reminded = cid not in reminded
+                if (8 <= now_local.hour <= 10) or never_reminded:
                     should_remind = True
-                    remind_reason = f"今天待办"
+                    remind_reason = "今天待办" if not never_reminded else "今天待办(补发)"
                     from shared import trace
-                    trace("bark_scan", f"全天待办「{ctitle}」→ 早间提醒")
+                    trace("bark_scan", f"全天待办「{ctitle}」→ {'补发' if never_reminded else '早间提醒'}")
             # 即将到期（明天）
             elif tdate:
                 try:
@@ -438,6 +443,7 @@ def main():
     last_audit_time = time.time()  # 深渊审计
     last_housekeeping = 0  # 日常维护（日记/矿工/周收拢）
     last_work_extract = 0  # 工作日志增量提取
+    last_archive_time = 0  # 日记归档检查
 
     cycle_count = 0
 
@@ -514,6 +520,19 @@ def main():
                         _log_event("reflection_generated", {"path": path})
             except Exception as _re:
                 print(f"[每周自省] 跳过: {_re}")
+
+        # ── 日记归档检查（每24小时一次） ──
+        if now_ts - last_archive_time > ARCHIVE_INTERVAL:
+            last_archive_time = now_ts
+            try:
+                from archive_diary import archive_old_files, show_popup
+                moved, _ = archive_old_files(dry_run=False)
+                if moved > 0:
+                    print(f"[日记归档] {moved} 个文件已移至桌面")
+                    _log_event("archive_diary", {"count": moved})
+                    show_popup(moved)
+            except Exception as _ae:
+                _log_event("archive_error", {"error": str(_ae)[:200]})
 
         # ── 工作日志增量提取（每1小时，12:00-03:00 之间触发） ──
         WORK_EXTRACT_INTERVAL = 3600

@@ -550,6 +550,17 @@ def _update_seen_entry(seen: dict, card_id: str, times: int):
     seen["cards"][card_id]["last_shown_round"] = seen["round"]
 
 
+def _reset_degradation_counter(card_id: str):
+    """复权卡片时清空退化轮数，让卡片从 FULL(首次曝光) 重新开始。"""
+    seen = _load_seen()
+    if card_id in seen.get("cards", {}):
+        del seen["cards"][card_id]
+        _save_seen(seen)
+        print(f"[preflight] 退化轮数已清零: {card_id}")
+    else:
+        print(f"[preflight] 卡片 {card_id} 不在退化记录中，无需清零。")
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
     json_mode = "--json" in args

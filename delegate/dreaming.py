@@ -133,12 +133,48 @@ def _update_rolling_summary(new_summary: str, date_str: str = None):
     from delegate_tools import atomic_write_text
     atomic_write_text(ROLLING_SUMMARY_PATH, raw + "\n")
 
+def _has_similar_card(title: str) -> bool:
+    """检查 pending 队列和 final 卡库中是否有同标题或近似标题的卡（轻量，无需 embedding）。"""
+    try:
+        import difflib, os, json
+        # 1) pending 队列
+        pending_path = os.path.join(os.path.dirname(__file__), "..", "memory", "pending_cards.json")
+        if os.path.exists(pending_path):
+            with open(pending_path, "r", encoding="utf-8") as f:
+                pending = json.load(f)
+            for pc in pending:
+                existing_title = pc.get("title", "")
+                if title == existing_title or difflib.SequenceMatcher(None, title, existing_title).ratio() > 0.8:
+                    return True
+        # 2) final 卡库
+        cards_db = os.path.join(os.path.dirname(__file__), "..", "memory", "cards.db")
+        if os.path.exists(cards_db):
+            import sqlite3
+            conn = sqlite3.connect(cards_db)
+            c = conn.cursor()
+            c.execute("SELECT title FROM cards WHERE review_status='final' AND resolved=0")
+            for row in c.fetchall():
+                existing_title = row[0]
+                if title == existing_title or difflib.SequenceMatcher(None, title, existing_title).ratio() > 0.8:
+                    conn.close()
+                    return True
+            conn.close()
+    except Exception:
+        pass
+    return False
+
+
 def _append_pending_card(card: dict, source_module: str = "dreaming.py", evidence: str = ""):
     """将卡片草稿写入 pending_cards.json — 强制弹窗审核后方可写入"""
     from shared import is_garbage_card
     reason = is_garbage_card(card.get("title", ""), card.get("content", ""))
     if reason:
         print(f"[dreaming] 拦截: {reason}")
+        return
+
+    # ── 轻量标题去重：弹窗前先查 pending + final 有无同标题卡 ──
+    if _has_similar_card(card.get("title", "")):
+        print(f"[dreaming] 标题去重跳过「{card.get('title','')}」")
         return
 
     # ── 强制弹窗审核 ──

@@ -17,12 +17,14 @@ _HOME = os.environ.get("USERPROFILE") or os.environ.get("HOME") or os.path.expan
 CLAUDE_PROJECT_DIRS = [
     os.path.join(_HOME, ".claude", "projects", "C--Users-23807-ghost-trigger"),
     os.path.join(_HOME, ".claude", "projects", "C--Users-23807"),
+    os.path.join(_HOME, ".claude", "projects", "C--Users-23807-Desktop---"),
 ]
 CLAUDE_PROJECT_DIRS = [d for d in CLAUDE_PROJECT_DIRS if os.path.isdir(d)]
 if not CLAUDE_PROJECT_DIRS:
     CLAUDE_PROJECT_DIRS = [
         "C:/Users/23807/.claude/projects/C--Users-23807-ghost-trigger",
         "C:/Users/23807/.claude/projects/C--Users-23807",
+        "C:/Users/23807/.claude/projects/C--Users-23807-Desktop---",
     ]
     CLAUDE_PROJECT_DIRS = [d for d in CLAUDE_PROJECT_DIRS if os.path.isdir(d)]
 
