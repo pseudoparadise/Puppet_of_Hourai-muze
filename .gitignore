@@ -79,6 +79,11 @@ memory/work_log_state.json
 # ── 划卡审计日志 ──
 memory/resolution_log.jsonl
 
+# ── 检索链路追踪与权重（运行时动态数据）──
+memory/retrieval_traces.jsonl
+memory/retrieval_weights.json
+memory/preflight_seen.json
+
 # ── 崩溃日志 ──
 console_crash.log
 
