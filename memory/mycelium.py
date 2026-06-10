@@ -81,8 +81,8 @@ def write(source: str, key: str, intensity: float = 1.0, halflife_s: float = 360
     row = cur.fetchone()
 
     if row:
-        new_refs = row[1] + 1 if bump_refs else row[1]
-        created_at = row[2]
+        new_refs = row[0] + 1 if bump_refs else row[0]
+        created_at = row[1]
         conn.execute(
             "UPDATE pheromones SET intensity=?, halflife_s=?, refs=?, updated_at=?, meta=? "
             "WHERE source=? AND key=?",
