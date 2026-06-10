@@ -13,6 +13,7 @@ import faiss
 import os
 import json
 import time
+import re
 import requests
 import hashlib
 
@@ -159,20 +160,59 @@ def embed(text: str, max_retries: int = 3) -> np.ndarray:
 
     raise ConnectionError(f"embed 调用失败（已重试 {max_retries} 次）: {last_error}")
 
-def build_embed_text(card: dict) -> str:
-    """构建 embedding 输入文本：title + keywords + user_raw。
-    概括/总结是给 LLM 读的，不参与语义向量检索。"""
+def extract_summary(content: str) -> str:
+    """从卡片正文提取「概括」部分。匹配 '概括：...' 到文末。"""
+    if not content:
+        return ""
+    m = re.search(r'(?:\s*[|‖]\s*概括[：:]|\n概括[：:])(.*?)\Z', content, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    return ""
+
+
+def extract_quote(content: str) -> str:
+    """从卡片正文提取「原话」部分。匹配 '原话：... | 概括：' 或 '原话：...概括：'。"""
+    if not content:
+        return ""
+    m = re.search(r'原话[：:](.*?)(?:\s*[|‖]\s*概括[：:]|\n概括[：:]|\Z)', content, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    return content[:200]
+
+
+def build_embed_summary(card: dict) -> str:
+    """摘要向量输入: title + 概括。FAISS 检索主通道。"""
     title = card.get("title", "")
-    keywords = card.get("keywords", "")
-    user_raw = card.get("user_raw", "")
+    content = card.get("content", "")
     category = card.get("category", "")
 
     if category == "erotic":
-        content = card.get("content", "")
         return (title + " " + (content or ""))[:512]
 
-    parts = [p for p in [title, keywords, user_raw] if p]
+    summary = extract_summary(content)
+    parts = [p for p in [title, summary] if p]
     return " ".join(parts)[:1024]
+
+
+def build_embed_kw(card: dict) -> str:
+    """关键词向量输入: title + keywords。退化 TITLE 阶段余弦比对用。"""
+    title = card.get("title", "")
+    keywords = card.get("keywords", "")
+    parts = [p for p in [title, keywords] if p]
+    return " ".join(parts)[:512]
+
+
+def build_embed_quote(card: dict) -> str:
+    """原话向量输入: title + user_raw。退化 QUOTE 阶段余弦比对用。"""
+    title = card.get("title", "")
+    user_raw = card.get("user_raw", "")
+    parts = [p for p in [title, user_raw] if p]
+    return " ".join(parts)[:512]
+
+
+def build_embed_text(card: dict) -> str:
+    """[兼容别名] 等同于 build_embed_summary。旧调用点不改也能跑。"""
+    return build_embed_summary(card)
 
 
 def create_index() -> faiss.Index:

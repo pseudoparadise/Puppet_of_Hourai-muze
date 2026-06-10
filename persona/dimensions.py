@@ -1,6 +1,5 @@
 """
 dimensions.py — 轻量身份维度校准模块
-灵感来自 IO Feedling 的 7 维雷达，做简化版。
 
 用法:
   get_dimensions()          → 返回当前 7 维 dict

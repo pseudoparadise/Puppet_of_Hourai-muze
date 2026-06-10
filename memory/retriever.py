@@ -460,13 +460,25 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
         if any(kw.strip() in desc_lower for kw in card_kws.split(',')):
             water_smooth += w.get('w_va', 0.2) * 0.5
 
-    # ── P1-3: 草之生长 — 饱和曲线，usage≥10后不再增长 ──
+    # ── P1-3: 草之生长 — 饱和曲线，VA 分类差异化 ──
+    # ☀️ 正向卡(val≥0.3, a≥0.3)：引用升温放大，多露脸
+    # 🌫️ 混合态：保持原值，presence/repetition penalty 制衡不动的马太效应
+    # 🌙 深层卡(val<0.1 或 <0.2且a<0.3)：平时节制，当前 VA 同为负时关键召回
     growth_bonus = 0
     usage = card.get('usage_count', 0)
     if usage > 0:
         growth_cap = 0.4 if card.get('category') in DAILY_CATEGORIES else 0.3
-        effective_usage = min(usage, 10)  # 饱和上限，打破马太效应
-        growth_bonus = growth_cap * (1 - 1.0 / (1 + effective_usage * 0.3))  # 对数饱和
+        effective_usage = min(usage, 10)
+        growth_bonus = growth_cap * (1 - 1.0 / (1 + effective_usage * 0.3))
+
+        card_v = card.get('valence', 0)
+        card_a = card.get('arousal', 0.5)
+        if card_v >= 0.3 and card_a >= 0.3:
+            growth_bonus *= 1.5
+        elif card_v < 0.1 or (card_v < 0.2 and card_a < 0.3):
+            growth_bonus *= 0.5
+            if va_valence is not None and va_valence < 0.1:
+                growth_bonus += 0.10
 
     # ── P2-1: 绽放反应（草+水） ──
     if va_tier in ("low", "mid") and w.get('w_water', 0) > 0 and growth_bonus > 0:
@@ -622,6 +634,24 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
             'dyn_tier': dyn_tier,
         }
 
+    # ── 和弦自动映射：VA 四象限 → 四群（无手动/chord时自动启用）──
+    if '_query_chord' not in effective_weights and va_valence is not None and va_arousal is not None:
+        if va_valence >= 0 and va_arousal >= 0.5:
+            auto_group, auto_bpm, auto_dyn = 'bright', 'fast', 'strong'
+        elif va_valence >= 0 and va_arousal < 0.5:
+            auto_group, auto_bpm, auto_dyn = 'warm', 'mid', 'soft'
+        elif va_valence < 0 and va_arousal >= 0.5:
+            auto_group, auto_bpm, auto_dyn = 'tense', 'fast', 'strong'
+        else:
+            auto_group, auto_bpm, auto_dyn = 'melancholy', 'slow', 'soft'
+        effective_weights['_query_chord'] = {
+            'group': auto_group,
+            'bpm_tier': auto_bpm,
+            'dyn_tier': auto_dyn,
+        }
+        effective_weights['_chord_bpm'] = 140 if auto_bpm == 'fast' else (60 if auto_bpm == 'slow' else 90)
+        effective_weights['_chord_dynamic'] = 'f' if auto_dyn == 'strong' else ('p' if auto_dyn == 'soft' else 'mf')
+
     # ── VA 阶段配置：velocity tracker 覆盖 VA 门控 ──
     phase_cfg = effective_weights.pop('_phase_cfg', None)
 
@@ -725,16 +755,28 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
         c.execute("SELECT id, keywords, importance, category, content, title, created_at, last_referenced_at, usage_count, valence, arousal FROM cards WHERE review_status='final' AND enabled_in_context=1")
     all_cards = [dict(row) for row in c.fetchall()]
 
+    def _kw_match_score(kw: str, ql: str) -> float:
+        """单个关键词匹配得分：精确命中=1.0，Bigram重叠=0.7，无匹配=0.0。
+        长句关键词（>10字）只做精确匹配，避免常见词片段误命中。"""
+        if kw in ql:
+            return 1.0
+        if 3 <= len(kw) <= 10:
+            # Bigram 重叠：拆成相邻二字片段，任一命中即软匹配
+            bigrams = [kw[i:i+2] for i in range(len(kw) - 1)]
+            if any(bg in ql for bg in bigrams):
+                return 0.7
+        return 0.0
+
     query_lower = query.lower()
 
     keyword_hits = []
     for card in all_cards:
         kws = [kw.strip().lower() for kw in card.get("keywords", "").split(",") if kw.strip()]
-        hit_count = sum(1 for kw in kws if kw in query_lower)
-        if hit_count > 0:
-            card["hit_count"] = hit_count
+        hit_score = sum(_kw_match_score(kw, query_lower) for kw in kws)
+        if hit_score > 0:
+            card["hit_count"] = round(hit_score, 1)
             card["distance"] = 1.0
-            card["score"] = _score_card(card, hit_count, 1.0, effective_weights, anchor_ids, va_tier)
+            card["score"] = _score_card(card, hit_score, 1.0, effective_weights, anchor_ids, va_tier)
             keyword_hits.append(card)
             # 口癖/梗卡：关键词命中 → 给 bonus，不看 ID 前缀
             _title = card.get('title', '')
@@ -902,8 +944,10 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
                             print(f"  -> [{_dt}] <- {_ds}  (link_cos={_dsim:.3f} score={_dscore})")
                     # 始终写 trace log
                     try:
+                        import uuid as _uuid_link
                         _trace_path = os.path.join(os.path.dirname(__file__), "retrieval_traces.jsonl")
                         _entry = {
+                            "trace_id": str(_uuid_link.uuid4())[:8],
                             "tag": trace_tag, "linked": _linked,
                             "neighbors": [{"title": _dt, "source": _ds, "cos": round(_dsim, 4), "score": round(_dscore, 2)} for _dt, _ds, _dsim, _dscore in _diffused_cards]
                         }
@@ -1048,6 +1092,12 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
         })
     # ── 追踪本轮召回，供下轮 presence/repetition penalty 使用 ──
     _track_retrieved([c["id"] for c in output])
+    # ── 续命：更新 last_referenced_at + usage_count，防冰之冻结误伤 ──
+    try:
+        from memory.memory_manager import touch_cards
+        touch_cards([c["id"] for c in output])
+    except Exception:
+        pass
     # ── 圣遗物自适应：每100次检索自动调参 ──
     artifact_adapt()
     # ── 写检索 trace 供 console.py 召回反馈面板读取 ──
@@ -1197,27 +1247,36 @@ def apply_feedback_adjustments() -> dict:
     if not good_cards and not bad_cards:
         return {"good": 0, "bad": 0}
 
+    # 探针键名 → 权重键名映射（探针使用短名，权重用 w_ 前缀）
+    _PROBE_TO_WEIGHT = {
+        "keyword": "w_keyword", "semantic": "w_semantic", "importance": "w_importance",
+        "anchor": "w_anchor", "diffusion": "w_diffusion", "recency": "w_recency",
+        "decay": "w_decay", "fire": "w_fire", "water": "w_water",
+    }
+
     deltas = {k: 0.0 for k in _WEIGHT_KEYS}
 
     for probes in good_cards:
         sorted_probes = sorted(
-            [(k, v) for k, v in probes.items() if k in _WEIGHT_KEYS],
+            [(k, v) for k, v in probes.items() if k in _PROBE_TO_WEIGHT],
             key=lambda x: x[1], reverse=True
         )
         for k, v in sorted_probes[:3]:
             if v > 0:
-                step = 0.003 if k in _PERTURBATION_KEYS else 0.015
-                deltas[k] += step
+                wk = _PROBE_TO_WEIGHT[k]
+                step = 0.003 if wk in _PERTURBATION_KEYS else 0.015
+                deltas[wk] += step
 
     for probes in bad_cards:
         sorted_probes = sorted(
-            [(k, v) for k, v in probes.items() if k in _WEIGHT_KEYS],
+            [(k, v) for k, v in probes.items() if k in _PROBE_TO_WEIGHT],
             key=lambda x: x[1], reverse=True
         )
         for k, v in sorted_probes[:3]:
             if v > 0:
-                step = 0.005 if k in _PERTURBATION_KEYS else 0.02
-                deltas[k] -= step
+                wk = _PROBE_TO_WEIGHT[k]
+                step = 0.005 if wk in _PERTURBATION_KEYS else 0.02
+                deltas[wk] -= step
 
     stored = _load_weights()
     for k in _WEIGHT_KEYS:

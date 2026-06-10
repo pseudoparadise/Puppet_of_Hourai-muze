@@ -163,7 +163,7 @@ def invalidate_config_cache():
     _config_cache = None
 
 
-def record_bark_push(msg: str, state: dict = None):
+def record_bark_push(msg: str, state: dict = None, heat: str = "", silence_mins: float = 0):
     """记录最近 N 条 Bark 推送消息。若传入 state 则由调用方统一保存，避免竞态覆盖。"""
     own_state = state is None
     if own_state:
@@ -171,7 +171,12 @@ def record_bark_push(msg: str, state: dict = None):
     recent = state.get("recent_bark", [])
     from clock import beijing_now
     bj_now = beijing_now().strftime('%m-%d %H:%M')
-    recent.append({"time": bj_now, "msg": msg})
+    entry = {"time": bj_now, "msg": msg}
+    if heat:
+        entry["heat"] = heat
+    if silence_mins:
+        entry["silence"] = silence_mins
+    recent.append(entry)
     state["recent_bark"] = recent[-5:]
     if own_state:
         save_state(state)

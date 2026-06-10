@@ -237,9 +237,9 @@ def write_pending_card(card_draft: dict, source_module: str = "trigger.py", evid
     # ── 预存 embedding 向量：写入时即调 embed，供 card_guard 去重直接比对 ──
     if '_embed_vec' not in card_draft:
         try:
-            from encoder import embed as _embed_pending, build_embed_text as _bet_pending
+            from encoder import embed as _embed_pending, build_embed_summary as _bes_pending
             import numpy as _np_pv
-            _pv = _embed_pending(_bet_pending(card_draft))
+            _pv = _embed_pending(_bes_pending(card_draft))
             card_draft['_embed_vec'] = _pv.tolist()  # 2048 维 float 列表
         except Exception:
             pass
@@ -1252,14 +1252,14 @@ def post_process(raw_reply: str, top_cards: list, user_input: str, display_reply
             _auto_skip = False
             _pre_vec = None
             try:
-                from encoder import embed as _embed_pre, load_index as _load_pre, search_index as _search_pre, build_embed_text as _bet_pre
+                from encoder import embed as _embed_pre, load_index as _load_pre, search_index as _search_pre, build_embed_summary as _bes_pre
                 import numpy as _np_pre
                 # 优先复用 card_draft 自带 embedding，避免重复调豆包
                 _pre_cached = card_draft.get('_embed_vec')
                 if _pre_cached is not None:
                     _pre_vec = _np_pre.array(_pre_cached, dtype=_np_pre.float32)
                 else:
-                    _pre_vec = _embed_pre(_bet_pre(card_draft))
+                    _pre_vec = _embed_pre(_bes_pre(card_draft))
                 _pre_idx = _load_pre()
                 if _pre_idx.ntotal > 0:
                     _pre_neighbors = _search_pre(_pre_idx, _pre_vec, k=3)
@@ -1542,6 +1542,32 @@ def main():
             pass
 
     _load_session_state()
+
+    # ── 启动时自动从 chat_log 恢复最近对话上下文，防 bark 推送上下文延后 ──
+    if not recent:
+        try:
+            if os.path.exists(chat_log_path):
+                entries = []
+                with open(chat_log_path, "r", encoding="utf-8") as _cf:
+                    for _line in _cf:
+                        try:
+                            entries.append(json.loads(_line.strip()))
+                        except Exception:
+                            pass
+                rec_user = None
+                for entry in entries[-15:]:  # 取最后15条，凑约5轮对话
+                    role = entry.get("role", "")
+                    content = entry.get("content", "")
+                    if role == "user":
+                        rec_user = content
+                    elif role == "ghost" and rec_user is not None:
+                        recent.append({"user": rec_user, "assistant": content})
+                        rec_user = None
+                if recent:
+                    recent[:] = recent[-5:]  # 最多保留5轮
+                    print(f"[启动恢复] 已从 chat_log 注入 {len(recent)} 轮对话上下文")
+        except Exception as _auto_rec_e:
+            print(f"[启动恢复] chat_log 加载失败: {_auto_rec_e}")
 
     while True:
         try:

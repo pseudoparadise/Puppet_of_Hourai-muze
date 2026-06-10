@@ -228,10 +228,10 @@ def check_before_write(title: str, content: str, user_input: str,
     new_vec = pre_vec
     if new_vec is None:
         try:
-            from encoder import embed, build_embed_text
+            from encoder import embed, build_embed_summary
             _draft = {"title": title, "content": content, "keywords": (new_card_context or {}).get("keywords", ""),
                        "user_raw": user_input[:200], "category": (new_card_context or {}).get("category", "")}
-            new_vec = embed(build_embed_text(_draft))
+            new_vec = embed(build_embed_summary(_draft))
         except Exception:
             pass
 

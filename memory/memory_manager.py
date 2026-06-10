@@ -111,26 +111,58 @@ def touch_cards(card_ids: list):
 
 def update_active_status():
     """定期调用，更新卡片活跃状态。
-    只禁用真正沉睡的卡：不在核心类别、不重要、且60天+未被引用。不再先杀全家。"""
+    禁用真正沉睡的卡：不在核心类别、不重要、且60天+未被引用。
+    同时复活误伤卡片：核心类别/高重要度/60天内被引用的卡自动重新激活。"""
     conn = sqlite3.connect(DB_PATH)
     try:
         c = conn.cursor()
         now_utc = datetime.now(timezone.utc)
-        # 只禁用满足以下全部条件的卡：
-        #   非核心类别 且 重要度<7 且 60天+未被引用
-        # 条件不满足 = 不碰，保持原状
+        now_iso = now_utc.isoformat()
+
+        # 先禁用：非核心类别 + imp<7 + 60天+未引用
         c.execute("""
             UPDATE cards SET enabled_in_context = 0
             WHERE review_status = 'final'
-            AND category NOT IN ('milestone', 'commitments', 'deep_talks', 'preferences', 'todo', 'interaction', 'emotional', 'turning_points', 'habits')
+            AND enabled_in_context = 1
+            AND category NOT IN ('milestone', 'commitments', 'deep_talks', 'preferences',
+                                 'todo', 'interaction', 'emotional', 'turning_points', 'habits')
             AND importance < 7
-            AND (julianday(?) - julianday(COALESCE(last_referenced_at, created_at) || '+00:00')) > 60
-        """, (now_utc.isoformat(),))
+            AND (julianday(?) - julianday(
+                CASE
+                    WHEN last_referenced_at LIKE '%+00:00' THEN last_referenced_at
+                    WHEN last_referenced_at LIKE '%Z' THEN last_referenced_at
+                    ELSE COALESCE(last_referenced_at, created_at) || '+00:00'
+                END
+            )) > 60
+        """, (now_iso,))
         disabled = c.rowcount
+
+        # 再复活：满足任一豁免条件的卡
+        c.execute("""
+            UPDATE cards SET enabled_in_context = 1
+            WHERE review_status = 'final'
+            AND enabled_in_context = 0
+            AND (
+                category IN ('milestone', 'commitments', 'deep_talks', 'preferences',
+                             'todo', 'interaction', 'emotional', 'turning_points', 'habits')
+                OR importance >= 7
+                OR (julianday(?) - julianday(
+                    CASE
+                        WHEN last_referenced_at LIKE '%+00:00' THEN last_referenced_at
+                        WHEN last_referenced_at LIKE '%Z' THEN last_referenced_at
+                        ELSE COALESCE(last_referenced_at, created_at) || '+00:00'
+                    END
+                )) <= 60
+            )
+        """, (now_iso,))
+        revived = c.rowcount
+
         if disabled > 0:
             print(f"[memory_manager] 禁用了 {disabled} 张沉睡卡 (60天+未引用, imp<7, 非核心类别)")
-        else:
-            print(f"[memory_manager] 活跃状态检查完毕，无需禁用。")
+        if revived > 0:
+            print(f"[memory_manager] 复活了 {revived} 张误伤卡片 (核心类别/高重要度/近期引用)")
+        if disabled == 0 and revived == 0:
+            print(f"[memory_manager] 活跃状态检查完毕，无需变更。")
         conn.commit()
     except Exception as e:
         print(f"[memory_manager] 活跃状态更新失败: {e}")

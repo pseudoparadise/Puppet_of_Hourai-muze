@@ -25,6 +25,7 @@ preflight.py — Claude Code 家模式每轮消息的 ghost-trigger 管线
 import json
 import os
 import sys
+import time
 import sqlite3
 import numpy as np
 
@@ -101,8 +102,8 @@ def _extract_summary(content: str) -> str:
     return ""
 
 
-def _get_card_embeddings(card_ids: list) -> dict:
-    """批量读取卡片 embedding，返回 {card_id: np.ndarray}。一次 SQL 连接。"""
+def _get_card_embeddings_triple(card_ids: list) -> dict:
+    """批量读取三向量 embedding，返回 {card_id: {'summary': ndarray, 'kw': ndarray, 'quote': ndarray}}。"""
     result = {}
     if not card_ids:
         return result
@@ -111,14 +112,86 @@ def _get_card_embeddings(card_ids: list) -> dict:
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
         placeholders = ",".join("?" * len(card_ids))
-        c.execute(f"SELECT id, embedding FROM cards WHERE id IN ({placeholders})", card_ids)
+        c.execute(
+            f"SELECT id, embedding, embedding_kw, embedding_quote FROM cards WHERE id IN ({placeholders})",
+            card_ids
+        )
         for row in c.fetchall():
+            entry = {}
             if row["embedding"]:
-                result[row["id"]] = np.frombuffer(row["embedding"], dtype=np.float32)
+                entry["summary"] = np.frombuffer(row["embedding"], dtype=np.float32)
+            if row["embedding_kw"]:
+                entry["kw"] = np.frombuffer(row["embedding_kw"], dtype=np.float32)
+            if row["embedding_quote"]:
+                entry["quote"] = np.frombuffer(row["embedding_quote"], dtype=np.float32)
+            if entry:
+                result[row["id"]] = entry
         conn.close()
     except Exception as e:
-        crash_print(e, "preflight 批量读取卡片 embedding")
+        crash_print(e, "preflight 批量读取三向量 embedding")
     return result
+
+
+def _get_card_embeddings(card_ids: list) -> dict:
+    """[兼容] 返回摘要向量 {card_id: ndarray}，供旧代码使用。"""
+    triple = _get_card_embeddings_triple(card_ids)
+    return {cid: embs["summary"] for cid, embs in triple.items() if "summary" in embs}
+
+
+def _triple_cosine_gate(card_id: str, deg_display: str, query_vec: np.ndarray,
+                          triple_embs: dict, category: str) -> str:
+    """
+    三权分立门控：根据退化阶段，用对应的向量做余弦比对，决定是否升级展示级别。
+
+    阶段 → 比对方式:
+      TITLE   → query vs embedding_kw, cos>0.50 → 升级为 summary
+      QUOTE   → query vs embedding_quote, cos>0.60 → 升级为 full
+      SUMMARY → query vs embedding (summary), cos>0.50 → 升级为 full
+      REOPEN  → 三路 max > threshold → full; 否则 title（比旧版单向量更宽容）
+      FULL    → 不比对，直接放行
+
+    返回: 可能升级后的 display 等级。
+    """
+    embs = triple_embs.get(card_id, {})
+    if not embs or query_vec is None:
+        return deg_display
+
+    rule = DEGRADATION.get(category, DEGRADATION["_default"])
+
+    if deg_display == "title":
+        # 关键词向量比对：query 和关键词语义接近 → 至少给概括
+        if "kw" in embs:
+            cos_kw = _cosine(query_vec, embs["kw"])
+            if cos_kw > 0.50:
+                return "summary"
+
+    elif deg_display == "quote":
+        # 原话向量比对：query 和原话语义接近 → 直接给全文
+        if "quote" in embs:
+            cos_quote = _cosine(query_vec, embs["quote"])
+            if cos_quote > 0.60:
+                return "full"
+
+    elif deg_display == "summary":
+        # 摘要向量比对：query 和概括高度相关 → 升级全文
+        if "summary" in embs:
+            cos_summary = _cosine(query_vec, embs["summary"])
+            if cos_summary > 0.50:
+                return "full"
+
+    elif deg_display == "reopen":
+        # 三路任一过线即放行
+        cos_list = []
+        for key in ("kw", "quote", "summary"):
+            if key in embs:
+                cos_list.append(_cosine(query_vec, embs[key]))
+        max_cos = max(cos_list) if cos_list else 0.0
+        if max_cos > rule["threshold"]:
+            return "full"
+        else:
+            return "title"
+
+    return deg_display
 
 
 def _relevance_tier(cos_map: dict) -> dict:
@@ -196,27 +269,36 @@ def _check_reopen(card_id: str, threshold: float) -> bool:
 
 
 def _parse_ts(ts_str: str):
-    """统一解析 ISO timestamp，兼容 Z / +00:00 / +0000 三种格式。"""
+    """统一解析 ISO timestamp 为 timezone-aware datetime。
+    兼容 Z / +00:00 / +0000 / 无时区 四种格式。无时区时默认 UTC。"""
     try:
-        from datetime import datetime
+        from datetime import datetime, timezone
         s = ts_str.replace("Z", "+00:00")
-        return datetime.fromisoformat(s)
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except Exception:
         return None
 
 
 def _backfill_ghost_reply():
     """检测 chat_logs.json 中是否存在 orphan user（上轮 ghost 未写入），
-    从 Claude Code session 文件中捞取 ghost 回复并补写。循环修复直到无连续 user。"""
+    从 Claude Code session 文件中捞取 ghost 回复并补写。
+
+    一个对话框可以产生多个 session 文件。按 orphan 时间戳匹配 session mtime：
+    session 的 mtime 在 user1 之后 → 该 session 可能包含对应 ghost 回复。
+    只读 session 末尾 3000 行（orphan 回复总是在末尾附近）。"""
+    import time as _time_bf
+
     chat_path = os.path.join(PROJECT_ROOT, "chat_logs.json")
     if not os.path.exists(chat_path):
         return
 
-    # 预扫 session 文件列表（一次）
-    # 从 session 注册文件读取所有 Claude Code 窗口，不限于 ghost-trigger 目录
+    # 收集所有 ghost-trigger 项目的 session 文件（按 mtime 降序）
     sessions_dir = os.path.join(os.path.expanduser("~"), ".claude", "sessions")
     projects_base = os.path.join(os.path.expanduser("~"), ".claude", "projects")
-    session_files = []
+    ghost_sessions = []  # [(mtime, filepath), ...]
     try:
         for fname in os.listdir(sessions_dir):
             if not fname.endswith(".json"):
@@ -231,21 +313,26 @@ def _backfill_ghost_reply():
             cwd = sdata.get("cwd", "")
             if not sid:
                 continue
-            # 从 cwd 推导项目目录名
-            proj_name = "C--" + cwd.replace(":", "").replace("\\", "-").replace("/", "-").strip("-")
+            path_part = cwd[2:] if len(cwd) > 2 and cwd[1] == ":" else cwd
+            proj_name = "C--" + path_part.replace("\\", "-").replace("/", "-").strip("-")
             candidate = os.path.join(projects_base, proj_name, f"{sid}.jsonl")
-            if os.path.exists(candidate):
-                session_files.append((os.path.getmtime(candidate), candidate))
+            if not os.path.exists(candidate):
+                continue
+            if "ghost-trigger" in proj_name:
+                ghost_sessions.append((os.path.getmtime(candidate), candidate))
     except Exception:
         pass
-    if not session_files:
+
+    if not ghost_sessions:
         return
-    session_files.sort(key=lambda x: x[0], reverse=True)
+    ghost_sessions.sort(key=lambda x: x[0], reverse=True)
 
-    fixed_any = False
-    max_loops = 5  # 安全阀
+    _bf_start = _time_bf.time()
 
-    for _ in range(max_loops):
+    for _ in range(5):
+        if _time_bf.time() - _bf_start > 10:
+            return
+
         entries = []
         try:
             with open(chat_path, "r", encoding="utf-8") as f:
@@ -259,80 +346,122 @@ def _backfill_ghost_reply():
         if len(entries) < 2:
             return
 
-        last = entries[-1]
-        prev = entries[-2]
+        # 从末尾反向扫描找最近一个 orphan 对（两个连续 user）
+        orphan_idx = -1
+        for i in range(len(entries) - 1, 0, -1):
+            if entries[i]["role"] == "user" and entries[i-1]["role"] == "user":
+                orphan_idx = i
+                break
+        if orphan_idx < 0:
+            return
 
-        if not (last.get("role") == "user" and prev.get("role") == "user"):
-            return  # 无 orphan，退出循环
+        prev = entries[orphan_idx - 1]
+        last = entries[orphan_idx]
 
         t1 = _parse_ts(prev.get("timestamp", ""))
         t2 = _parse_ts(last.get("timestamp", ""))
         if not t1 or not t2:
             return
 
+        # t1 转 unix timestamp 用于和 session mtime 比较
+        t1_unix = t1.timestamp()
+
         ghost_content = None
         ghost_ts = None
 
-        for _, spath in session_files:
-            try:
-                with open(spath, "r", encoding="utf-8") as sf:
-                    for line in sf:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            entry = json.loads(line)
-                        except Exception:
-                            continue
-                        if entry.get("type") != "assistant":
-                            continue
-                        entry_ts = _parse_ts(entry.get("timestamp", ""))
-                        if not entry_ts:
-                            continue
-                        if not (t1 < entry_ts < t2):
-                            continue
-                        content_list = entry.get("message", {}).get("content", [])
-                        for block in content_list:
-                            if block.get("type") == "text":
-                                ghost_content = block.get("text", "")
-                                break
-                        if ghost_content:
-                            ghost_ts = entry.get("timestamp", "")
-                            break
-            except Exception:
-                pass
+        def _scan_lines(lines, t1, t2):
+            for line in reversed(lines):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except Exception:
+                    continue
+                if entry.get("type") != "assistant":
+                    continue
+                entry_ts = _parse_ts(entry.get("timestamp", ""))
+                if not entry_ts:
+                    continue
+                if not (t1 < entry_ts < t2):
+                    continue
+                content_list = entry.get("message", {}).get("content", [])
+                for block in content_list:
+                    if block.get("type") == "text":
+                        return block.get("text", ""), entry.get("timestamp", "")
+                return None, None
+            return None, None
+
+        for session_mtime, spath in ghost_sessions:
+            if session_mtime < t1_unix - 3600:
+                continue
+            # 先扫末尾（快），找不到再扫全文件
+            tail = _read_tail(spath, 3000)
+            ghost_content, ghost_ts = _scan_lines(tail, t1, t2)
+            if not ghost_content:
+                # 孤儿太老，回复可能在文件前部 → 全量扫描
+                try:
+                    with open(spath, "r", encoding="utf-8", errors="replace") as sf:
+                        all_lines = sf.readlines()
+                    ghost_content, ghost_ts = _scan_lines(all_lines, t1, t2)
+                except Exception:
+                    pass
             if ghost_content:
                 break
 
         if not ghost_content:
-            return  # 找不到，放弃本轮及后续
-
-        # 去重
-        dup = False
-        for e in entries:
-            if e.get("role") == "ghost":
-                if e.get("timestamp", "") == ghost_ts:
-                    dup = True
-                    break
-                if e.get("content", "") == ghost_content:
-                    dup = True
-                    break
-        if dup:
             return
 
-        # 补写
+        # 去重检查 + 修正插入位置（如果已存在但位置不对，移到两个 user 之间）
+        dup_idx = -1
+        for i, e in enumerate(entries):
+            if e.get("role") == "ghost" and (
+                e.get("timestamp", "") == ghost_ts or e.get("content", "") == ghost_content
+            ):
+                dup_idx = i
+                break
+
         ghost_entry = {"timestamp": ghost_ts, "role": "ghost", "content": ghost_content}
+        if dup_idx >= 0:
+            if dup_idx == orphan_idx:
+                return  # 已在正确位置，无需操作
+            # 已存在但位置不对 → 移到正确位置
+            entries.pop(dup_idx)
+            if dup_idx < orphan_idx:
+                orphan_idx -= 1  # 删除影响插入索引
+            entries.insert(orphan_idx, ghost_entry)
+        else:
+            entries.insert(orphan_idx, ghost_entry)
+
         try:
-            with open(chat_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(ghost_entry, ensure_ascii=False) + "\n")
+            with open(chat_path, "w", encoding="utf-8") as f:
+                for e in entries:
+                    f.write(json.dumps(e, ensure_ascii=False) + "\n")
             print(f"[preflight] 兜底补写 ghost 回复 → chat_logs.json ({ghost_ts[:19]})")
-            fixed_any = True
         except Exception as e:
             crash_print(e, "preflight 兜底补写 ghost 回复")
             return
 
 
-def preflight(user_input: str, json_mode: bool = False, skip_va: bool = False) -> dict:
+def _read_tail(filepath: str, max_lines: int) -> list:
+    """读文件末尾最多 max_lines 行（大文件友好）。
+    对于大文件，chunk 取 max_lines*500 或文件大小的 80%，取较大者。"""
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+            f.seek(0, os.SEEK_END)
+            fsize = f.tell()
+            chunk = max(max_lines * 500, int(fsize * 0.8))
+            if fsize <= chunk:
+                f.seek(0)
+                return f.readlines()
+            f.seek(max(0, fsize - chunk))
+            f.readline()  # 跳过可能不完整的第一行
+            return f.readlines()
+    except Exception:
+        return []
+
+
+def preflight(user_input: str, json_mode: bool = False, skip_va: bool = False, music_mode: bool = False) -> dict:
     # ── 兜底：补写上轮遗漏的 ghost 回复（仅家模式） ──
     from shared import get_mode
     if get_mode() == "home":
@@ -415,14 +544,17 @@ def preflight(user_input: str, json_mode: bool = False, skip_va: bool = False) -
         crash_print(e, "preflight 记忆检索")
         top_cards = [{"error": str(e), "title": "检索失败"}]
 
-    # ── 语义相关性门控：计算每张卡 vs query 的余弦相似度 ──
+    # ── 语义相关性门控 + 三权分立比对 ──
     qv = getattr(retrieve, '_cached_query_vec', None)
     card_ids = [c.get("id", "") for c in top_cards]
-    embeddings = _get_card_embeddings(card_ids) if qv is not None else {}
-    cos_map = {}  # card_id → cos
+    triple_embs = _get_card_embeddings_triple(card_ids) if qv is not None else {}
+
+    # 摘要向量余弦（兼容旧 relevance_tiers 逻辑）
+    cos_map = {}
     if qv is not None:
-        for cid, emb in embeddings.items():
-            cos_map[cid] = _cosine(qv, emb)
+        for cid, embs in triple_embs.items():
+            if "summary" in embs:
+                cos_map[cid] = _cosine(qv, embs["summary"])
     relevance_tiers = _relevance_tier(cos_map)
 
     output_cards = []
@@ -442,7 +574,11 @@ def preflight(user_input: str, json_mode: bool = False, skip_va: bool = False) -
             silent_count += 1
             continue
 
-        # B. 语义相关性层级
+        # B. 三权分立门控：根据退化阶段，用对应向量做余弦比对升级
+        if qv is not None:
+            deg_display = _triple_cosine_gate(card_id, deg_display, qv, triple_embs, category)
+
+        # C. 语义相关性层级
         rel_tier = relevance_tiers.get(card_id, "medium")
         rel_cos = cos_map.get(card_id, 0.0)
         # 相关性想要的展示级别
@@ -453,16 +589,9 @@ def preflight(user_input: str, json_mode: bool = False, skip_va: bool = False) -
         else:
             rel_wants = "title"
 
-        # C. 双层门控组合
+        # D. 双层门控组合
         # 展示级别阶梯: full > summary > quote > title
         DISPLAY_ORDER = {"full": 4, "summary": 3, "quote": 2, "title": 1}
-
-        if deg_display == "reopen":
-            rule = DEGRADATION.get(category, DEGRADATION["_default"])
-            if _check_reopen(card_id, rule["threshold"]):
-                deg_display = "full"
-            else:
-                deg_display = "title"
 
         deg_level = DISPLAY_ORDER.get(deg_display, 1)
         rel_level = DISPLAY_ORDER.get(rel_wants, 1)
@@ -514,6 +643,19 @@ def preflight(user_input: str, json_mode: bool = False, skip_va: bool = False) -
     if silent_count > 0:
         result["silent_count"] = silent_count
 
+    # ── 音乐注入：console.py 写入 .music_context.txt，preflight 直接吃现成 ──
+    music_ctx_path = os.path.join(PROJECT_ROOT, ".music_context.txt")
+    if os.path.exists(music_ctx_path):
+        try:
+            # 时效检查：超过 5 分钟未更新视为过期
+            if time.time() - os.path.getmtime(music_ctx_path) < 300:
+                with open(music_ctx_path, "r", encoding="utf-8") as f:
+                    music_ctx = f.read().strip()
+                if music_ctx:
+                    result["music"] = music_ctx
+        except Exception:
+            pass
+
     if json_mode:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
@@ -538,6 +680,10 @@ def preflight(user_input: str, json_mode: bool = False, skip_va: bool = False) -
             print(f"│ (无相关记忆)                                               │")
         if silent_count > 0:
             print(f"│ ({silent_count} 张卡在深度冷却中)                                      │")
+        if result.get("music"):
+            print(f"├{' 音乐 ' + '─' * 51}┤")
+            for line in result["music"].split("\n")[:8]:
+                print(f"│ {line:<52} │")
         print(f"└{'─' * 55}┘")
 
     return result

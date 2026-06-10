@@ -1,7 +1,8 @@
 """
-re-embed.py — 全量重建 embedding 向量
-扫描所有 final 卡片，用 build_embed_text() 重新生成 2048 维向量，
+re-embed.py — 全量重建摘要 embedding 向量
+扫描所有 final 卡片，用 build_embed_summary() 重新生成 2048 维摘要向量，
 写回 DB 并重建 FAISS 索引 + link graph。
+注意：此脚本仅重建摘要向量（FAISS 主通道）。如需重建三向量请用 backfill_triple_embed.py。
 用法：python -m memory.re_embed
 """
 import os, sys, sqlite3, time
@@ -9,7 +10,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from encoder import embed, load_index, add_to_index, save_index, build_embed_text
+from encoder import embed, load_index, add_to_index, save_index, build_embed_summary
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "cards.db")
 BATCH_SIZE = 3
@@ -53,7 +54,7 @@ def main():
             continue
 
         try:
-            text = build_embed_text(card)
+            text = build_embed_summary(card)
             vec = embed(text)
             vec_bytes = vec.tobytes()
 

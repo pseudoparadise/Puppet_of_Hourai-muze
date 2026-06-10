@@ -12,7 +12,10 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(__file__))
 # ── FIX: 导入 load_index ──
-from encoder import embed, load_index, add_to_index, save_index, build_embed_text
+from encoder import (
+    embed, load_index, add_to_index, save_index,
+    build_embed_summary, build_embed_kw, build_embed_quote
+)
 
 PENDING_PATH = os.path.join(os.path.dirname(__file__), "pending_cards.json")
 DB_PATH = os.path.join(os.path.dirname(__file__), "cards.db")
@@ -26,15 +29,17 @@ def save_pending(pending_list):
     atomic_write_json(PENDING_PATH, pending_list)
 
 def approve_card(card):
-    """通过审核：写入数据库，生成向量，加入FAISS索引"""
+    """通过审核：写入数据库，生成三个向量，摘要向量加入FAISS索引"""
     conn = sqlite3.connect(DB_PATH)
     try:
         conn.execute("""
-            INSERT OR REPLACE INTO cards (id, title, content, keywords, embedding, importance, category, type, review_status, enabled_in_context, chord, valence, arousal, target_date, user_raw, human_touched)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'final', 1, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO cards (id, title, content, keywords, embedding, embedding_kw, embedding_quote,
+            importance, category, type, review_status, enabled_in_context, chord, valence, arousal, target_date, user_raw, human_touched)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'final', 1, ?, ?, ?, ?, ?, ?)
         """, (
             card["id"], card["title"], card["content"], card["keywords"],
-            None, card.get("importance", 5), card.get("category", "interaction"),
+            None, None, None,  # 三个向量先占位，生成后 UPDATE
+            card.get("importance", 5), card.get("category", "interaction"),
             card.get("type", "fact"),
             card.get("chord") or "", card.get("valence", 0.0), card.get("arousal", 0.5),
             card.get("target_date"), card.get("user_raw", ""),
@@ -42,22 +47,29 @@ def approve_card(card):
         ))
         conn.commit()
 
-        # 复用 pending 预计算向量，避免重复调豆包 API
+        # 复用 pending 预计算向量（仅 summary），kw/quote 始终生成
         pre_vec = card.get("_embed_vec")
         if pre_vec is not None:
-            vec = np.array(pre_vec, dtype=np.float32)
-            print(f"  📎 复用预计算向量 ({vec.shape[0]} 维)")
+            vec_summary = np.array(pre_vec, dtype=np.float32)
+            print(f"  📎 复用预计算向量 ({vec_summary.shape[0]} 维)")
         else:
-            vec = embed(build_embed_text(card))
-        vec_bytes = vec.tobytes()
-        conn.execute("UPDATE cards SET embedding = ? WHERE id = ?", (vec_bytes, card["id"]))
+            vec_summary = embed(build_embed_summary(card))
+
+        vec_kw = embed(build_embed_kw(card))
+        vec_quote = embed(build_embed_quote(card))
+
+        # 写三个向量到 DB
+        conn.execute(
+            "UPDATE cards SET embedding=?, embedding_kw=?, embedding_quote=? WHERE id=?",
+            (vec_summary.tobytes(), vec_kw.tobytes(), vec_quote.tobytes(), card["id"])
+        )
         conn.commit()
 
-        # ── FIX: 不再 create_index() 覆盖！改为 load→add→save ──
+        # FAISS 只入摘要向量
         index = load_index()
-        add_to_index(index, card["id"], vec)
+        add_to_index(index, card["id"], vec_summary)
         save_index(index)
-        print(f"  ✅ 已通过并入库: {card['id']}")
+        print(f"  ✅ 已通过并入库（三向量）: {card['id']}")
     except Exception as e:
         print(f"  ❌ 入库失败: {e}")
     finally:

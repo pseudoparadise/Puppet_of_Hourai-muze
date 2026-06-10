@@ -128,6 +128,13 @@ _rcc_patcher.py
 # ── 调试日志 ──
 ghost_hunt.log
 
+# ── 信息素层数据库（含私人状态数据） ──
+memory/mycelium.db
+
+# ── 音乐控制状态 ──
+.music_context.txt
+.music_toggle.json
+
 # ── 模式文件（本地不提交） ──
 .mode
 

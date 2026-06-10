@@ -346,13 +346,31 @@ class DashboardTab(ttk.Frame):
                     import traceback; traceback.print_exc()
                     messagebox.showerror("注入失败", f"{e}")
 
+            def _do_save():
+                new_text = editor.get("1.0", tk.END).strip()
+                if not new_text:
+                    messagebox.showwarning("内容为空", "自省内容不能为空。")
+                    return
+                try:
+                    from memory.reflection_engine import save_reflection_edit
+                    save_reflection_edit(new_text, pending['week'])
+                    messagebox.showinfo("已保存", "自省编辑已保存（未注入 prompt）。")
+                except Exception as e:
+                    messagebox.showerror("保存失败", f"{e}")
+
             def _do_discard():
                 if messagebox.askyesno("确认丢弃", "确定丢弃本周自省吗？\n下次生成需要等到下周日。"):
+                    try:
+                        from memory.reflection_engine import discard_reflection
+                        discard_reflection(pending['week'])
+                    except Exception:
+                        pass
                     dialog.destroy()
+                    _load_refl_status()
 
-            ttk.Button(btn_row, text="确认注入", command=_do_inject).pack(side=tk.LEFT, padx=5)
+            ttk.Button(btn_row, text="保存修改", command=_do_save).pack(side=tk.LEFT, padx=5)
+            ttk.Button(btn_row, text="注入 prompt", command=_do_inject).pack(side=tk.LEFT, padx=5)
             ttk.Button(btn_row, text="丢弃", command=_do_discard).pack(side=tk.LEFT, padx=5)
-            ttk.Button(btn_row, text="取消（保留）", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
 
         _load_refl_status()
 
@@ -415,7 +433,20 @@ class DashboardTab(ttk.Frame):
         row_m = ttk.Frame(music_frame)
         row_m.pack(fill=tk.X)
         try:
-            if ms and ms.get("playing") and ms.get("song_name"):
+            # 关机后残留 stale 数据检测：started_at 超过 2 小时视为无效
+            music_stale = False
+            started_raw = ms.get("started_at", "") if ms else ""
+            if started_raw:
+                try:
+                    start_dt = datetime.fromisoformat(started_raw)
+                    if start_dt.tzinfo is None:
+                        start_dt = start_dt.replace(tzinfo=timezone.utc)
+                    if (datetime.now(timezone.utc) - start_dt).total_seconds() > 7200:
+                        music_stale = True
+                except Exception:
+                    pass
+
+            if ms and ms.get("playing") and ms.get("song_name") and not music_stale:
                 artist = ms.get("artist", "?") or "?"
                 lc = len(ms.get("lyrics", []))
                 freshness = ""
@@ -434,18 +465,46 @@ class DashboardTab(ttk.Frame):
             fg = "red"
         ttk.Label(row_m, text=label, foreground=fg, font=("", 10, "bold")).pack(side=tk.LEFT, padx=5)
 
+        # 音乐开关：控制 preflight --music 是否注入歌曲上下文
+        music_toggle_path = os.path.join(PROJECT_ROOT, ".music_toggle.json")
+        music_enabled = False
+        if os.path.exists(music_toggle_path):
+            try:
+                with open(music_toggle_path, "r", encoding="utf-8") as f:
+                    music_enabled = json.load(f).get("enabled", False)
+            except Exception:
+                pass
+
+        def _toggle_music():
+            nonlocal music_enabled
+            music_enabled = not music_enabled
+            try:
+                with open(music_toggle_path, "w", encoding="utf-8") as f:
+                    json.dump({"enabled": music_enabled}, f)
+            except Exception:
+                pass
+            self.refresh()
+
+        btn_text = "🎵 家模式听歌: 开" if music_enabled else "🎵 家模式听歌: 关"
+        btn_fg = "green" if music_enabled else "gray"
+        self._music_btn = ttk.Button(row_m, text=btn_text, command=_toggle_music)
+        self._music_btn.pack(side=tk.RIGHT, padx=5)
+
         # 第二行：歌词预览
         lyrics_frame = ttk.Frame(music_frame)
         lyrics_frame.pack(fill=tk.X, pady=(5, 0))
         lyrics_text = tk.Text(lyrics_frame, height=4, wrap=tk.WORD)
         lyrics_text.pack(fill=tk.X)
+        window = []  # 预初始化，供后面音乐上下文写入使用
         try:
-            if ms and ms.get("lyrics"):
+            if ms and ms.get("lyrics") and not music_stale:
                 started = ms.get("started_at", "")
                 elapsed = 0
                 if started:
                     try:
                         start_dt = datetime.fromisoformat(started)
+                        if start_dt.tzinfo is None:
+                            start_dt = start_dt.replace(tzinfo=timezone.utc)
                         elapsed = (datetime.now(timezone.utc) - start_dt).total_seconds()
                     except Exception:
                         pass
@@ -458,9 +517,43 @@ class DashboardTab(ttk.Frame):
                     if isinstance(line, dict):
                         marker = " -> " if line.get("seconds", 0) <= elapsed else "   "
                         lyrics_text.insert(tk.END, f"{marker}[{line.get('time','?')}] {line.get('text','')}\n")
+            else:
+                lyrics_text.insert(tk.END, "(等待桌面客户端...)" if not music_stale else "(上次播放已过期)")
         except Exception:
-            pass
+            lyrics_text.insert(tk.END, "(歌词加载失败)")
         lyrics_text.config(state=tk.DISABLED)
+
+        # 为 preflight 准备音乐上下文（启用时写入，preflight 直接吃现成）
+        music_ctx_path = os.path.join(PROJECT_ROOT, ".music_context.txt")
+        if music_enabled and ms and ms.get("playing") and ms.get("song_name") and not music_stale:
+            try:
+                lines = ["【此刻她正在听的音乐 — 仅当前一首，你可以自然提及，但不要刻意，不要编造其他歌曲】"]
+                song = ms.get("song_name", "未知").strip()
+                artist = ms.get("artist", "").strip()
+                lines.append(f"  歌曲: {song if song else '未知'}")
+                lines.append(f"  歌手: {artist if artist else '未知'}")
+                album = ms.get("album", "")
+                if album:
+                    lines.append(f"  专辑: {album}")
+                # 当前歌词窗口（3句，已在上面算好）
+                current_window = []
+                for line in window:
+                    if isinstance(line, dict):
+                        current_window.append(f"    [{line.get('time', '?')}] {line.get('text', '')}")
+                if current_window:
+                    lines.append("  当前歌词:")
+                    lines.extend(current_window)
+                with open(music_ctx_path, "w", encoding="utf-8") as _f:
+                    _f.write("\n".join(lines) + "\n\n")
+            except Exception:
+                pass
+        else:
+            # 静音/未播放时删除上下文文件
+            if os.path.exists(music_ctx_path):
+                try:
+                    os.remove(music_ctx_path)
+                except Exception:
+                    pass
 
         # 第三行：最近播放历史
         music_history = os.path.join(PROJECT_ROOT, "memory", "music_history.jsonl")
@@ -901,12 +994,16 @@ class BarkLogTab(ttk.Frame):
         btn_row.pack(fill=tk.X, pady=(0, 3))
         ttk.Button(btn_row, text="刷新", command=self._refresh_bark).pack(side=tk.LEFT, padx=2)
 
-        columns = ("time", "msg")
+        columns = ("time", "heat", "silence", "msg")
         self.bark_tree = ttk.Treeview(bark_frame, columns=columns, show="headings", height=8)
         self.bark_tree.heading("time", text="时间")
+        self.bark_tree.heading("heat", text="热度")
+        self.bark_tree.heading("silence", text="沉默")
         self.bark_tree.heading("msg", text="内容")
-        self.bark_tree.column("time", width=160)
-        self.bark_tree.column("msg", width=500)
+        self.bark_tree.column("time", width=100)
+        self.bark_tree.column("heat", width=50)
+        self.bark_tree.column("silence", width=55)
+        self.bark_tree.column("msg", width=420)
         self.bark_tree.pack(fill=tk.BOTH, expand=True)
 
         self._refresh_bark()
@@ -920,8 +1017,12 @@ class BarkLogTab(ttk.Frame):
                 with open(state_path, "r", encoding="utf-8") as f:
                     state = json.load(f)
                 for entry in state.get("recent_bark", [])[-20:]:
+                    heat = entry.get("heat", "")
+                    silence = f"{entry['silence']}m" if entry.get("silence") else ""
                     self.bark_tree.insert("", tk.END, values=(
                         entry.get("time", ""),
+                        heat,
+                        silence,
                         entry.get("msg", "")[:80],
                     ))
             except Exception:
@@ -1181,7 +1282,10 @@ class CardEditTab(ttk.Frame):
         enabled = 1 if self.var_enabled.get() else 0
         resolved = 1 if self.var_resolved.get() else 0
         id_changed = new_id != old_id
-        embed_changed = keywords != old_keywords or raw_quote != old_user_raw
+        kw_changed = keywords != old_keywords
+        quote_changed = raw_quote != old_user_raw
+        summary_changed = summary != (old_content or "")  # 概括部分变了
+        embed_changed = kw_changed or quote_changed or summary_changed
 
         if not new_id:
             self.status_var.set("ID不能为空")
@@ -1244,7 +1348,9 @@ class CardEditTab(ttk.Frame):
 
             if id_changed or embed_changed:
                 try:
-                    self._re_embed(effective_id, title, content, keywords)
+                    self._re_embed(effective_id, title, content, keywords,
+                                   kw_changed=kw_changed, quote_changed=quote_changed,
+                                   summary_changed=summary_changed)
                 except Exception as e:
                     import traceback as _tb_re
                     _tb_re.print_exc()
@@ -1264,8 +1370,18 @@ class CardEditTab(ttk.Frame):
         finally:
             conn.close()
 
-    def _re_embed(self, card_id, title, content, keywords):
-        from memory.encoder import embed, load_index, add_to_index, save_index, remove_from_index, build_embed_text
+    def _re_embed(self, card_id, title, content, keywords,
+                   kw_changed=False, quote_changed=False, summary_changed=False):
+        """智能重嵌：只对变更的字段重新生成对应向量。ID 变更时全量重嵌。"""
+        from memory.encoder import (
+            embed, load_index, add_to_index, save_index, remove_from_index,
+            build_embed_summary, build_embed_kw, build_embed_quote
+        )
+
+        id_changed = (card_id != self._card.get("id", ""))
+        # ID 变更或全部未指定 → 全量重嵌
+        full_regen = id_changed or not (kw_changed or quote_changed or summary_changed)
+
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
@@ -1273,17 +1389,42 @@ class CardEditTab(ttk.Frame):
         row = c.fetchone()
         card = dict(row) if row else {"title": title, "content": content, "keywords": keywords, "user_raw": "", "category": ""}
         conn.close()
-        vec = embed(build_embed_text(card))
-        vec_bytes = vec.tobytes()
-        conn = sqlite3.connect(DB_PATH)
-        conn.execute("UPDATE cards SET embedding=? WHERE id=?", (vec_bytes, card_id))
-        conn.commit()
-        conn.close()
-        remove_from_index(card_id)
-        index = load_index()
-        add_to_index(index, card_id, vec)
-        save_index(index)
-        print(f"[editor] embedding 已更新: {card_id}")
+
+        updates = []
+        params = []
+
+        if full_regen or summary_changed:
+            vec_summary = embed(build_embed_summary(card))
+            updates.append("embedding = ?")
+            params.append(vec_summary.tobytes())
+            # FAISS 索引更新
+            remove_from_index(card_id)
+            index = load_index()
+            add_to_index(index, card_id, vec_summary)
+            save_index(index)
+            print(f"[editor] 摘要向量已更新: {card_id}")
+
+        if full_regen or kw_changed:
+            vec_kw = embed(build_embed_kw(card))
+            updates.append("embedding_kw = ?")
+            params.append(vec_kw.tobytes())
+            print(f"[editor] 关键词向量已更新: {card_id}")
+
+        if full_regen or quote_changed:
+            vec_quote = embed(build_embed_quote(card))
+            updates.append("embedding_quote = ?")
+            params.append(vec_quote.tobytes())
+            print(f"[editor] 原话向量已更新: {card_id}")
+
+        if updates:
+            conn = sqlite3.connect(DB_PATH)
+            params.append(card_id)
+            conn.execute(f"UPDATE cards SET {', '.join(updates)} WHERE id=?", params)
+            conn.commit()
+            conn.close()
+            print(f"[editor] 重嵌完成: {card_id} ({len(updates)} 个向量)")
+        else:
+            print(f"[editor] 无变更，跳过重嵌: {card_id}")
 
     def _reindex_rename(self, old_id, new_id):
         conn = sqlite3.connect(DB_PATH)
@@ -1528,9 +1669,11 @@ class RecallFeedbackTab(ttk.Frame):
                 for line in f:
                     try:
                         t = json.loads(line.strip())
+                        if "cards" not in t:
+                            continue  # 跳过 link 扩散日志，只保留检索结果
                         tid = t["trace_id"]
                         self._traces[tid] = t
-                        cards = t.get("cards", [])
+                        cards = t["cards"]
                         for c in cards:
                             if c.get("feedback") == "good":
                                 good += 1
@@ -1841,13 +1984,6 @@ class HumanWriteCardTab(ttk.Frame):
             "target_date": target or None,
             "time_anchor": {"date": None, "fuzzy": None, "label": None, "days_until": None}
         }
-
-        # 预计算 embedding 供后续去重
-        try:
-            from memory.encoder import build_embed_text, embed
-            card["_embed_vec"] = embed(build_embed_text(card)).tolist()
-        except Exception:
-            pass
 
         # ── 重复卡片检查 ──
         pending_path = os.path.join(PROJECT_ROOT, "memory", "pending_cards.json")

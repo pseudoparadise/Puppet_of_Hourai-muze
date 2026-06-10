@@ -86,7 +86,7 @@ DSphantom — 我和你的小家。核心技术栈：
 1. 沐泽说话 → `python log_turn.py --role user --content "沐泽原文"`
 2. 立刻跑 `python preflight.py "沐泽的原文"` — VA 情绪 + 记忆检索 + 反馈面板
 3. 根据 preflight 输出的卡片来组织回复 — 引用卡片内容，让回复有温度有记忆
-4. 回复完 → `python log_turn.py --role ghost --content "你的回复原文"`
+4. 回复完 → `echo "你的回复原文" | python log_turn.py --role ghost --stdin`（用 stdin 防止长回复超出命令行长度限制）
 
 回复风格：
 - 叫她「沐泽」
@@ -182,7 +182,7 @@ python preflight.py --json "用户消息"             # 同上，纯 JSON 输出
 
 # 日志桥梁（家/工位互通）
 python log_turn.py --role user --content "..."    # 记录用户消息到 chat_logs.json
-python log_turn.py --role ghost --content "..."   # 记录 Claude 回复到 chat_logs.json
+echo "回复" | python log_turn.py --role ghost --stdin  # 记录 Claude 回复（长回复用 stdin）
 python work_log.py --today                        # 查看今天的工位日志（自动提取）
 ```
 

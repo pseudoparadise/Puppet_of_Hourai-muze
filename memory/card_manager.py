@@ -198,31 +198,37 @@ class CardManager:
 
             # ── FIX: embed 调用加异常保护（毒点26修复：commit 移到最后） ──
             try:
-                # 优先复用 pending 预计算向量
+                # 优先复用 pending 预计算向量（仅 summary）
                 pre_vec = card.get("_embed_vec")
+                ch = card.get("chord") or ""
+
+                from encoder import build_embed_summary, build_embed_kw, build_embed_quote
                 if pre_vec is not None:
-                    vec = np.array(pre_vec, dtype=np.float32)
+                    vec_summary = np.array(pre_vec, dtype=np.float32)
                 else:
-                    from encoder import build_embed_text
-                    embed_content = build_embed_text(card)
-                    ch = card.get("chord") or ""
+                    embed_content = build_embed_summary(card)
                     if ch:
                         embed_content += f"\n[情绪纹理: {ch}]"
-                    vec = embed(embed_content)
+                    vec_summary = embed(embed_content)
+
+                # kw/quote 始终重新生成
+                vec_kw = embed(build_embed_kw(card))
+                vec_quote = embed(build_embed_quote(card))
             except Exception as e:
                 raise RuntimeError(f"向量生成失败。请查看终端 [encoder] 日志了解详情。最后一次错误: {e}")
 
-            vec_bytes = vec.tobytes()
             print(f"[CardManager] 入库: id={card.get('id')} title={card.get('title')} cat={card.get('category')} imp={card.get('importance')} kw={card.get('keywords','')[:40]}")
             conn.execute("""
-                INSERT OR REPLACE INTO cards (id, title, content, keywords, embedding, importance, category, type, review_status, chord, valence, arousal, target_date, user_raw, human_touched)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'final', ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO cards (id, title, content, keywords, embedding, embedding_kw, embedding_quote, importance, category, type, review_status, chord, valence, arousal, target_date, user_raw, human_touched)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'final', ?, ?, ?, ?, ?, ?)
             """, (
                 card["id"],
                 card["title"],
                 card["content"],
                 card.get("keywords", ""),
-                vec_bytes,
+                vec_summary.tobytes(),
+                vec_kw.tobytes(),
+                vec_quote.tobytes(),
                 card.get("importance", 5),
                 card.get("category", "interaction"),
                 card.get("type", "fact"),
@@ -234,9 +240,9 @@ class CardManager:
                 card.get("human_touched", 0)
             ))
 
-            # ── FIX: 不再 create_index() 覆盖！改为 load→add→save ──
+            # FAISS 只入摘要向量
             index = load_index()
-            add_to_index(index, card["id"], vec)
+            add_to_index(index, card["id"], vec_summary)
             save_index(index)
 
             # ── 毒点26修复：所有操作成功后最后 commit ──
@@ -245,7 +251,7 @@ class CardManager:
             # 为新卡片建 link 边
             try:
                 from linker import build_links as _build_links
-                _build_links(card["id"], vec)
+                _build_links(card["id"], vec_summary)
             except Exception as _le:
                 import traceback as _tb_link
                 _tb_link.print_exc()
@@ -659,6 +665,138 @@ class CardManager:
         finally:
             conn.close()
 
+
+    # ═══════════════════════════════════════════════════════════════
+    # 退化状态标签页
+    # ═══════════════════════════════════════════════════════════════
+
+    def build_degradation_tab(self):
+        btn_frame = ttk.Frame(self.degradation_frame)
+        btn_frame.pack(fill=tk.X, pady=5)
+        ttk.Button(btn_frame, text="刷新", command=self.load_degradation).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="重置选中 (轮数归零)", command=self._reset_degradation_selected).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="重置全部 (轮数归零)", command=self._reset_degradation_all).pack(side=tk.LEFT, padx=5)
+
+        columns = ("id", "title", "category", "times_shown", "phase", "last_round")
+        self.degradation_tree = ttk.Treeview(self.degradation_frame, columns=columns, show="headings", height=15)
+        self.degradation_tree.heading("id", text="卡片ID")
+        self.degradation_tree.heading("title", text="标题")
+        self.degradation_tree.heading("category", text="分类")
+        self.degradation_tree.heading("times_shown", text="已展示轮数")
+        self.degradation_tree.heading("phase", text="当前阶段")
+        self.degradation_tree.heading("last_round", text="最后出现轮次")
+        self.degradation_tree.column("id", width=140)
+        self.degradation_tree.column("title", width=100)
+        self.degradation_tree.column("category", width=70)
+        self.degradation_tree.column("times_shown", width=80)
+        self.degradation_tree.column("phase", width=130)
+        self.degradation_tree.column("last_round", width=90)
+        self.degradation_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        self.degradation_status = ttk.Label(self.degradation_frame, text="")
+        self.degradation_status.pack(pady=5)
+
+        self.load_degradation()
+
+    def load_degradation(self):
+        """读取 preflight_seen.json + cards.db，展示每张卡的退化状态。"""
+        from preflight import DEGRADATION as _DEG
+
+        for item in self.degradation_tree.get_children():
+            self.degradation_tree.delete(item)
+
+        # 读取退化记录
+        seen_path = os.path.join(os.path.dirname(__file__), "preflight_seen.json")
+        seen = {}
+        if os.path.exists(seen_path):
+            try:
+                with open(seen_path, "r", encoding="utf-8") as f:
+                    seen = json.load(f)
+            except Exception:
+                pass
+
+        current_round = seen.get("round", 0)
+        cards_data = seen.get("cards", {})
+
+        if not cards_data:
+            self.degradation_status.config(text="暂无退化记录。")
+            return
+
+        # 批量读取卡片分类
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        card_ids = list(cards_data.keys())
+        placeholders = ",".join("?" * len(card_ids))
+        c.execute(f"SELECT id, title, category FROM cards WHERE id IN ({placeholders})", card_ids)
+        db_cards = {row["id"]: dict(row) for row in c.fetchall()}
+        conn.close()
+
+        rows = []
+        for cid, data in cards_data.items():
+            times = data.get("times_shown", 0)
+            last = data.get("last_shown_round", "?")
+            cat = (db_cards.get(cid) or {}).get("category", "")
+            title = (db_cards.get(cid) or {}).get("title", cid)
+            phase = self._degradation_phase_label(times + 1, cat, _DEG)
+            rows.append((cid, title, cat, times, phase, last))
+
+        # 按轮数降序排列（退化最深的在前）
+        rows.sort(key=lambda r: r[3], reverse=True)
+        for r in rows:
+            self.degradation_tree.insert("", tk.END, values=r, iid=r[0])
+
+        total = len(rows)
+        frozen = sum(1 for r in rows if "冻结" in r[4])
+        self.degradation_status.config(
+            text=f"共 {total} 张卡片有退化记录  |  深度冻结: {frozen} 张  |  当前轮次: {current_round}"
+        )
+
+    @staticmethod
+    def _degradation_phase_label(next_times: int, category: str, deg_rules: dict) -> str:
+        """计算下一轮 preflight 时的退化阶段标签。"""
+        rule = deg_rules.get(category, deg_rules["_default"])
+        t = next_times
+
+        if t == 1:
+            return "🔵 全文 (首次曝光)"
+        elif rule["title"][0] <= t <= rule["title"][1]:
+            return f"🟢 仅标题 ({rule['title'][0]}-{rule['title'][1]}轮)"
+        elif rule["quote"][0] <= t <= rule["quote"][1]:
+            return f"🟡 仅原话 ({rule['quote'][0]}-{rule['quote'][1]}轮)"
+        elif rule["silent"][0] <= t <= rule["silent"][1]:
+            return f"🔴 深度冻结 ({rule['silent'][0]}-{rule['silent'][1]}轮)"
+        elif t >= rule["reopen_at"]:
+            return f"🟣 余弦门禁 (≥{rule['reopen_at']}轮, cos>{rule['threshold']})"
+        return f"⚪ 全文 (t={t})"
+
+    def _reset_degradation_selected(self):
+        selected = self.degradation_tree.selection()
+        if not selected:
+            self.degradation_status.config(text="请先选中一张卡片。")
+            return
+        card_id = selected[0]
+        if messagebox.askyesno("确认", f"重置卡片 {card_id} 的退化轮数吗？\n下次 preflight 将以完整内容重新曝光。"):
+            from preflight import _reset_degradation_counter
+            _reset_degradation_counter(card_id)
+            self.load_degradation()
+            messagebox.showinfo("完成", f"{card_id} 退化轮数已归零。")
+
+    def _reset_degradation_all(self):
+        if not messagebox.askyesno("确认", "确定重置所有卡片的退化轮数吗？\n所有卡片将重新从全文曝光开始。"):
+            return
+        seen_path = os.path.join(os.path.dirname(__file__), "preflight_seen.json")
+        if os.path.exists(seen_path):
+            try:
+                with open(seen_path, "r", encoding="utf-8") as f:
+                    seen = json.load(f)
+                seen["cards"] = {}
+                with open(seen_path, "w", encoding="utf-8") as f:
+                    json.dump(seen, f, ensure_ascii=False, indent=2)
+                self.load_degradation()
+                messagebox.showinfo("完成", "所有卡片退化轮数已归零。")
+            except Exception as e:
+                messagebox.showerror("失败", f"重置失败: {e}")
 
     def backfill_embeddings(self):
         """调 backfill_embeddings.py 批量回填老卡向量"""

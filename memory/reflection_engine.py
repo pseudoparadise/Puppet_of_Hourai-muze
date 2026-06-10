@@ -190,6 +190,36 @@ def get_pending_reflection() -> dict:
     return {"week": week_str, "path": path, "text": text}
 
 
+def discard_reflection(week_str: str = None) -> bool:
+    """删除待审自省文件。"""
+    if week_str is None:
+        pending = get_pending_reflection()
+        if not pending:
+            return False
+        week_str = pending["week"]
+    path = os.path.join(REFLECTION_DIR, f"reflection_{week_str}.md")
+    if os.path.exists(path):
+        os.remove(path)
+        print(f"[reflection] 已丢弃: {week_str}")
+        return True
+    return False
+
+
+def save_reflection_edit(text: str, week_str: str = None):
+    """保存编辑后的自省（不注入 prompt，只更新文件）。"""
+    if week_str is None:
+        pending = get_pending_reflection()
+        if not pending:
+            return
+        week_str = pending["week"]
+    path = os.path.join(REFLECTION_DIR, f"reflection_{week_str}.md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"# DS 每周自省 — {week_str}\n\n")
+        f.write(text)
+        f.write("\n")
+    print(f"[reflection] 已保存编辑: {week_str}")
+
+
 def has_this_weeks_reflection() -> bool:
     """本周是否已生成过自省。"""
     today = datetime.now(BJT)

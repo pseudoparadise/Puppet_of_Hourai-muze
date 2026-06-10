@@ -196,8 +196,8 @@ def _append_pending_card(card: dict, source_module: str = "dreaming.py", evidenc
     pending = load_json_safe(PENDING_CARDS_PATH, default=[], label="dreaming")
     if '_embed_vec' not in card:
         try:
-            from encoder import embed as _embed_dream, build_embed_text as _bet_dream
-            _dv = _embed_dream(_bet_dream(card))
+            from encoder import embed as _embed_dream, build_embed_summary as _bes_dream
+            _dv = _embed_dream(_bes_dream(card))
             card['_embed_vec'] = _dv.tolist()
         except Exception:
             pass

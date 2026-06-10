@@ -64,6 +64,40 @@ def get_recent_turns(n: int = 5) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _get_conversation_heat() -> tuple:
+    """读 chat_logs 最近一条消息时间戳，返回 (heat_label, minutes_since)。
+    hot(<5min): 有人在聊 → bark 闭嘴
+    warm(5-30min): 刚离开 → 减半推送概率
+    cold(>30min): 冷透 → 正常推送"""
+    chat_log_path = os.path.join(os.path.dirname(__file__), "chat_logs.json")
+    if not os.path.exists(chat_log_path):
+        return "cold", 999
+    try:
+        entries = []
+        with open(chat_log_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    entries.append(json.loads(line))
+        if not entries:
+            return "cold", 999
+        last_ts_str = entries[-1].get("timestamp", "")
+        if not last_ts_str:
+            return "cold", 999
+        last_dt = parse_time(last_ts_str)
+        if not last_dt:
+            return "cold", 999
+        mins = (now_utc() - last_dt).total_seconds() / 60
+        if mins < 5:
+            return "hot", round(mins, 1)
+        elif mins < 30:
+            return "warm", round(mins, 1)
+        else:
+            return "cold", round(mins, 1)
+    except Exception:
+        return "cold", 999
+
+
 def get_today_digest():
     """── FIX: 毒点11 — 统一使用 UTC 日期确定「今日」──"""
     chat_log_path = os.path.join(os.path.dirname(__file__), "chat_logs.json")
@@ -225,6 +259,14 @@ def main():
         _log_cycle(config, now, silence_minutes, source, "激活态", None, False)
         return
 
+    # ── 2b. 对话热度：chat_logs 地面真相，防 state.json 延后误推 ──
+    heat_label, heat_mins = _get_conversation_heat()
+    if heat_label == "hot":
+        print(f"[热度抑制] 对话hot({heat_mins}min前最后消息)，跳过推送")
+        _log_cycle(config, now, silence_minutes, source, f"热度抑制(chat_logs={heat_mins}min)", None, False)
+        return
+    heat_suppress = 0.5 if heat_label == "warm" else 1.0
+
     # ── 3. 划分状态 ──
     beijing_hour = now_local.hour
     is_sleep_window = SLEEP_START <= beijing_hour < SLEEP_END
@@ -241,6 +283,9 @@ def main():
         state_label = "长静默(非深夜)"
         probability = IDLE_PROBABILITY * 0.5
         cooldown_minutes = IDLE_COOLDOWN * 2
+
+    probability *= heat_suppress
+    state_label = f"{state_label}+{heat_label}" if heat_suppress < 1.0 else state_label
 
     # ── 4. 冷却检查 ──
     cool_until_str = state.get("cooling_until", "")
@@ -381,7 +426,7 @@ def main():
                     bark_sent = (bark_resp.status_code == 200)
                     if bark_sent:
                         from shared import record_bark_push
-                        record_bark_push(msg, state=state)
+                        record_bark_push(msg, state=state, heat=heat_label, silence_mins=round(silence_minutes, 1))
                 except Exception as e:
                     print(f"Bark 推送失败: {e}")
                     import traceback as _tb_bark

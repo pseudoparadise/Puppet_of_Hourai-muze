@@ -199,13 +199,21 @@ def main():
                 old_pid = int(pf.read().strip())
             import ctypes
             SYNCHRONIZE = 0x00100000
-            PROCESS_QUERY_LIMITED = 0x1000
+            PROCESS_QUERY_INFORMATION = 0x0400
+            STILL_ACTIVE = 259
             kernel32 = ctypes.windll.kernel32
-            h = kernel32.OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED, False, old_pid)
+            h = kernel32.OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, False, old_pid)
             if h:
+                exit_code = ctypes.c_ulong()
+                # 真正检查进程是否还在运行（而非僵尸句柄）
+                if kernel32.GetExitCodeProcess(h, ctypes.byref(exit_code)):
+                    if exit_code.value == STILL_ACTIVE:
+                        kernel32.CloseHandle(h)
+                        print(f"[轮询守护] 已有实例在运行 (PID {old_pid})，退出。")
+                        sys.exit(1)
                 kernel32.CloseHandle(h)
-                print(f"[轮询守护] 已有实例在运行 (PID {old_pid})，退出。")
-                return
+            # 进程已死 → 删除残留 PID 文件，继续启动
+            os.remove(PID_FILE)
         except Exception:
             pass
     with open(PID_FILE, "w") as pf:
