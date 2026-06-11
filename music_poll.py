@@ -203,14 +203,33 @@ def write_state(ctx: SongContext):
 
 
 def clear_state():
+    """不再删除文件。写 idle 心跳，让 daemon 知道进程还活着。"""
     try:
-        os.remove(STATE_FILE)
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump({
+                "playing": False,
+                "song_name": "",
+                "artist": "",
+                "lyrics": [],
+                "heartbeat": datetime.now(timezone.utc).isoformat(),
+            }, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+def _refresh_heartbeat():
+    """空闲时每隔 ~30s 刷新心跳 mtime，防止 daemon 误判进程僵死。"""
+    try:
+        if os.path.exists(STATE_FILE):
+            os.utime(STATE_FILE, None)  # touch: 更新 mtime 就够了
     except Exception:
         pass
 
 
 def main():
     print(f"[music_poll] 启动 (neteasecli: {NETEASECLI})")
+
+    # 空闲心跳计数器：每 ~6 轮 (30s) 刷新一次 idle 心跳 mtime
+    _idle_ticks = 0
 
     # 启动时裁剪历史文件
     if os.path.exists(HISTORY_FILE):
@@ -243,6 +262,9 @@ def main():
                     clear_state()
                     current_song = None
                     print("[music_poll] 已停止")
+                _idle_ticks += 1
+                if _idle_ticks % 6 == 0:
+                    _refresh_heartbeat()
                 time.sleep(5)
                 continue
 
@@ -252,12 +274,18 @@ def main():
                 if current_song is not None:
                     clear_state()
                     current_song = None
+                _idle_ticks += 1
+                if _idle_ticks % 6 == 0:
+                    _refresh_heartbeat()
                 time.sleep(5)
                 continue
             if song_name.isascii() and " " not in song_name and len(song_name) < 4:
                 if current_song is not None:
                     clear_state()
                     current_song = None
+                _idle_ticks += 1
+                if _idle_ticks % 6 == 0:
+                    _refresh_heartbeat()
                 time.sleep(5)
                 continue
 
@@ -282,6 +310,7 @@ def main():
                     playing=playing,
                 )
                 write_state(current_song)
+                _idle_ticks = 0  # 有歌播时重置空闲心跳计数
                 print(f"[music_poll] {'切歌' if current_song else '首发'}: "
                       f"{current_song.song_name} — {current_song.artist} [{len(lyrics)}句]")
 
@@ -318,6 +347,7 @@ def main():
                         current_song.lyrics = lyrics
                         print(f"[music_poll] 补拉成功: [{len(lyrics)}句]")
                 write_state(current_song)
+                _idle_ticks = 0  # 同首歌刷新后也重置空闲心跳计数
 
         except Exception as e:
             print(f"[music_poll] 异常: {e}")

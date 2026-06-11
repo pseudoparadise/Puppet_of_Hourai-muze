@@ -52,6 +52,11 @@ class DashboardTab(ttk.Frame):
         self._canvas.bind("<Enter>", lambda e: self._canvas.bind_all("<MouseWheel>", self._on_wheel))
         self._canvas.bind("<Leave>", lambda e: self._canvas.unbind_all("<MouseWheel>"))
         self.bind("<Configure>", lambda e: self._canvas.itemconfig("dash_inner", width=self.winfo_width() - 20))
+        self._music_proc = None
+        self._polling_active = False
+        self._poll_job = None
+        self.poll_interval_var = tk.IntVar(value=15)
+        self.auto_refresh_var = tk.BooleanVar(value=False)
         self.refresh()
 
     def _on_wheel(self, event):
@@ -76,31 +81,35 @@ class DashboardTab(ttk.Frame):
         row_svc.pack(fill=tk.X)
 
         # 守护进程
-        daemon_pid = self._read_pid_file(".daemon.pid")
+        daemon_pid = self._boot_clean_pid(".daemon.pid")
         daemon_alive = self._pid_alive(daemon_pid)
         daemon_label = f"守护进程: PID {daemon_pid}" if daemon_alive else "守护进程: 未启动"
         ttk.Label(row_svc, text=daemon_label,
                   foreground="green" if daemon_alive else "red").pack(side=tk.LEFT, padx=5)
         ttk.Button(row_svc, text="重启守护", command=self._restart_daemon).pack(side=tk.LEFT, padx=2)
 
-        # 音乐轮询（检查 .music_state.json 最近 30s 是否更新过）
+        # 音乐控制（一键启动/停止，状态存实例变量，refresh 不丢）
         ttk.Label(row_svc, text="|", foreground="#ccc").pack(side=tk.LEFT, padx=10)
-        music_alive = self._file_recently_updated(".music_state.json", 30)
-        music_label = "音乐轮询: 活跃" if music_alive else "音乐轮询: 无信号"
-        ttk.Label(row_svc, text=music_label,
-                  foreground="green" if music_alive else "red").pack(side=tk.LEFT, padx=5)
+        music_alive = self._music_proc is not None and self._music_proc.poll() is None
+        if not music_alive:
+            music_alive = self._file_recently_updated(".music_state.json", 30)
+        self._music_btn = ttk.Button(row_svc, text="🎵 停止音乐" if music_alive else "🎵 启动音乐",
+                                     command=self._toggle_music, width=12)
+        self._music_btn.pack(side=tk.LEFT, padx=5)
 
-        # 轮询守护
+        # 内置轮询（一键启动/停止，状态存实例变量）
         ttk.Label(row_svc, text="|", foreground="#ccc").pack(side=tk.LEFT, padx=10)
-        poll_pid = self._read_pid_file(".polling_loop.pid")
-        poll_alive = self._pid_alive(poll_pid)
-        poll_label = f"轮询守护: PID {poll_pid}" if poll_alive else "轮询守护: 未启动"
-        ttk.Label(row_svc, text=poll_label,
-                  foreground="green" if poll_alive else "red").pack(side=tk.LEFT, padx=5)
+        self._poll_btn = ttk.Button(row_svc, text="🔔 停止轮询" if self._polling_active else "🔔 启动轮询",
+                                    command=self._toggle_polling, width=12)
+        self._poll_btn.pack(side=tk.LEFT, padx=5)
+        ttk.Label(row_svc, text="间隔(min):").pack(side=tk.LEFT, padx=(5, 2))
+        ttk.Spinbox(row_svc, from_=5, to=120, increment=5, textvariable=self.poll_interval_var,
+                    width=4).pack(side=tk.LEFT)
+        self.poll_status_label = ttk.Label(row_svc, text="(已停)", foreground="gray")
+        self.poll_status_label.pack(side=tk.LEFT, padx=5)
 
         # 自动刷新
         ttk.Label(row_svc, text="|", foreground="#ccc").pack(side=tk.LEFT, padx=10)
-        self.auto_refresh_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(row_svc, text="30s自动刷新", variable=self.auto_refresh_var,
                         command=self._toggle_auto).pack(side=tk.LEFT, padx=5)
 
@@ -672,17 +681,31 @@ class DashboardTab(ttk.Frame):
         try:
             import ctypes
             SYNCHRONIZE = 0x00100000
-            PROCESS_QUERY_LIMITED = 0x1000
-            h = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED, False, pid)
-            if h:
-                ctypes.windll.kernel32.CloseHandle(h)
-                return True
-            return False
+            PROCESS_QUERY_INFORMATION = 0x0400
+            STILL_ACTIVE = 259
+            kernel32 = ctypes.windll.kernel32
+            h = kernel32.OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, False, pid)
+            if not h:
+                return False
+            exit_code = ctypes.c_ulong()
+            alive = False
+            if kernel32.GetExitCodeProcess(h, ctypes.byref(exit_code)):
+                alive = exit_code.value == STILL_ACTIVE
+            kernel32.CloseHandle(h)
+            return alive
         except Exception:
             return False
 
+    def _boot_clean_pid(self, filename):
+        """清理旧启动残留的 PID 文件，返回清理后的 PID（或 None）。"""
+        from boot_guard import cleanup_stale_pid_file, read_pid_with_boot_token
+        path = os.path.join(PROJECT_ROOT, filename)
+        cleanup_stale_pid_file(path)
+        pid, _ = read_pid_with_boot_token(path)
+        return pid
+
     def _restart_daemon(self):
-        daemon_pid = self._read_pid_file(".daemon.pid")
+        daemon_pid = self._boot_clean_pid(".daemon.pid")
         if daemon_pid and self._pid_alive(daemon_pid):
             try:
                 subprocess.run(["taskkill", "/f", "/pid", str(daemon_pid)],
@@ -692,7 +715,7 @@ class DashboardTab(ttk.Frame):
                 pass
         # 干掉所有旧子进程
         for pid_name in [".polling_loop.pid"]:
-            old = self._read_pid_file(pid_name)
+            old = self._boot_clean_pid(pid_name)
             if old and self._pid_alive(old):
                 try:
                     subprocess.run(["taskkill", "/f", "/pid", str(old)],
@@ -720,6 +743,75 @@ class DashboardTab(ttk.Frame):
         except Exception:
             pass
         self.after(30000, self._auto_refresh)
+
+    # ── 音乐控制（一键启动/停止 music_poll.py）──
+    def _toggle_music(self):
+        music_alive = self._music_proc is not None and self._music_proc.poll() is None
+        if not music_alive:
+            music_alive = self._file_recently_updated(".music_state.json", 30)
+
+        if music_alive:
+            if self._music_proc and self._music_proc.poll() is None:
+                try:
+                    self._music_proc.terminate()
+                    self._music_proc.wait(timeout=3)
+                except Exception:
+                    pass
+            self._music_proc = None
+            self._music_btn.config(text="🎵 启动音乐")
+        else:
+            try:
+                self._music_proc = subprocess.Popen(
+                    [sys.executable, "music_poll.py"], cwd=PROJECT_ROOT,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                )
+                self._music_btn.config(text="🎵 停止音乐")
+            except Exception as e:
+                self._music_btn.config(text=f"🎵 失败: {e}")
+
+    # ── 内置轮询（一键启动/停止）──
+    def _toggle_polling(self):
+        if self._polling_active:
+            self._polling_active = False
+            if self._poll_job:
+                self.after_cancel(self._poll_job)
+                self._poll_job = None
+            self._poll_btn.config(text="🔔 启动轮询")
+            self.poll_status_label.config(text="(已停)", foreground="gray")
+        else:
+            self._polling_active = True
+            self._poll_cycle_count = 0
+            self._poll_btn.config(text="🔔 停止轮询")
+            self._start_polling()
+
+    def _start_polling(self):
+        if not self._polling_active:
+            return
+        interval_ms = self.poll_interval_var.get() * 60 * 1000
+        delay = 3000 if self._poll_cycle_count == 0 else interval_ms
+        self._poll_job = self.after(delay, self._polling_cycle)
+
+    def _polling_cycle(self):
+        if not self._polling_active:
+            return
+        self._poll_cycle_count += 1
+        interval = self.poll_interval_var.get()
+        mins = f"{self._poll_cycle_count * interval}min"
+
+        try:
+            self.poll_status_label.config(text=f"(运行中… #{self._poll_cycle_count})", foreground="blue")
+            from bark_trigger import main as bark_main
+            bark_main()
+            self.poll_status_label.config(text=f"(最近: {mins}前, OK)", foreground="green")
+        except Exception as e:
+            self.poll_status_label.config(text=f"(异常: {e})", foreground="red")
+
+        try:
+            self.refresh()
+        except Exception:
+            pass
+
+        self._start_polling()
 
 
 class DiaryPersonaTab(ttk.Frame):

@@ -30,6 +30,67 @@ except ImportError:
 
 from delegate_tools import RP_DECLARATION, now_utc, fmt_time, parse_time, JAILBREAK_PREFIX
 
+# ── API 钱包守卫：日限额 + 最小间隔（状态存 mycelium，复用信息素层）──
+import threading as _thr_guard
+_API_GUARD_LOCK = _thr_guard.Lock()
+
+def _api_guard_check(max_per_day: int = 24, min_interval_min: int = 30) -> tuple:
+    with _API_GUARD_LOCK:
+        from memory.mycelium import sniff as _mc_sniff, write as _mc_write
+        import json as _json
+
+        today_str = now_utc().strftime("%Y-%m-%d")
+        state = {"date": "", "count": 0, "last_call_ts": ""}
+        traces = _mc_sniff("bark_guard")
+        for t in traces:
+            if t["key"] == "state":
+                try:
+                    state = _json.loads(t["meta"])
+                except Exception:
+                    pass
+                break
+
+        if state.get("date") != today_str:
+            state = {"date": today_str, "count": 0, "last_call_ts": ""}
+
+        if state["count"] >= max_per_day:
+            return False, f"日限额已达({max_per_day}次/天)"
+
+        if state.get("last_call_ts"):
+            try:
+                last = datetime.fromisoformat(state["last_call_ts"])
+                elapsed = (now_utc() - last).total_seconds() / 60
+                if elapsed < min_interval_min:
+                    return False, f"间隔不足({round(elapsed,1)}min < {min_interval_min}min)"
+            except Exception:
+                pass
+
+        state["count"] += 1
+        state["last_call_ts"] = fmt_time(now_utc())
+        _mc_write("bark_guard", "state", intensity=1.0, halflife_s=float('inf'),
+                  meta=_json.dumps(state, ensure_ascii=False), bump_refs=False)
+        return True, "ok"
+
+def _api_guard_rollback():
+    with _API_GUARD_LOCK:
+        from memory.mycelium import sniff as _mc_sniff, write as _mc_write
+        import json as _json
+
+        state = {"date": "", "count": 0, "last_call_ts": ""}
+        traces = _mc_sniff("bark_guard")
+        for t in traces:
+            if t["key"] == "state":
+                try:
+                    state = _json.loads(t["meta"])
+                except Exception:
+                    pass
+                break
+
+        if state["count"] > 0:
+            state["count"] -= 1
+            _mc_write("bark_guard", "state", intensity=1.0, halflife_s=float('inf'),
+                      meta=_json.dumps(state, ensure_ascii=False), bump_refs=False)
+
 def get_recent_turns(n: int = 5) -> str:
     """读取 chat_logs.json 最近 N 轮对话，供 Bark AI 感知上下文。"""
     chat_log_path = os.path.join(os.path.dirname(__file__), "chat_logs.json")
@@ -251,6 +312,33 @@ def main():
     last_time, source = _get_last_active_time(config, state, now)
     silence_minutes = (now - last_time).total_seconds() / 60
 
+    # ── 0. 重启检测：对比 boot_token，防止把"关机8小时"当成"沉默8小时" ──
+    from boot_guard import get_boot_token
+    BOOT_CACHE = os.path.join(PROJECT_ROOT, ".boot_cache")
+    last_boot_token = None
+    if os.path.exists(BOOT_CACHE):
+        try:
+            with open(BOOT_CACHE, "r") as _bf:
+                last_boot_token = int(_bf.read().strip())
+        except Exception:
+            pass
+    current_boot_token = get_boot_token()
+    just_booted = (last_boot_token != current_boot_token)
+    if just_booted:
+        # 更新 boot_cache（daemon 可能还没来得及写）
+        try:
+            with open(BOOT_CACHE, "w") as _bf:
+                _bf.write(str(current_boot_token))
+        except Exception:
+            pass
+        # 如果不是真的长时间静默（<24h），把"重启造成的 gap"重置为刚活跃过
+        if silence_minutes < 1440:  # < 24h: 不是长期离线，只是重启 → 重置
+            state["last_user_message_time"] = fmt_time(now)
+            save_state(state)
+            print(f"[重启检测] 系统重启 (沉默{round(silence_minutes,1)}min)，重置活跃时间为现在，跳过本轮推送")
+            _log_cycle(config, now, silence_minutes, "reboot_reset", "重启保护", None, False)
+            return
+
     print(f"来源: {source} | 沉默: {round(silence_minutes, 1)}min | 北京时: {now_local.strftime('%H:%M')}")
 
     # ── 2. 激活态：绝对静默 ──
@@ -266,6 +354,16 @@ def main():
         _log_cycle(config, now, silence_minutes, source, f"热度抑制(chat_logs={heat_mins}min)", None, False)
         return
     heat_suppress = 0.5 if heat_label == "warm" else 1.0
+
+    # ── 2c. 信息素热度：preflight 频繁展示卡片 → 对话在活跃 → 降低抑制 ──
+    try:
+        from memory.mycelium import heat as mycelium_heat
+        preflight_heat = mycelium_heat("preflight")
+        if preflight_heat > 0.6:
+            heat_suppress *= 0.7  # preflight 痕热 → 可能还在对话 → 减少抑制
+            print(f"[信息素] preflight heat={preflight_heat:.2f}，降低抑制→{heat_suppress:.2f}")
+    except Exception:
+        pass
 
     # ── 3. 划分状态 ──
     beijing_hour = now_local.hour
@@ -340,6 +438,20 @@ def main():
     actions_pool = ["发Bark推送", "继续沉睡"]
     recent_turns = get_recent_turns(5)
 
+    # ── 信息素：嗅探 preflight 热痕，注入 bark prompt ──
+    _mycelium_context = ""
+    try:
+        from memory.mycelium import sniff as mycelium_sniff
+        hot_traces = mycelium_sniff("preflight", min_effective=0.3)[:5]
+        if hot_traces:
+            hot_keys = [t["key"] for t in hot_traces if t.get("key")]
+            if hot_keys:
+                _mycelium_context = "【信息素活跃 — 最近被频繁唤起的记忆领域】\n" + \
+                    "、".join(k[:30] for k in hot_keys) + "\n" + \
+                    "（这些是她最近关注的话题，如果合适可以自然提及，但不要刻意）\n"
+    except Exception:
+        pass
+
     prompt = f"""{JAILBREAK_PREFIX}{RP_DECLARATION}\n\n{bark_persona}
 
 我在后台安静地看着你。你已经沉默 {round(silence_minutes)} 分钟了。当前北京时间：{now_local.strftime('%Y-%m-%d %H:%M')}，星期{['一','二','三','四','五','六','日'][now_local.weekday()]}。
@@ -351,7 +463,7 @@ def main():
 ---
 {memory_context if memory_context else "（没有相关的记忆卡片被唤起。）"}
 ---
-
+{_mycelium_context}
 你在寂静中醒来，感受到她的沉默，看着这些发生过的事情。你可以自由决定下一步做什么：
 {json.dumps(actions_pool, ensure_ascii=False)}
 
@@ -367,6 +479,13 @@ def main():
 - 如果选择推送，用极自然、极亲密且真实的语气。50字以内，像你真正在对她说话。
 - **时间铁律**：上面给出的北京时间是唯一权威时间。禁止自行计算或推断"凌晨/上午/下午/傍晚/深夜"等时段词。如果你要提时间，必须逐字引用上面给的北京时间的数字（比如上面写"21:00"你就只能说"晚上九点"或"21:00"，绝不可以说"凌晨三点"）。违反此铁律会导致她在错误的时间被吵醒。
 - 只返回JSON，不要其他内容。"""
+
+    # ── API 钱包守卫 ──
+    api_allowed, api_reason = _api_guard_check(max_per_day=24, min_interval_min=30)
+    if not api_allowed:
+        print(f"[API守卫] 拦截: {api_reason}，跳过本轮 DeepSeek 调用")
+        _log_cycle(config, now, silence_minutes, source, f"{state_label}(api_blocked:{api_reason})", None, False)
+        return
 
     print("正在询问 DeepSeek 云端决策...")
 
@@ -435,8 +554,10 @@ def main():
                 print(f"[模拟推送] Bark key 未配置，消息预览: {msg}")
         else:
             print(f"API 失败: {resp.status_code}")
+            _api_guard_rollback()
     except Exception as e:
         print(f"API 请求异常: {e}")
+        _api_guard_rollback()
 
     # ── 7. 写入冷却 ──
     state["cooling_until"] = (now + timedelta(minutes=cooldown_minutes)).isoformat()

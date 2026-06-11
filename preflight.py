@@ -35,10 +35,123 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "memory"))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "emotion"))
 
 from memory.retriever import retrieve, get_va_tier
+from memory.mycelium import write as mycelium_write
 from crash_reporter import crash_print
 
-SEEN_PATH = os.path.join(PROJECT_ROOT, "memory", "preflight_seen.json")
+SEEN_PATH = os.path.join(PROJECT_ROOT, "memory", "preflight_seen.json")  # 仅用于一次性迁移
 DB_PATH = os.path.join(PROJECT_ROOT, "memory", "cards.db")
+
+# ── mycelium 信息素层迁移：替代 preflight_seen.json ──
+_MYC_SOURCE = "preflight"
+_MYC_ROUND_KEY = "__round__"
+_MYC_HALFLIFE = float('inf')  # preflight 痕不衰减
+
+def _migrate_seen_if_needed():
+    """一次性迁移：旧 preflight_seen.json → mycelium。迁移后重命名旧文件为 .migrated。"""
+    if not os.path.exists(SEEN_PATH):
+        return
+    # 检查 mycelium 是否已有 preflight 数据
+    try:
+        from memory.mycelium import sniff as _ms
+        if any(t["key"] == _MYC_ROUND_KEY for t in _ms(_MYC_SOURCE)):
+            return  # 已迁移
+    except Exception:
+        pass
+
+    try:
+        import json as _mj
+        with open(SEEN_PATH, "r", encoding="utf-8") as f:
+            old = _mj.load(f)
+        from memory.mycelium import write as _mw
+        # 迁移轮次
+        _mw(_MYC_SOURCE, _MYC_ROUND_KEY, intensity=0.5,
+            halflife_s=_MYC_HALFLIFE,
+            meta=_mj.dumps({"round": old.get("round", 0)}, ensure_ascii=False),
+            bump_refs=False)
+        # 迁移卡片
+        for cid, entry in old.get("cards", {}).items():
+            _mw(_MYC_SOURCE, cid,
+                intensity=1.0,
+                halflife_s=_MYC_HALFLIFE,
+                refs=entry.get("times_shown", 0),
+                meta=_mj.dumps({
+                    "first_seen_round": entry.get("first_seen_round", 0),
+                    "last_shown_round": entry.get("last_shown_round", 0),
+                }, ensure_ascii=False),
+                bump_refs=False)
+        # 重命名旧文件
+        migrated_path = SEEN_PATH + ".migrated"
+        os.replace(SEEN_PATH, migrated_path)
+        print(f"[preflight] 已迁移 {len(old.get('cards', {}))} 条记录 → mycelium (旧文件 → {os.path.basename(migrated_path)})")
+    except Exception as e:
+        print(f"[preflight] 迁移失败: {e}，继续使用旧 JSON")
+
+
+def _load_seen() -> dict:
+    """从 mycelium 加载退化记录（兼容旧 JSON 格式，首次调用自动迁移）。"""
+    _migrate_seen_if_needed()
+    try:
+        from memory.mycelium import sniff, read as _mr
+        import json as _mj
+        # 轮次存在 __round__ 的 meta 中（intensity 会走信息素钳位，不能存任意数值）
+        try:
+            round_trace = [t for t in sniff(_MYC_SOURCE) if t["key"] == _MYC_ROUND_KEY]
+            round_meta = _mj.loads(round_trace[0].get("meta", "{}")) if round_trace else {}
+            round_num = round_meta.get("round", 0)
+        except Exception:
+            round_num = 0
+        cards = {}
+        for trace in sniff(_MYC_SOURCE):
+            if trace["key"] == _MYC_ROUND_KEY:
+                continue
+            try:
+                meta = _mj.loads(trace.get("meta", "{}"))
+            except Exception:
+                meta = {}
+            cards[trace["key"]] = {
+                "times_shown": trace["refs"],
+                "first_seen_round": meta.get("first_seen_round", round_num),
+                "last_shown_round": meta.get("last_shown_round", round_num),
+            }
+        return {"round": round_num, "cards": cards}
+    except Exception as e:
+        crash_print(e, "preflight 从 mycelium 加载 seen")
+        return {"round": 0, "cards": {}}
+
+
+def _save_seen(data: dict):
+    """写入 mycelium（增量：只更新变更的卡片 + 轮次）。"""
+    try:
+        from memory.mycelium import write as _mw, sniff, read as _mr
+        import json as _mj
+        # 更新轮次（存在 meta 中，不经过信息素强度钳位）
+        _mw(_MYC_SOURCE, _MYC_ROUND_KEY, intensity=0.5,
+            halflife_s=_MYC_HALFLIFE,
+            meta=_mj.dumps({"round": data["round"]}, ensure_ascii=False),
+            bump_refs=False)
+        # 更新卡片：对比旧 refs，写入增量
+        old_cards = {}
+        try:
+            for t in sniff(_MYC_SOURCE):
+                if t["key"] != _MYC_ROUND_KEY:
+                    old_cards[t["key"]] = t["refs"]
+        except Exception:
+            pass
+        for cid, entry in data.get("cards", {}).items():
+            target_refs = entry.get("times_shown", 0)
+            current_refs = old_cards.get(cid, 0)
+            if target_refs != current_refs:
+                _mw(_MYC_SOURCE, cid,
+                    intensity=1.0,
+                    halflife_s=_MYC_HALFLIFE,
+                    refs=target_refs,
+                    meta=_mj.dumps({
+                        "first_seen_round": entry.get("first_seen_round", data["round"]),
+                        "last_shown_round": entry.get("last_shown_round", data["round"]),
+                    }, ensure_ascii=False),
+                    bump_refs=False)
+    except Exception as e:
+        crash_print(e, "preflight 写入 mycelium")
 
 DEGRADATION = {
     "deep_talks":     {"title": (2, 4), "quote": (5, 7), "silent": (8, 11), "reopen_at": 12, "threshold": 0.75},
@@ -48,30 +161,6 @@ DEGRADATION = {
     "habits":         {"title": (2, 3), "quote": (4, 5), "silent": (6, 8),  "reopen_at": 9,  "threshold": 0.70},
     "_default":       {"title": (2, 3), "quote": (4, 4), "silent": (5, 6),  "reopen_at": 7,  "threshold": 0.65},
 }
-
-
-def _load_seen() -> dict:
-    if os.path.exists(SEEN_PATH):
-        try:
-            with open(SEEN_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            crash_print(e, "preflight 加载 seen.json")
-    return {"round": 0, "cards": {}}
-
-
-def _save_seen(data: dict):
-    try:
-        os.makedirs(os.path.dirname(SEEN_PATH), exist_ok=True)
-        from delegate_tools import atomic_write_json
-        atomic_write_json(SEEN_PATH, data)
-    except Exception as e:
-        crash_print(e, "preflight 写入 seen.json (atomic)")
-        try:
-            with open(SEEN_PATH, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception as e2:
-            crash_print(e2, "preflight 备援写入 seen.json")
 
 
 def _cosine(a: np.ndarray, b: np.ndarray) -> float:
@@ -572,6 +661,14 @@ def preflight(user_input: str, json_mode: bool = False, skip_va: bool = False, m
         if deg_display == "silent":
             _update_seen_entry(seen, card_id, new_times)
             silent_count += 1
+            # 信息素：被沉默的卡写低强度痕，标记 suppressed
+            try:
+                import json as _json_m
+                mycelium_write("preflight", card_id, intensity=0.1, halflife_s=7200,
+                               meta=_json_m.dumps({"display": "silent", "category": category},
+                                                  ensure_ascii=False))
+            except Exception:
+                pass
             continue
 
         # B. 三权分立门控：根据退化阶段，用对应向量做余弦比对升级
@@ -636,6 +733,22 @@ def preflight(user_input: str, json_mode: bool = False, skip_va: bool = False, m
 
         _update_seen_entry(seen, card_id, new_times)
         output_cards.append(card_out)
+
+        # 信息素：被展示的卡写痕，强度=检索分数，半衰 2h
+        try:
+            import json as _json_m2
+            mycelium_write("preflight", card_id,
+                           intensity=c.get("score", 0.5),
+                           halflife_s=7200,
+                           meta=_json_m2.dumps({
+                               "display": final_display,
+                               "relevance": rel_tier,
+                               "cos": round(rel_cos, 4),
+                               "category": category,
+                               "importance": c.get("importance", 5),
+                           }, ensure_ascii=False))
+        except Exception:
+            pass
 
     _save_seen(seen)
 

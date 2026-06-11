@@ -193,31 +193,41 @@ def _sync_supabase_count():
 def main():
     # ── PID 文件锁：防止多个轮询守护同时运行 ──
     PID_FILE = os.path.join(PROJECT_ROOT, ".polling_loop.pid")
+    from boot_guard import (
+        read_pid_with_boot_token,
+        write_pid_with_boot_token,
+        cleanup_stale_pid_file,
+        get_boot_token,
+    )
+
+    # 先清理旧启动残留
+    cleanup_stale_pid_file(PID_FILE)
+
     if os.path.exists(PID_FILE):
         try:
-            with open(PID_FILE, "r") as pf:
-                old_pid = int(pf.read().strip())
-            import ctypes
-            SYNCHRONIZE = 0x00100000
-            PROCESS_QUERY_INFORMATION = 0x0400
-            STILL_ACTIVE = 259
-            kernel32 = ctypes.windll.kernel32
-            h = kernel32.OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, False, old_pid)
-            if h:
-                exit_code = ctypes.c_ulong()
-                # 真正检查进程是否还在运行（而非僵尸句柄）
-                if kernel32.GetExitCodeProcess(h, ctypes.byref(exit_code)):
-                    if exit_code.value == STILL_ACTIVE:
+            old_pid, boot_token = read_pid_with_boot_token(PID_FILE)
+            if old_pid is not None and boot_token is not None:
+                # 来自同一启动 → 检查进程是否还活着
+                if boot_token <= get_boot_token():
+                    import ctypes
+                    SYNCHRONIZE = 0x00100000
+                    PROCESS_QUERY_INFORMATION = 0x0400
+                    STILL_ACTIVE = 259
+                    kernel32 = ctypes.windll.kernel32
+                    h = kernel32.OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, False, old_pid)
+                    if h:
+                        exit_code = ctypes.c_ulong()
+                        if kernel32.GetExitCodeProcess(h, ctypes.byref(exit_code)):
+                            if exit_code.value == STILL_ACTIVE:
+                                kernel32.CloseHandle(h)
+                                print(f"[轮询守护] 已有实例在运行 (PID {old_pid})，退出。")
+                                sys.exit(1)
                         kernel32.CloseHandle(h)
-                        print(f"[轮询守护] 已有实例在运行 (PID {old_pid})，退出。")
-                        sys.exit(1)
-                kernel32.CloseHandle(h)
-            # 进程已死 → 删除残留 PID 文件，继续启动
+            # 进程已死或来自旧启动 → 删除残留，继续启动
             os.remove(PID_FILE)
         except Exception:
             pass
-    with open(PID_FILE, "w") as pf:
-        pf.write(str(os.getpid()))
+    write_pid_with_boot_token(PID_FILE, os.getpid())
     import atexit
     atexit.register(lambda: os.path.exists(PID_FILE) and os.remove(PID_FILE))
 
@@ -565,6 +575,14 @@ def main():
                 _log_event("audit_complete", {"result": "scheduled"})
             except Exception as e:
                 _log_event("audit_error", {"error": str(e)[:200]})
+            # 信息素清理：清冷痕 + 上限裁剪（随审计一起跑）
+            try:
+                from memory.mycelium import clean as mycelium_clean, stats as mycelium_stats
+                mycelium_clean()
+                _st = mycelium_stats()
+                print(f"[信息素清理] 完成: total={_st['total']}, anchored={_st['anchored']}")
+            except Exception:
+                pass
             last_audit_time = now_ts
 
         # ── 待办提醒扫描 ──

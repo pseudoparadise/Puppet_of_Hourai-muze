@@ -68,8 +68,9 @@ def _parse_iso(ts_str: str):
 
 
 def write(source: str, key: str, intensity: float = 1.0, halflife_s: float = 3600,
-          meta: str = "{}", bump_refs: bool = True):
-    """写入/更新一条信息素。bump_refs=True 时同 source+key 重复写 → refs+1（引用升温）。"""
+          meta: str = "{}", bump_refs: bool = True, refs: int = None):
+    """写入/更新一条信息素。bump_refs=True 时同 source+key 重复写 → refs+1（引用升温）。
+    refs 参数用于迁移/手动设置初始引用计数（仅对新记录有效，已存在记录忽略）。"""
     _ensure_db()
     conn = sqlite3.connect(DB_PATH)
     now = _now_iso()
@@ -81,7 +82,12 @@ def write(source: str, key: str, intensity: float = 1.0, halflife_s: float = 360
     row = cur.fetchone()
 
     if row:
-        new_refs = row[0] + 1 if bump_refs else row[0]
+        if refs is not None:
+            new_refs = refs
+        elif bump_refs:
+            new_refs = row[0] + 1
+        else:
+            new_refs = row[0]
         created_at = row[1]
         conn.execute(
             "UPDATE pheromones SET intensity=?, halflife_s=?, refs=?, updated_at=?, meta=? "
@@ -89,10 +95,11 @@ def write(source: str, key: str, intensity: float = 1.0, halflife_s: float = 360
             (intensity, halflife_s, new_refs, now, meta, source, key)
         )
     else:
+        init_refs = refs if refs is not None else 0
         conn.execute(
             "INSERT INTO pheromones (source, key, intensity, halflife_s, refs, created_at, updated_at, meta) "
-            "VALUES (?, ?, ?, ?, 0, ?, ?, ?)",
-            (source, key, intensity, halflife_s, now, now, meta)
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (source, key, intensity, halflife_s, init_refs, now, now, meta)
         )
 
     conn.commit()
@@ -250,3 +257,20 @@ def stats() -> dict:
         "max_traces": _MAX_TRACES,
         "sources": sources,
     }
+
+
+def bump(source: str, key: str) -> float:
+    """便捷函数：对一条痕 +1 引用（intensity=1.0, halflife_s=3600）。
+    等同于 write(source, key, intensity=1.0, halflife_s=3600, bump_refs=True)。
+    返回当前有效强度。"""
+    write(source, key, intensity=1.0, halflife_s=3600, bump_refs=True)
+    return read(source, key)
+
+
+def heat(source: str) -> float:
+    """返回指定 source 的平均有效强度（0~1）。
+    0=冷，>0.5=热。用于快速判断某个来源的活跃程度。"""
+    traces = sniff(source)
+    if not traces:
+        return 0.0
+    return sum(t["effective"] for t in traces) / len(traces)

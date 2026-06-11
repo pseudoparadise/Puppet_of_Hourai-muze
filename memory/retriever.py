@@ -1142,6 +1142,22 @@ def _write_retrieval_trace(query: str, va_tier: str, cards: list, tag: str = "")
             entry["tag"] = tag
         with open(trace_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+        # 信息素双写：每张检索出的卡同时写入 mycelium
+        try:
+            from memory.mycelium import write as _mwrite
+            import json as _jmeta
+            for _c in cards:
+                _mwrite("retrieval", _c["id"],
+                        intensity=_c.get("score", 0.5),
+                        halflife_s=3600,
+                        meta=_jmeta.dumps({
+                            "query": query[:80],
+                            "va_tier": va_tier,
+                            "tag": tag,
+                        }, ensure_ascii=False))
+        except Exception:
+            pass  # mycelium 写入失败不阻塞主流程
     except Exception as e:
         import traceback as _tb_trace
         msg = f"[retrieval_trace 写入失败]\n{_tb_trace.format_exc()}"

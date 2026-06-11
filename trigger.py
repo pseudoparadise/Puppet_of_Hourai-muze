@@ -1510,7 +1510,9 @@ def main():
 
     def _save_session_state():
         try:
+            from boot_guard import get_boot_token
             state = {
+                "boot_token": get_boot_token(),
                 "session_cards_written": session_cards_written,
                 "turn_counter": turn_counter,
                 "recent_turns": min(len(recent), 10),
@@ -1531,8 +1533,15 @@ def main():
             if os.path.exists(_SESSION_STATE_PATH):
                 with open(_SESSION_STATE_PATH, "r", encoding="utf-8") as _sf:
                     _ss = json.load(_sf)
+                # 重启检测：boot_token 不匹配 → 丢弃旧 session state
+                from boot_guard import get_boot_token
+                saved_boot = _ss.get("boot_token")
+                if saved_boot is not None and saved_boot != get_boot_token():
+                    print("[会话恢复] 检测到系统重启，丢弃旧会话状态")
+                    return  # don't restore, start fresh
                 saved_written = _ss.get("session_cards_written", {})
-                session_cards_written = {k: (turn_counter + v) for k, v in saved_written.items()}
+                # FIX: 不再累加 turn_counter。saved_written 已是绝对轮数，直接使用。
+                session_cards_written = dict(saved_written)
                 turn_counter = _ss.get("turn_counter", 0)
                 _va_saved = _ss.get("last_va")
                 if _va_saved and va is None:

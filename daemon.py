@@ -7,23 +7,23 @@ daemon.py — DSphantom 进程管家（唯一入口）
 import sys
 import os
 import time
+import json
 import signal
 import subprocess
 import socket
+
+from boot_guard import (
+    get_boot_token,
+    write_pid_with_boot_token,
+    read_pid_with_boot_token,
+    cleanup_stale_pid_file,
+)
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 PYTHON = sys.executable
 
 MUSIC_POLL_SCRIPT = "music_poll.py"
-POLLING_SCRIPT = "polling_loop.py"
 PID_FILE = os.path.join(PROJECT_ROOT, ".daemon.pid")
-
-if not os.path.exists(os.path.join(PROJECT_ROOT, POLLING_SCRIPT)):
-    print(f"[daemon] 致命错误：找不到 {POLLING_SCRIPT}")
-    print(f"  PROJECT_ROOT = {PROJECT_ROOT}")
-    print(f"  cwd = {os.getcwd()}")
-    print(f"  请从项目根目录启动 daemon.py，或使用 start_daemon.bat")
-    sys.exit(1)
 
 
 def _port_in_use(port: int) -> bool:
@@ -57,12 +57,23 @@ def _is_pid_alive(pid: int) -> bool:
 
 
 def _is_service_running(pid_file: str) -> bool:
-    """检查 pid_file 是否存在且对应进程还活着。活着返回 True，死了清理残留文件返回 False。"""
+    """检查 pid_file 是否有效且对应进程还活着。
+    - 先从旧启动残留清理（boot_token 比对）
+    - 再检查 PID 是否存活
+    - 活着返回 True，死了清理残留文件返回 False。"""
     if not os.path.exists(pid_file):
         return False
     try:
-        with open(pid_file, "r") as f:
-            pid = int(f.read().strip())
+        pid, boot_token = read_pid_with_boot_token(pid_file)
+        if pid is None:
+            os.remove(pid_file)
+            return False
+        # 来自上一次启动 → 无条件清理
+        if boot_token is not None and boot_token > get_boot_token():
+            print(f"[daemon] {os.path.basename(pid_file)} 来自上一次启动，清理")
+            os.remove(pid_file)
+            return False
+        # 同一次启动 → 检查进程存活
         if _is_pid_alive(pid):
             return True
         os.remove(pid_file)
@@ -72,8 +83,7 @@ def _is_service_running(pid_file: str) -> bool:
 
 
 def _write_pid(path: str):
-    with open(path, "w") as f:
-        f.write(str(os.getpid()))
+    write_pid_with_boot_token(path, os.getpid())
 
 
 def _remove_pid(path: str):
@@ -104,6 +114,48 @@ def stop_music_poll(proc):
 
 
 
+def _startup_cleanup():
+    """启动清理：移除上一次启动的残留文件，写入新的 boot 缓存。"""
+    print("[daemon] 执行启动清理...")
+
+    # 更新 boot 缓存（供 bark_trigger 检测重启）
+    BOOT_CACHE = os.path.join(PROJECT_ROOT, ".boot_cache")
+    try:
+        with open(BOOT_CACHE, "w") as f:
+            f.write(str(get_boot_token()))
+    except Exception:
+        pass
+
+    # 清理音乐上下文（跨启动无效）
+    music_ctx = os.path.join(PROJECT_ROOT, ".music_context.txt")
+    if os.path.exists(music_ctx):
+        try:
+            os.remove(music_ctx)
+            print("[daemon] 清理残留的 .music_context.txt")
+        except Exception:
+            pass
+
+    # 检测重启 → 丢弃旧 session state
+    session_state = os.path.join(PROJECT_ROOT, ".session_state.json")
+    if os.path.exists(session_state):
+        try:
+            with open(session_state, "r", encoding="utf-8") as f:
+                ss = json.load(f)
+            saved_boot = ss.get("boot_token", None)
+            current_boot = get_boot_token()
+            if saved_boot is not None and saved_boot != current_boot:
+                os.remove(session_state)
+                print("[daemon] 检测到系统重启，清除旧会话状态")
+        except Exception:
+            pass
+
+    # 清理其他 PID 文件的旧启动残留
+    for pid_name in [".polling_loop.pid", ".music_sync.pid"]:
+        pid_path = os.path.join(PROJECT_ROOT, pid_name)
+        if cleanup_stale_pid_file(pid_path):
+            print(f"[daemon] 清理旧启动残留: {pid_name}")
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser()
@@ -112,30 +164,33 @@ def main():
 
     # ── PID 锁：检测旧实例是否存活 ──
     if _is_service_running(PID_FILE):
-        with open(PID_FILE, "r") as f:
-            old_pid = f.read().strip()
-        print(f"[daemon] 已有守护进程运行 (PID {old_pid})")
+        pid, _ = read_pid_with_boot_token(PID_FILE)
+        print(f"[daemon] 已有守护进程运行 (PID {pid or '?'})")
         sys.exit(1)
     _write_pid(PID_FILE)
+    _startup_cleanup()
 
-    print("DSphantom 守护进程启动")
+    # ── 清理旧 polling_loop.pid（console.py 现在接管轮询）──
+    old_poll_pid = os.path.join(PROJECT_ROOT, ".polling_loop.pid")
+    if os.path.exists(old_poll_pid):
+        try:
+            cleanup_stale_pid_file(old_poll_pid)
+            if os.path.exists(old_poll_pid):
+                os.remove(old_poll_pid)
+        except Exception:
+            pass
+
+    print("DSphantom 守护进程启动 (精简版: 仅音乐)")
     print(f"  PID: {os.getpid()}")
     print(f"  项目: {PROJECT_ROOT}")
+    print(f"  提示: 轮询守护已迁移至 console.py 内置")
 
     music_proc = None
     if not args.no_music:
         music_proc = start_music_poll()
 
-    polling_proc = None
-
     def cleanup():
         print("\n[daemon] 正在停止所有服务...")
-        if polling_proc and polling_proc.poll() is None:
-            polling_proc.terminate()
-            try:
-                polling_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                polling_proc.kill()
         if music_proc and music_proc.poll() is None:
             music_proc.terminate()
             try:
@@ -154,86 +209,77 @@ def main():
     signal.signal(signal.SIGTERM, _on_signal)
 
     MUSIC_STALE_SEC = 120
-    POLLING_PID_FILE = os.path.join(PROJECT_ROOT, ".polling_loop.pid")
-    RESTART_DELAY = 10
+    MUSIC_MAX_CRASHES = 5       # 5分钟内最多崩溃5次
+    MUSIC_CRASH_WINDOW = 300    # 5分钟窗口
+    MUSIC_BASE_DELAY = 10       # 基础重启延迟
+    music_crash_times = []      # 崩溃时间戳列表
 
-    # ── 预检：polling_loop 是否已在运行（一个服务活着不阻其他服务）──
-    polling_skip = False
-    if _is_service_running(POLLING_PID_FILE):
-        with open(POLLING_PID_FILE, "r") as f:
-            print(f"[daemon] polling_loop 已在运行 (PID {f.read().strip()})，跳过启动")
-        polling_skip = True
-
-    # ── 主循环：启动 + 监护子服务 ──
+    # ── 主循环：仅监护 music_poll ──
     try:
         while True:
-            if not polling_skip:
-                print(f"[daemon] 启动轮询守护...")
-                polling_proc = subprocess.Popen(
-                    [PYTHON, os.path.join(PROJECT_ROOT, POLLING_SCRIPT)],
-                    cwd=PROJECT_ROOT,
-                )
-            else:
-                polling_proc = None
-
-            while True:
-                # ── 监护 polling_loop ──
-                if polling_proc is not None:
-                    try:
-                        ret = polling_proc.wait(timeout=5)
-                        if ret == 0:
-                            if _is_service_running(POLLING_PID_FILE):
-                                # 已有另一个实例接替（或被我们 kill 后有残留）→ 跳过
-                                print(f"[daemon] polling_loop 退出但已有其他实例运行，跳过重启")
-                                polling_skip = True
-                                polling_proc = None
-                            else:
-                                print(f"[daemon] polling_loop 退出 (code=0)，{RESTART_DELAY}s 后重拉...")
-                                time.sleep(RESTART_DELAY)
-                                break
-                        else:
-                            print(f"[daemon] polling_loop 异常退出 (code={ret})，{RESTART_DELAY}s 后重启...")
-                            time.sleep(RESTART_DELAY)
-                            break
-                    except subprocess.TimeoutExpired:
-                        pass  # 还活着，继续监护
-                elif not polling_skip:
-                    # polling_proc 为 None 且未跳过 → 跳出内循环重拉
-                    break
-                elif _is_service_running(POLLING_PID_FILE):
-                    # 跳过模式：定期确认外部实例还活着
-                    pass
+            # ── 监护 music_poll ──
+            if music_proc:
+                need_restart = False
+                restart_reason = ""
+                if music_proc.poll() is not None:
+                    need_restart = True
+                    restart_reason = "进程已退出"
                 else:
-                    # 外部实例已死 → 恢复接管
-                    print("[daemon] 外部 polling_loop 已退出，恢复接管")
-                    polling_skip = False
-                    break
-
-                # ── 监护 music_poll ──
-                if music_proc:
-                    need_restart = False
-                    if music_proc.poll() is not None:
-                        need_restart = True
-                        print("[daemon] 音乐轮询进程已退出，重新拉起...")
-                    else:
-                        state_path = os.path.join(PROJECT_ROOT, ".music_state.json")
-                        try:
-                            age = time.time() - os.path.getmtime(state_path)
-                            if age > MUSIC_STALE_SEC:
-                                need_restart = True
-                                print(f"[daemon] 音乐轮询心跳超时 ({int(age)}s 未更新)，强制重拉...")
-                                music_proc.kill()
-                                try:
-                                    music_proc.wait(timeout=3)
-                                except subprocess.TimeoutExpired:
-                                    pass
-                        except FileNotFoundError:
+                    state_path = os.path.join(PROJECT_ROOT, ".music_state.json")
+                    try:
+                        age = time.time() - os.path.getmtime(state_path)
+                        if age > MUSIC_STALE_SEC:
                             need_restart = True
-                            print("[daemon] .music_state.json 不存在，重拉音乐轮询...")
-                        except Exception:
-                            pass
-                    if need_restart:
-                        music_proc = start_music_poll()
+                            restart_reason = f"心跳超时({int(age)}s)"
+                            music_proc.kill()
+                            try:
+                                music_proc.wait(timeout=3)
+                            except subprocess.TimeoutExpired:
+                                pass
+                    except FileNotFoundError:
+                        if music_proc.poll() is not None:
+                            need_restart = True
+                            restart_reason = "状态文件缺失且进程已死"
+                    except Exception:
+                        pass
+
+                if need_restart:
+                    # ── 崩溃保护：滑动窗口计数 ──
+                    now_ts = time.time()
+                    music_crash_times = [t for t in music_crash_times if now_ts - t < MUSIC_CRASH_WINDOW]
+                    music_crash_times.append(now_ts)
+                    crash_count = len(music_crash_times)
+
+                    if crash_count > MUSIC_MAX_CRASHES:
+                        print(f"[daemon] 音乐轮询 {MUSIC_CRASH_WINDOW}s 内崩溃 {crash_count} 次，停止重试！")
+                        print(f"[daemon] 请手动检查 music_poll.py 状态，daemon 继续运行但不再重拉音乐服务")
+                        # 清空崩溃记录，等手动修复后会恢复
+                        while True:
+                            time.sleep(60)
+                            if music_proc is None or music_proc.poll() is not None:
+                                continue
+                            # 检查是否手动恢复了
+                            try:
+                                if os.path.exists(os.path.join(PROJECT_ROOT, ".music_state.json")):
+                                    age = time.time() - os.path.getmtime(os.path.join(PROJECT_ROOT, ".music_state.json"))
+                                    if age < MUSIC_STALE_SEC:
+                                        music_crash_times = []
+                                        print("[daemon] 检测到音乐服务手动恢复，重置崩溃计数")
+                                        break
+                            except Exception:
+                                pass
+
+                    # 指数退避: 10s → 20s → 40s → ... → max 300s
+                    delay = min(MUSIC_BASE_DELAY * (2 ** (crash_count - 1)), 300)
+                    print(f"[daemon] 音乐轮询 {restart_reason}，{delay}s 后重拉 (崩溃#{crash_count})...")
+                    time.sleep(delay)
+                    music_proc = start_music_poll()
+                else:
+                    time.sleep(5)  # 正常轮询间隔
+            else:
+                # music_proc 为 None 且 --no-music → 纯空闲
+                print("[daemon] 音乐服务已禁用 (--no-music)，守护空闲中...")
+                time.sleep(60)
     except KeyboardInterrupt:
         cleanup()
 

@@ -699,21 +699,39 @@ class CardManager:
         self.load_degradation()
 
     def load_degradation(self):
-        """读取 preflight_seen.json + cards.db，展示每张卡的退化状态。"""
+        """读取 mycelium 信息素层 + cards.db，展示每张卡的退化状态。"""
         from preflight import DEGRADATION as _DEG
 
         for item in self.degradation_tree.get_children():
             self.degradation_tree.delete(item)
 
-        # 读取退化记录
-        seen_path = os.path.join(os.path.dirname(__file__), "preflight_seen.json")
-        seen = {}
-        if os.path.exists(seen_path):
-            try:
-                with open(seen_path, "r", encoding="utf-8") as f:
-                    seen = json.load(f)
-            except Exception:
-                pass
+        # 从 mycelium 读取退化记录
+        seen = {"round": 0, "cards": {}}
+        try:
+            from memory.mycelium import sniff, read as _mr
+            import json as _mj
+            # 轮次存在 __round__ 的 meta 中
+            for t in sniff("preflight"):
+                if t["key"] == "__round__":
+                    try:
+                        seen["round"] = _mj.loads(t.get("meta", "{}")).get("round", 0)
+                    except Exception:
+                        pass
+                    break
+            for trace in sniff("preflight"):
+                if trace["key"] == "__round__":
+                    continue
+                try:
+                    meta = _mj.loads(trace.get("meta", "{}"))
+                except Exception:
+                    meta = {}
+                seen["cards"][trace["key"]] = {
+                    "times_shown": trace["refs"],
+                    "first_seen_round": meta.get("first_seen_round", 0),
+                    "last_shown_round": meta.get("last_shown_round", 0),
+                }
+        except Exception:
+            pass
 
         current_round = seen.get("round", 0)
         cards_data = seen.get("cards", {})
@@ -785,18 +803,16 @@ class CardManager:
     def _reset_degradation_all(self):
         if not messagebox.askyesno("确认", "确定重置所有卡片的退化轮数吗？\n所有卡片将重新从全文曝光开始。"):
             return
-        seen_path = os.path.join(os.path.dirname(__file__), "preflight_seen.json")
-        if os.path.exists(seen_path):
-            try:
-                with open(seen_path, "r", encoding="utf-8") as f:
-                    seen = json.load(f)
-                seen["cards"] = {}
-                with open(seen_path, "w", encoding="utf-8") as f:
-                    json.dump(seen, f, ensure_ascii=False, indent=2)
-                self.load_degradation()
-                messagebox.showinfo("完成", "所有卡片退化轮数已归零。")
-            except Exception as e:
-                messagebox.showerror("失败", f"重置失败: {e}")
+        try:
+            import sqlite3 as _sql
+            _db = _sql.connect(os.path.join(os.path.dirname(__file__), "mycelium.db"))
+            _db.execute("DELETE FROM pheromones WHERE source='preflight'")
+            _db.commit()
+            _db.close()
+            self.load_degradation()
+            messagebox.showinfo("完成", "所有卡片退化轮数已归零（mycelium）。")
+        except Exception as e:
+            messagebox.showerror("失败", f"重置失败: {e}")
 
     def backfill_embeddings(self):
         """调 backfill_embeddings.py 批量回填老卡向量"""
