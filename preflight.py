@@ -789,6 +789,9 @@ def preflight(user_input: str, json_mode: bool = False, skip_va: bool = False, m
                 display_marker = {"title": "◁标题", "quote": "◁原话", "summary": "◁概括", "full": "◁全文"}.get(d, "")
                 rel_marker = {"high": " ★", "medium": "", "low": " ·"}.get(r, "")
                 print(f"│ [{cat:<12}] {title:<30} s={score:4.1f} imp={imp:>2} {display_marker}{rel_marker} │")
+                preview = (card.get("content") or card.get("keywords") or "").replace("\n", " ").replace("\r", "")[:50]
+                if preview:
+                    print(f"│   {preview:<48} │")
         else:
             print(f"│ (无相关记忆)                                               │")
         if silent_count > 0:

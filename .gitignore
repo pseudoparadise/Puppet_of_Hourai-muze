@@ -65,8 +65,11 @@ memory/model_meta_backup_*.json
 
 # ── 进程 PID 文件 ──
 .daemon.pid
+.daemon_state.json
+.console.pid
 .polling_loop.pid
 .music_sync.pid
+.boot_cache
 
 # ── 会话状态（含私人对话上下文） ──
 .session_state.json
@@ -150,6 +153,19 @@ io/
 # ── Proactive gate 数据（含位置/健康信息，不提交） ──
 shortcut_data/
 proactive_state.json
+
+# ── 守护进程备份 ──
+daemon.py.bak
+
+# ── 统一状态文件 ──
+.dsphantom_state.json
+.daemon_state.json.bak
+.session_state.json.bak
+.music_toggle.json.bak
+
+# ── 守护进程统一日志 ──
+.dsphantom.log
+.dsphantom.log.old
 
 # ── IDE ──
 .vscode/

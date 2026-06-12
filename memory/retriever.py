@@ -250,8 +250,8 @@ def _safe_parse_ts(val):
 
 
 def _build_candidate_pool(all_cards: list, anchor_ids: set, va_tier: str,
-                          va_description: str = None, va_valence: float = None,
-                          va_arousal: float = None, candidate_limit: int = 50) -> list:
+                          va_description: str | None = None, va_valence: float | None = None,
+                          va_arousal: float | None = None, candidate_limit: int = 50) -> list:
     """
     构建语义搜索候选池，复杂度从 O(N) 降为 O(K)。
     优先级：锚定集 > VA分档筛选 > 水之共鸣描述匹配
@@ -337,7 +337,7 @@ def _build_candidate_pool(all_cards: list, anchor_ids: set, va_tier: str,
     return pool
 
 
-def _score_card(card: dict, hit_count: int, distance: float, weights: dict = None, anchor_ids: set = None, va_tier: str = "mid", **kwargs) -> float:
+def _score_card(card: dict, hit_count: float, distance: float, weights: dict | None = None, anchor_ids: set | None = None, va_tier: str = "mid", **kwargs) -> float:
     """
     ── NEW: 独立打分函数，为未来记忆卡片重排算法优化收口 ──
     集成岩/风/雷/冰四探针 + 锚定集合加成
@@ -566,11 +566,11 @@ def _score_card(card: dict, hit_count: int, distance: float, weights: dict = Non
     ) * resolved_penalty * type_mult
 
 
-def retrieve(query: str, top_k: int = 3, weights: dict = None,
-             va_tier: str = "mid", va_description: str = None, va_valence: float = None,
-             va_arousal: float = None,
-             chord_bpm: int = None, chord_dynamic: str = None, chord_name: str = None,
-             trace_tag: str = "", query_vec: np.ndarray = None) -> list:
+def retrieve(query: str, top_k: int = 3, weights: dict | None = None,
+             va_tier: str = "mid", va_description: str | None = None, va_valence: float | None = None,
+             va_arousal: float | None = None,
+             chord_bpm: int | None = None, chord_dynamic: str | None = None, chord_name: str | None = None,
+             trace_tag: str = "", query_vec: np.ndarray | None = None) -> list:
     db_path = os.path.join(os.path.dirname(__file__), "cards.db")
 
     # ── 硬编码召回：特定完整短语 → 强制召回对应卡片，无视评分 ──
@@ -661,18 +661,21 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
     if va_tier == "high":
         try:
             from encoder import embed as _embed_mix
-            _qv = query_vec if query_vec is not None else getattr(retrieve, '_cached_query_vec', None)
+            _qv: np.ndarray | None = query_vec if query_vec is not None else getattr(retrieve, '_cached_query_vec', None)
             if _qv is None:
                 _qv = _embed_mix(query)
                 retrieve._cached_query_vec = _qv  # type: ignore
-            _COG_REF = getattr(retrieve, '_cog_ref_vec', None)
-            _EMO_REF = getattr(retrieve, '_emo_ref_vec', None)
+            _COG_REF: np.ndarray | None = getattr(retrieve, '_cog_ref_vec', None)
+            _EMO_REF: np.ndarray | None = getattr(retrieve, '_emo_ref_vec', None)
             if _COG_REF is None:
                 _COG_REF = _embed_mix("debug分析排查代码逻辑算法数据结构技术方案架构编译部署")
                 _EMO_REF = _embed_mix("难过伤心哭泣崩溃绝望孤独害怕焦虑愤怒委屈想念")
                 retrieve._cog_ref_vec = _COG_REF  # type: ignore
                 retrieve._emo_ref_vec = _EMO_REF  # type: ignore
             import numpy as _np_mix
+            assert _qv is not None
+            assert _COG_REF is not None
+            assert _EMO_REF is not None
             _dot_c = _np_mix.dot(_qv, _COG_REF)
             _dot_e = _np_mix.dot(_qv, _EMO_REF)
             _n_q = _np_mix.linalg.norm(_qv)
@@ -734,7 +737,6 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
     anchor_path = os.path.join(os.path.dirname(__file__), "anchor_set.json")
     if os.path.exists(anchor_path):
         try:
-            import json
             with open(anchor_path, "r", encoding="utf-8") as f:
                 anchor_data = json.load(f)
             anchor_ids = {c["id"] for c in anchor_data.get("cards", [])}
@@ -750,9 +752,9 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
 
     if _mode_cats:
         _placeholders = ",".join("?" * len(_mode_cats))
-        c.execute(f"SELECT id, keywords, importance, category, content, title, created_at, last_referenced_at, usage_count, valence, arousal FROM cards WHERE review_status='final' AND enabled_in_context=1 AND category IN ({_placeholders})", _mode_cats)
+        c.execute(f"SELECT id, keywords, importance, category, content, title, created_at, last_referenced_at, usage_count, valence, arousal, embedding FROM cards WHERE review_status='final' AND enabled_in_context=1 AND category IN ({_placeholders})", _mode_cats)
     else:
-        c.execute("SELECT id, keywords, importance, category, content, title, created_at, last_referenced_at, usage_count, valence, arousal FROM cards WHERE review_status='final' AND enabled_in_context=1")
+        c.execute("SELECT id, keywords, importance, category, content, title, created_at, last_referenced_at, usage_count, valence, arousal, embedding FROM cards WHERE review_status='final' AND enabled_in_context=1")
     all_cards = [dict(row) for row in c.fetchall()]
 
     def _kw_match_score(kw: str, ql: str) -> float:
@@ -794,7 +796,7 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
             qv = query_vec if query_vec is not None else getattr(retrieve, '_cached_query_vec', None)
             if qv is None:
                 qv = embed(query)
-                retrieve._cached_query_vec = qv
+                retrieve._cached_query_vec = qv  # type: ignore
             index = load_index()
             if index.ntotal > 0:
                 candidates = search_index(index, qv, k=max(effective_k * semantic_k_mult, 5))
@@ -806,7 +808,7 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
                     if cid not in candidate_ids:
                         continue
                     c.execute(
-                        "SELECT id, keywords, importance, category, content, title, created_at, last_referenced_at, usage_count, valence, arousal "
+                        "SELECT id, keywords, importance, category, content, title, created_at, last_referenced_at, usage_count, valence, arousal, embedding "
                         "FROM cards WHERE id=? AND review_status='final' AND enabled_in_context=1",
                         (cid,)
                     )
@@ -960,6 +962,33 @@ def retrieve(query: str, top_k: int = 3, weights: dict = None,
 
     # 重排（含 link 扩散邻居）
     merged.sort(key=lambda x: x["score"], reverse=True)
+
+    # ── Embedding 去重：card-card cos > 0.92 → 只留最高分 ──
+    if diversity_enabled:
+        _deduped = []
+        _seen_embs = []
+        for _card in merged:
+            _emb = _card.get("embedding")
+            if _emb is None:
+                _deduped.append(_card)
+                continue
+            try:
+                _vec = np.frombuffer(_emb, dtype=np.float32)
+            except Exception:
+                _deduped.append(_card)
+                continue
+            _dup = False
+            for __, _sv in _seen_embs:
+                _dot = np.dot(_vec, _sv)
+                _norm = np.linalg.norm(_vec) * np.linalg.norm(_sv)
+                if _norm > 0 and float(_dot / _norm) > 0.92:
+                    _dup = True
+                    break
+            if _dup:
+                continue
+            _deduped.append(_card)
+            _seen_embs.append((_card["id"], _vec))
+        merged = _deduped
 
     result = []
     categories_used = set()
@@ -1146,12 +1175,11 @@ def _write_retrieval_trace(query: str, va_tier: str, cards: list, tag: str = "")
         # 信息素双写：每张检索出的卡同时写入 mycelium
         try:
             from memory.mycelium import write as _mwrite
-            import json as _jmeta
             for _c in cards:
                 _mwrite("retrieval", _c["id"],
                         intensity=_c.get("score", 0.5),
                         halflife_s=3600,
-                        meta=_jmeta.dumps({
+                        meta=json.dumps({
                             "query": query[:80],
                             "va_tier": va_tier,
                             "tag": tag,

@@ -302,7 +302,7 @@ def main():
     with open(os.path.join(PROJECT_ROOT, "config.json"), "r", encoding="utf-8") as f:
         config = json.load(f)
     BARK_MODEL = config["global"].get("model", "deepseek-v4-flash")
-    from shared import load_state
+    from shared import load_state, save_state
     state = load_state()
 
     now = now_utc()
@@ -568,7 +568,6 @@ def main():
     _log_cycle(config, now, silence_minutes, source, f"{state_label}(p={probability})", decision, bark_sent)
     print("日志已写入。")
 
-    from shared import save_state
     save_state(state)
 
     print("bark_trigger.py 执行完毕。")

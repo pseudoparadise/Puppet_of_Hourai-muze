@@ -451,6 +451,175 @@ def break_link(card_id_a: str, card_id_b: str) -> bool:
     return affected > 0
 
 
+def set_link_confidence(card_id_a: str, card_id_b: str, confidence: float) -> bool:
+    a, b = _normalize_pair(card_id_a, card_id_b)
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE card_links SET similarity=? WHERE card_id_a=? AND card_id_b=? AND manual=1",
+        (round(max(0.0, min(1.0, confidence)), 4), a, b)
+    )
+    affected = conn.total_changes
+    conn.commit()
+    conn.close()
+    if affected:
+        print(f"[link] confidence: {card_id_a} <-> {card_id_b} = {confidence:.2f}")
+    return affected > 0
+
+
+def get_causal_chain(card_id: str, max_depth: int = 5, manual_only: bool = True,
+                     max_breadth: int = 8) -> dict:
+    """BFS 因果链查询。沿因果边递归展开。
+    manual_only=True 只跟手动边；max_breadth 限制每层展开数量。
+    返回 {root, nodes, edges, chain}，chain 按 target_date 排序。"""
+    ensure_link_table()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+
+    root_row = conn.execute(
+        "SELECT id, title, category, target_date FROM cards WHERE id=?", (card_id,)
+    ).fetchone()
+    if not root_row:
+        conn.close()
+        return {"root": None, "nodes": [], "edges": []}
+
+    root = {
+        "id": root_row["id"], "title": root_row["title"],
+        "category": root_row["category"], "target_date": root_row["target_date"] or ""
+    }
+
+    visited = {card_id}
+    nodes = {}
+    edges = []
+
+    def _chain_label(direction, relation):
+        if direction in ("forward",):
+            return "→ 结果" if "causal" in relation else "→ 关联"
+        return "← 起因" if "causal" in relation else "← 关联"
+
+    queue = [(card_id, 0)]
+    while queue:
+        cur_id, depth = queue.pop(0)
+        if depth >= max_depth:
+            continue
+
+        manual_clause = "AND manual=1" if manual_only else ""
+        rows = conn.execute(
+            f"SELECT card_id_b, similarity, direction, relation, manual FROM card_links "
+            f"WHERE card_id_a=? {manual_clause} "
+            f"UNION ALL SELECT card_id_a, similarity, "
+            f"CASE direction WHEN 'forward' THEN 'backward' WHEN 'backward' THEN 'forward' ELSE direction END, "
+            f"relation, manual FROM card_links WHERE card_id_b=? {manual_clause} "
+            f"ORDER BY similarity DESC LIMIT {max_breadth}",
+            (cur_id, cur_id)
+        ).fetchall()
+
+        for row in rows:
+            neighbor_id, confidence, direction, relation, manual = (
+                row[0], row[1], row[2], row[3], bool(row[4])
+            )
+            if neighbor_id in visited:
+                continue
+            visited.add(neighbor_id)
+
+            neighbor_row = conn.execute(
+                "SELECT id, title, category, target_date FROM cards WHERE id=?", (neighbor_id,)
+            ).fetchone()
+            if not neighbor_row:
+                continue
+
+            node = {
+                "id": neighbor_row["id"], "title": neighbor_row["title"],
+                "category": neighbor_row["category"],
+                "target_date": neighbor_row["target_date"] or "",
+                "depth": depth + 1, "direction": direction,
+                "relation": relation, "confidence": round(confidence, 4),
+                "manual": manual,
+            }
+            nodes[neighbor_id] = node
+            if direction in ("backward",):
+                edge_from, edge_to = neighbor_id, cur_id
+            else:
+                edge_from, edge_to = cur_id, neighbor_id
+            edges.append({
+                "from": edge_from, "to": edge_to,
+                "label": _chain_label(direction, relation),
+                "manual": manual, "confidence": round(confidence, 4),
+            })
+            queue.append((neighbor_id, depth + 1))
+
+    conn.close()
+
+    chain = [root] + sorted(
+        nodes.values(),
+        key=lambda n: (n["target_date"] or "9999", n["depth"])
+    )
+    return {"root": root, "nodes": chain[1:], "edges": edges, "chain": chain}
+
+
+def build_chain_dot(card_id: str, max_depth: int = 5, manual_only: bool = True) -> str:
+    """生成 Graphviz DOT 源码，用于渲染因果链树形图。"""
+    result = get_causal_chain(card_id, max_depth, manual_only=manual_only)
+    if not result["root"]:
+        return "// 卡片不存在"
+
+    root = result["root"]
+    lines = [
+        "digraph causal_chain {",
+        "    rankdir=TB;",
+        "    bgcolor=\"#1a1a2e\";",
+        '    fontname="Microsoft YaHei";',
+        "    node [fontname=\"Microsoft YaHei\", fontsize=11, style=filled];",
+        "    edge [fontname=\"Microsoft YaHei\", fontsize=9];",
+        "",
+        f'    // 根节点: {root["title"][:30]}',
+        f'    root [label="{root["title"][:25]}\\n{root["target_date"]}", '
+        f'shape=box, fillcolor="#e94560", fontcolor="white", penwidth=3];',
+    ]
+
+    for i, node in enumerate(result.get("nodes", [])):
+        ndir = node["direction"]
+        depth = node["depth"]
+        if ndir in ("backward",):
+            color = "#0f3460"
+            fontcolor = "#e0e0e0"
+        elif ndir in ("forward",):
+            color = "#16213e"
+            fontcolor = "#e0e0e0"
+        else:
+            color = "#533483"
+            fontcolor = "#e0e0e0"
+
+        node_id = f"n{i}"
+        date_str = node.get("target_date", "") or "?"
+        lines.append(
+            f'    {node_id} [label="{node["title"][:25]}\\n{date_str}", '
+            f'shape=box, fillcolor="{color}", fontcolor="{fontcolor}"];'
+        )
+
+    for i, edge in enumerate(result.get("edges", [])):
+        fi = _idx_of(result, edge["from"])
+        ti = _idx_of(result, edge["to"])
+        from_id = "root" if fi == -1 else f"n{fi}"
+        to_id = "root" if ti == -1 else f"n{ti}"
+        style = "solid" if edge.get("manual") else "dashed"
+        lines.append(
+            f'    {from_id} -> {to_id} [label="{edge["label"]}", '
+            f'fontcolor="#a0a0a0", color="#a0a0a0", style={style}];'
+        )
+
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def _idx_of(result, card_id):
+    if result.get("root", {}).get("id") == card_id:
+        return -1  # signals "root"
+    for i, n in enumerate(result.get("nodes", [])):
+        if n["id"] == card_id:
+            return i
+    return -1
+
+
 def rebuild_all_links():
     """全量重建所有卡片的 link graph（top-10 + 传递闭包 + 方向边）。"""
     ensure_link_table()

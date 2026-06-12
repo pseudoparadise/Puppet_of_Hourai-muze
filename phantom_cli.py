@@ -10,6 +10,9 @@ phantom_cli.py — Claude Code ↔ phantom-trigger 桥梁
   python phantom_cli.py recall "查询文本"                    模拟检索
   python phantom_cli.py links <card_id>                     查 link 邻居
   python phantom_cli.py reslog --last 20                    查划卡审计日志
+  python phantom_cli.py chain <card_id>                  查因果链（文本树形图）
+  python phantom_cli.py chain <card_id> --dot             输出 Graphviz DOT
+  python phantom_cli.py chain <card_id> --render <path>   渲染因果链 PNG
 """
 import json
 import os
@@ -226,6 +229,101 @@ def cmd_links(args):
         print(f"link 查询失败: {e}")
 
 
+def cmd_chain(args):
+    card_id = args[0] if args else ""
+    if not card_id:
+        print("用法: python phantom_cli.py chain <card_id> [--depth 5] [--dot | --render <path>]")
+        return
+
+    depth = 5
+    if "--depth" in args:
+        try:
+            depth = int(args[args.index("--depth") + 1])
+        except (IndexError, ValueError):
+            pass
+
+    dot_mode = "--dot" in args
+    render_idx = args.index("--render") if "--render" in args else -1
+    render_path = args[render_idx + 1] if render_idx >= 0 and render_idx + 1 < len(args) else None
+
+    try:
+        from memory.linker import get_causal_chain, build_chain_dot
+    except Exception as e:
+        print(f"导入 linker 失败: {e}")
+        return
+
+    if dot_mode or render_path:
+        dot_src = build_chain_dot(card_id, depth)
+        if dot_mode:
+            print(dot_src)
+        if render_path:
+            try:
+                import os as _os
+                _os.environ['PATH'] = r'C:\Program Files\Graphviz\bin' + _os.pathsep + _os.environ.get('PATH', '')
+                if hasattr(_os, 'add_dll_directory'):
+                    try:
+                        _os.add_dll_directory(r'C:\Program Files\Graphviz\bin')
+                    except Exception:
+                        pass
+                import graphviz
+                src = graphviz.Source(dot_src, format="png")
+                abs_path = _os.path.abspath(render_path.replace(".png", ""))
+                src.render(abs_path, cleanup=True)
+                print(f"[chain] 已渲染: {render_path}")
+            except Exception as e:
+                print(f"[chain] 渲染失败: {e}")
+                print("[chain] 手动渲染: dot -Tpng -o output.png < dot_source")
+                print(dot_src)
+        return
+
+    result = get_causal_chain(card_id, depth)
+    root = result.get("root")
+    if not root:
+        print(f"卡片 {card_id} 不存在")
+        return
+
+    date_str = root.get("target_date", "") or "?"
+    print(f"\n{root['title']} ({date_str}) [{root['category']}]")
+    print("═" * 50)
+
+    nodes_map = {n["id"]: n for n in result.get("chain", [])}
+    edges = result.get("edges", [])
+
+    def _fmt_node(n):
+        d = n.get("target_date", "") or "?"
+        c = n.get("confidence", 0)
+        m = " [手]" if n.get("manual") else ""
+        return f"{n['title'][:35]} ({d}){m} conf={c:.2f}"
+
+    visited = {card_id}
+
+    def _tree(cur_id, prefix="", depth=0):
+        children = []
+        for e in edges:
+            if e["from"] == cur_id and e["to"] not in visited:
+                children.append((e["to"], e, "→"))
+            elif e["to"] == cur_id and e["from"] not in visited:
+                children.append((e["from"], e, "←"))
+        if not children:
+            return
+        for i, (child_id, edge, arrow) in enumerate(children):
+            last = (i == len(children) - 1)
+            connector = "└── " if last else "├── "
+            child_prefix = "    " if last else "│   "
+            dir_label = "起因" if arrow == "←" else "结果"
+            node = nodes_map.get(child_id, {"title": child_id, "target_date": "", "manual": edge.get("manual"), "confidence": edge.get("confidence", 0)})
+            print(f"{prefix}{connector}{arrow} {dir_label}: {_fmt_node(node)}")
+            visited.add(child_id)
+            _tree(child_id, prefix + child_prefix, depth + 1)
+
+    if not edges:
+        print("  (无因果链邻居)")
+    else:
+        _tree(card_id)
+        print()
+
+
+
 def cmd_reslog(args):
     """查看卡片划掉审计日志。args: --last 20 (最近N条)"""
     log_path = os.path.join(PROJECT_ROOT, "memory", "resolution_log.jsonl")
@@ -271,6 +369,8 @@ if __name__ == "__main__":
         cmd_recall(rest)
     elif cmd == "links":
         cmd_links(rest)
+    elif cmd == "chain":
+        cmd_chain(rest)
     elif cmd == "reslog":
         cmd_reslog(rest)
     elif cmd == "compress":

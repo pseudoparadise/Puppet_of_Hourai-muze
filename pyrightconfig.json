@@ -1,0 +1,6 @@
+{
+    "exclude": [
+        "daemon.py",
+        "console.py"
+    ]
+}
