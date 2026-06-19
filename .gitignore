@@ -157,6 +157,9 @@ proactive_state.json
 # ── 守护进程备份 ──
 daemon.py.bak
 
+# ── 旧代码备份（防止含敏感配置泄露） ──
+backups/
+
 # ── 统一状态文件 ──
 .dsphantom_state.json
 .daemon_state.json.bak
@@ -173,3 +176,34 @@ daemon.py.bak
 *.swp
 *.swo
 *.swn
+
+# ── 360门铃逆向攻坚（工具+抓包+APK打包，不提交） ──
+360_doorbell/
+360_smart*.apk
+360_smart*.apk.idsig
+360_smart_unpacked/
+360_clean/
+360_patched/
+360_patched*.apk
+360_patched*.apk.idsig
+_apk_merge/
+apktool.jar
+uber-apk-signer.jar
+debug.keystore
+debug2.keystore
+frida-server
+frida-server.xz
+jadx/
+mitm_captures/
+mitm_capture.flow
+mitmproxy-ca.pem
+wireshark_caps/
+memory/project_mumu_ad_war.txt
+
+# ── 本地工具脚本 ──
+ghidra.ps1
+learning.md
+
+# ── 麦当劳临时图片 ──
+mcd_*.png
+mcd_*.gif

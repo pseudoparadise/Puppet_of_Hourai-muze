@@ -130,23 +130,40 @@ class CardEditTab(ttk.Frame):
         self.summary_text.config(yscrollcommand=sum_scroll.set)
 
     def _search(self):
-        query = self.search_var.get().strip()
-        for item in self.result_tree.get_children():
-            self.result_tree.delete(item)
+        try:
+            query = self.search_var.get().strip()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("搜索异常", f"读取搜索框失败: {e}")
+            return
+        try:
+            for item in self.result_tree.get_children():
+                self.result_tree.delete(item)
+        except Exception:
+            pass
 
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
-        if query:
-            c.execute(
-                "SELECT id, title, category, importance, content FROM cards WHERE review_status='final' "
-                "AND (id LIKE ? OR title LIKE ?) ORDER BY importance DESC LIMIT 50",
-                (f"%{query}%", f"%{query}%"))
-        else:
-            c.execute(
-                "SELECT id, title, category, importance, content FROM cards WHERE review_status='final' "
-                "ORDER BY importance DESC LIMIT 50")
-        for r in c.fetchall():
+        try:
+            if query:
+                c.execute(
+                    "SELECT id, title, category, importance, content FROM cards WHERE review_status='final' "
+                    "AND (id LIKE ? OR title LIKE ?) ORDER BY importance DESC LIMIT 50",
+                    (f"%{query}%", f"%{query}%"))
+            else:
+                c.execute(
+                    "SELECT id, title, category, importance, content FROM cards WHERE review_status='final' "
+                    "ORDER BY importance DESC LIMIT 50")
+            rows = c.fetchall()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("搜索异常", f"数据库查询失败: {e}")
+            conn.close()
+            return
+        for r in rows:
             preview = (r["content"] or "")[:60]
             self.result_tree.insert("", tk.END,
                 values=(r["id"], r["title"], r["category"], r["importance"], preview), iid=r["id"])

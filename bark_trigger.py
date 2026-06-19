@@ -245,7 +245,25 @@ def _get_last_active_time(config, state, now):
     except Exception:
         pass
 
-    # 取三者中最新；都失败则降级为 1 小时前
+    # 读 chat_logs_work.json 最后一条时间（工位模式，Claude Code session 提取路径）
+    worklog_time = None
+    try:
+        worklog_path = os.path.join(os.path.dirname(__file__), "chat_logs_work.json")
+        if os.path.exists(worklog_path):
+            with open(worklog_path, "r", encoding="utf-8") as f:
+                last_line = None
+                for line in f:
+                    if line.strip():
+                        last_line = line
+            if last_line:
+                entry = json.loads(last_line.strip())
+                raw_ts = entry.get("timestamp", "")
+                if raw_ts:
+                    worklog_time = parse_time(raw_ts)
+    except Exception:
+        pass
+
+    # 取四者中最新；都失败则降级为 1 小时前
     candidates = []
     if supabase_time:
         candidates.append((supabase_time, "Supabase"))
@@ -253,6 +271,8 @@ def _get_last_active_time(config, state, now):
         candidates.append((state_time, "state.json"))
     if chatlog_time:
         candidates.append((chatlog_time, "chat_logs.json"))
+    if worklog_time:
+        candidates.append((worklog_time, "chat_logs_work.json"))
     if candidates:
         candidates.sort(key=lambda x: x[0], reverse=True)
         last_time, source = candidates[0]

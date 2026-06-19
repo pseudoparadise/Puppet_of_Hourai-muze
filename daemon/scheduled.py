@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 import traceback
 from datetime import datetime
@@ -12,6 +13,14 @@ from work_log import from_claude_sessions
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+TASK_TIMEOUTS = {
+    "audit": 120,
+    "work_extract": 300,
+    "diary": 180,
+    "miner": 120,
+    "weekly": 180,
+}
+
 
 class ScheduledTasks:
     def __init__(self, api_guard):
@@ -24,6 +33,36 @@ class ScheduledTasks:
             "last_diary": None, "last_miner": None, "last_weekly": None,
             "window": "unknown", "daily_done": False,
         }
+
+    @staticmethod
+    def _run_with_timeout(func, timeout_sec: float, name: str):
+        result = [None]
+        exc = [None]
+
+        def _runner():
+            try:
+                result[0] = func()
+            except Exception as e:
+                exc[0] = e
+
+        t = threading.Thread(target=_runner, daemon=True)
+        t.start()
+        t.join(timeout=timeout_sec)
+
+        if t.is_alive():
+            msg = f"{name} 超时 ({timeout_sec}s)，daemon 继续运行"
+            warn("scheduled", msg)
+            try:
+                from crash_reporter import _write_crash_log
+                _write_crash_log(f"[SCHEDULED_TIMEOUT] {name} >{timeout_sec}s\n{msg}")
+            except Exception:
+                pass
+            return None
+
+        if exc[0] is not None:
+            raise exc[0]
+
+        return result[0]
 
     def state_snapshot(self) -> dict:
         return dict(self._state)
@@ -50,7 +89,7 @@ class ScheduledTasks:
 
         info("scheduled", f"执行审计... (上次: {mtime_str or '无记录'})")
         try:
-            run_audit()
+            self._run_with_timeout(run_audit, TASK_TIMEOUTS["audit"], "audit")
             now_str = datetime.now(BJT).isoformat()
             self._state["last_audit"] = now_str
             _, fresh_after, _ = self._check_output_fresh(anchor_path, 60)
@@ -61,16 +100,20 @@ class ScheduledTasks:
             traceback.print_exc()
 
     def _run_work_extract_with_check(self, today_str: str, yesterday_str: str, interval_s: int):
-        work_json_path = os.path.join(PROJECT_ROOT, "chat_logs_work.json")
-        exists, fresh, mtime_str = self._check_output_fresh(work_json_path, interval_s)
+        diary_path = os.path.join(PROJECT_ROOT, "diary", "work", f"{today_str}_work.md")
+        exists, fresh, mtime_str = self._check_output_fresh(diary_path, max(interval_s, 1800))
 
-        info("scheduled", f"提取工作总结... (上次产出: {mtime_str or '无记录'})")
+        info("scheduled", f"提取工作总结... (日记上次产出: {mtime_str or '无记录'})")
         try:
-            r1 = from_claude_sessions(today_str)
-            r2 = from_claude_sessions(yesterday_str)
+            r1 = self._run_with_timeout(
+                lambda: from_claude_sessions(today_str),
+                TASK_TIMEOUTS["work_extract"], f"work_extract({today_str})")
+            r2 = self._run_with_timeout(
+                lambda: from_claude_sessions(yesterday_str),
+                TASK_TIMEOUTS["work_extract"], f"work_extract({yesterday_str})")
             now_str = datetime.now(BJT).isoformat()
             self._state["last_work_extract"] = now_str
-            if r1 > 0 or r2 > 0:
+            if (r1 or 0) > 0 or (r2 or 0) > 0:
                 info("scheduled", f"工作总结: today={r1}, yesterday={r2}")
             else:
                 info("scheduled", f"未找到日志提取，沐泽可能很忙 (检查时间 @{now_str})")
@@ -90,7 +133,9 @@ class ScheduledTasks:
 
         info("scheduled", f"日记缺失 — {yesterday} 生成中... (上次: {mtime_str or '无'})")
         try:
-            chain_dream(yesterday)
+            self._run_with_timeout(
+                lambda: chain_dream(yesterday),
+                TASK_TIMEOUTS["diary"], f"chain_dream({yesterday})")
             now_str = datetime.now(BJT).isoformat()
             self._state["last_diary"] = now_str
             if not os.path.exists(diary_path) or os.path.getsize(diary_path) < 50:
@@ -107,7 +152,7 @@ class ScheduledTasks:
 
         info("scheduled", f"执行礦工压缩... (上次: {mtime_str or '无记录'})")
         try:
-            miner_main()
+            self._run_with_timeout(miner_main, TASK_TIMEOUTS["miner"], "miner")
             now_str = datetime.now(BJT).isoformat()
             self._state["last_miner"] = now_str
             _, fresh_after, _ = self._check_output_fresh(miner_state_path, 120)
@@ -132,7 +177,7 @@ class ScheduledTasks:
 
         info("scheduled", f"执行每周收拢... (上次: {self._last_weekly}, 距今天 {days_since}d)")
         try:
-            result_path = weekly_sweep()
+            result_path = self._run_with_timeout(weekly_sweep, TASK_TIMEOUTS["weekly"], "weekly_sweep")
             now_str = datetime.now(BJT).isoformat()
             self._state["last_weekly"] = now_str
             self._last_weekly = today_str
@@ -154,7 +199,7 @@ class ScheduledTasks:
 
         sleep_window = 3 <= bj_hour < 12
         peak_window = 0 <= bj_hour < 3
-        interval = 3600 if sleep_window or peak_window else 10800
+        interval = 3600 if sleep_window or peak_window else 7200
 
         if now_ts - self._last_tick < interval:
             return
@@ -167,11 +212,6 @@ class ScheduledTasks:
 
         is_daily_due = peak_window and self._last_daily != today_str
         self._state["window"] = "peak(daily)" if is_daily_due else ("peak" if peak_window else "day")
-
-        if not self._api_guard.check():
-            warn("scheduled", "API 钱包守卫拦截 — 本小时已达限额，跳过本轮定时任务")
-            self._state["window"] = "api_throttled"
-            return
 
         self._run_audit_with_check(interval)
         self._run_work_extract_with_check(today_str, yesterday_str, interval)

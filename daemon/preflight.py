@@ -122,7 +122,7 @@ def preflight_cleanup():
         panic_popup("进程级联爆炸", f"发现 {total_found} 个 ghost-trigger 进程\n阈值: {EXPLOSION_THRESHOLD}\n已全部清除，冷却 30s")
         time.sleep(30)
 
-    for fname in ['.daemon.pid', '.daemon_state.json', '.music_state.json',
+    for fname in ['.daemon_state.json', '.music_state.json',
                   '.polling_loop.pid', '.music_sync.pid', '.console.pid']:
         path = os.path.join(PROJECT_ROOT, fname)
         if os.path.exists(path):

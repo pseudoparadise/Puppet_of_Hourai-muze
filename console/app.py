@@ -10,6 +10,7 @@ _TAB_SPECS = [
     ("待办事项", "todo_mgr"),
     ("日记/Persona", "diary_tab"),
     ("Bark/日志", "log_tab"),
+    ("工作日志", "work_log_tab"),
     ("卡片编辑", "edit_tab"),
     ("召回反馈", "feedback_tab"),
     ("人类写卡", "write_tab"),
@@ -78,6 +79,10 @@ class Console:
                 from .causal_chain import CausalChainTab
                 self.chain_tab = CausalChainTab(frame)
                 self.chain_tab.pack(fill=tk.BOTH, expand=True)
+            elif _attr == "work_log_tab":
+                from .work_log_tab import WorkLogTab
+                self.work_log_tab = WorkLogTab(frame)
+                self.work_log_tab.pack(fill=tk.BOTH, expand=True)
         except Exception as e:
             import traceback
             traceback.print_exc()

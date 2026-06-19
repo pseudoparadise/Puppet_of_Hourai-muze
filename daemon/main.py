@@ -84,8 +84,8 @@ def run_daemon(args):
         sys.exit(1)
 
     boot_token = get_boot_token()
-    write_pid_with_boot_token(PID_FILE, os.getpid())
     preflight_cleanup()
+    write_pid_with_boot_token(PID_FILE, os.getpid())
     startup_cleanup(boot_token)
 
     ds = _daemon_state_template()

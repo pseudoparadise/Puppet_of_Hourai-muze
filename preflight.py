@@ -305,8 +305,8 @@ def _relevance_tier(cos_map: dict) -> dict:
     return tiers
 
 
-def _card_display(card_id: str, category: str) -> str:
-    """返回 display 等级: full / title / quote / silent / reopen"""
+def _card_display(card_id: str, category: str):
+    """返回 (display 等级, 展示次数)。display: full / title / quote / silent / reopen"""
     rule = DEGRADATION.get(category, DEGRADATION["_default"])
     seen = _load_seen()
     card_entry = seen["cards"].get(card_id, {"times_shown": 0})
@@ -526,7 +526,7 @@ def _backfill_ghost_reply():
             with open(chat_path, "w", encoding="utf-8") as f:
                 for e in entries:
                     f.write(json.dumps(e, ensure_ascii=False) + "\n")
-            print(f"[preflight] 兜底补写 ghost 回复 → chat_logs.json ({ghost_ts[:19]})")
+            print(f"[preflight] 兜底补写 ghost 回复 → chat_logs.json ({(ghost_ts or '')[:19]})")
         except Exception as e:
             crash_print(e, "preflight 兜底补写 ghost 回复")
             return
@@ -565,6 +565,7 @@ def preflight(user_input: str, json_mode: bool = False, skip_va: bool = False, m
     va_info = {}
     mva_path = os.path.join(PROJECT_ROOT, "manual_va.json")
     mva_cc_override = False
+    mva = None
 
     if os.path.exists(mva_path):
         try:
@@ -574,7 +575,7 @@ def preflight(user_input: str, json_mode: bool = False, skip_va: bool = False, m
         except Exception as e:
             crash_print(e, "preflight 加载 manual_va.json")
 
-    if mva_cc_override:
+    if mva_cc_override and mva is not None:
         mva_enabled = mva.get("enabled", False)
         if mva_enabled:
             va = {"description": "console手动设定(CC)", "valence": mva.get("valence", 0.0),
@@ -648,6 +649,7 @@ def preflight(user_input: str, json_mode: bool = False, skip_va: bool = False, m
 
     output_cards = []
     silent_count = 0
+    _freeze_log = []  # (card_id, freeze_deg, effective_times, original_new_times)
 
     for c in top_cards:
         card_id = c.get("id", "")
@@ -705,12 +707,38 @@ def preflight(user_input: str, json_mode: bool = False, skip_va: bool = False, m
             final_level = min(deg_level, rel_level) if rel_tier == "low" else max(deg_level, rel_level)
             final_display = {v: k for k, v in DISPLAY_ORDER.items()}.get(final_level, deg_display)
 
-        # D. 组装输出
+        # E. 用户原话-卡片余弦终审门禁
+        # 复用 user 输入时已生成的豆包 embedding（retrieve._cached_query_vec）
+        # 和三张召回的卡片三向量做 max cosine 比对：
+        #   高(c≥0.82) → 全量展示   用户就在讲这件事，帮 DS 回忆完整上下文
+        #   中(0.65≤c<0.82) → 标题+关键词+梗概   相关但不直接
+        #   低(c<0.65) → 维持原有展示，但不计退化   错误召回，不该为此付出退化代价
+        UTT_FULL = 0.82
+        UTT_PARTIAL = 0.65
+        freeze_deg = False
+
+        if qv is not None and card_id in triple_embs:
+            embs = triple_embs[card_id]
+            cos_vals = []
+            for key in ("summary", "kw", "quote"):
+                if key in embs:
+                    cos_vals.append(_cosine(qv, embs[key]))
+            cos_utt = max(cos_vals) if cos_vals else 0.0
+
+            if cos_utt >= UTT_FULL:
+                final_display = "full"
+            elif cos_utt >= UTT_PARTIAL:
+                if DISPLAY_ORDER.get(final_display, 1) > DISPLAY_ORDER["summary"]:
+                    final_display = "summary"
+            else:
+                freeze_deg = True  # 相似度低：错误召回，冻结退化计数
+
+        # F. 组装输出
         card_out = {
             "id": card_id,
             "title": c.get("title", ""),
             "category": category,
-            "score": round(c.get("score", 0), 1),
+            "score": round(float(c.get("score", 0)), 1),
             "importance": c.get("importance", 0),
             "hit_count": c.get("hit_count", 0),
             "relevance": rel_tier,
@@ -731,14 +759,16 @@ def preflight(user_input: str, json_mode: bool = False, skip_va: bool = False, m
             card_out["keywords"] = keywords
             card_out["display"] = "title"
 
-        _update_seen_entry(seen, card_id, new_times)
+        effective_times = new_times - 1 if freeze_deg else new_times
+        _update_seen_entry(seen, card_id, effective_times)
         output_cards.append(card_out)
+        _freeze_log.append((card_id, freeze_deg, effective_times, new_times))
 
         # 信息素：被展示的卡写痕，强度=检索分数，半衰 2h
         try:
             import json as _json_m2
             mycelium_write("preflight", card_id,
-                           intensity=c.get("score", 0.5),
+                           intensity=float(c.get("score", 0.5)),
                            halflife_s=7200,
                            meta=_json_m2.dumps({
                                "display": final_display,
@@ -750,11 +780,23 @@ def preflight(user_input: str, json_mode: bool = False, skip_va: bool = False, m
         except Exception:
             pass
 
-    _save_seen(seen)
-
     result = {"va": va_info, "cards": output_cards}
     if silent_count > 0:
         result["silent_count"] = silent_count
+
+    # ── 全局终审闸：三张卡全低相似度 → 整轮清空，退化全部回退 ──
+    # 模型看到不相关卡片会强行脑补关联，宁可空着也别硬凑
+    non_silent_frozen = [(cid, fd, et, nt) for cid, fd, et, nt in _freeze_log if fd]
+    non_silent_total = len(_freeze_log)
+    if non_silent_total > 0 and len(non_silent_frozen) == non_silent_total:
+        for cid, _, effective_times, original_new_times in non_silent_frozen:
+            if cid in seen.setdefault("cards", {}):
+                seen["cards"][cid]["times_shown"] = effective_times - 1
+        output_cards.clear()
+        result["cards"] = []
+        result["all_frozen"] = True
+
+    _save_seen(seen)
 
     # ── 音乐注入：console.py 写入 .music_context.txt，preflight 直接吃现成 ──
     music_ctx_path = os.path.join(PROJECT_ROOT, ".music_context.txt")
@@ -796,6 +838,8 @@ def preflight(user_input: str, json_mode: bool = False, skip_va: bool = False, m
             print(f"│ (无相关记忆)                                               │")
         if silent_count > 0:
             print(f"│ ({silent_count} 张卡在深度冷却中)                                      │")
+        if result.get("all_frozen"):
+            print(f"│ (本轮召回卡片全低相关度，已全部跳过不展示)                                     │")
         if result.get("music"):
             print(f"├{' 音乐 ' + '─' * 51}┤")
             for line in result["music"].split("\n")[:8]:

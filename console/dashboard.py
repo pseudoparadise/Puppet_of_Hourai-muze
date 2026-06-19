@@ -7,6 +7,7 @@ import sys
 import time
 import tkinter as tk
 from tkinter import ttk
+from tkinter import messagebox
 from datetime import datetime, timedelta, timezone
 
 from ds_log import info as _log_info
@@ -289,35 +290,35 @@ class DashboardTab(ttk.Frame):
             def _do_inject():
                 new_text = editor.get("1.0", tk.END).strip()
                 if not new_text:
-                    tk.messagebox.showwarning("内容为空", "自省内容不能为空。")
+                    messagebox.showwarning("内容为空", "自省内容不能为空。")
                     return
-                if not tk.messagebox.askyesno("确认注入",
+                if not messagebox.askyesno("确认注入",
                     "确定将这段自省注入 prompt_v1.txt 吗？"):
                     return
                 try:
                     from memory.reflection_engine import inject_to_base_prompt
                     inject_to_base_prompt(new_text)
-                    tk.messagebox.showinfo("成功", "自省已注入 prompt_v1.txt")
+                    messagebox.showinfo("成功", "自省已注入 prompt_v1.txt")
                     dialog.destroy()
                     _load_refl_status()
                 except Exception as e:
                     import traceback; traceback.print_exc()
-                    tk.messagebox.showerror("注入失败", f"{e}")
+                    messagebox.showerror("注入失败", f"{e}")
 
             def _do_save():
                 new_text = editor.get("1.0", tk.END).strip()
                 if not new_text:
-                    tk.messagebox.showwarning("内容为空", "自省内容不能为空。")
+                    messagebox.showwarning("内容为空", "自省内容不能为空。")
                     return
                 try:
                     from memory.reflection_engine import save_reflection_edit
                     save_reflection_edit(new_text, pending['week'])
-                    tk.messagebox.showinfo("已保存", "自省编辑已保存（未注入 prompt）。")
+                    messagebox.showinfo("已保存", "自省编辑已保存（未注入 prompt）。")
                 except Exception as e:
-                    tk.messagebox.showerror("保存失败", f"{e}")
+                    messagebox.showerror("保存失败", f"{e}")
 
             def _do_discard():
-                if tk.messagebox.askyesno("确认丢弃", "确定丢弃本周自省吗？"):
+                if messagebox.askyesno("确认丢弃", "确定丢弃本周自省吗？"):
                     try:
                         from memory.reflection_engine import discard_reflection
                         discard_reflection(pending['week'])
@@ -386,8 +387,8 @@ class DashboardTab(ttk.Frame):
 
         row_m = ttk.Frame(music_frame)
         row_m.pack(fill=tk.X)
+        music_stale = False
         try:
-            music_stale = False
             started_raw = ms.get("started_at", "") if ms else ""
             if started_raw:
                 try:
@@ -436,7 +437,7 @@ class DashboardTab(ttk.Frame):
 
         btn_text = "📝 歌词注入: 开" if music_enabled else "📝 歌词注入: 关"
         btn_fg = "green" if music_enabled else "gray"
-        self._music_toggle_btn = ttk.Button(row_m, text=btn_text, command=_toggle_music_btn)
+        self._music_toggle_btn = tk.Button(row_m, text=btn_text, command=_toggle_music_btn)
         self._music_toggle_btn.pack(side=tk.RIGHT, padx=5)
 
         lyrics_frame = ttk.Frame(music_frame)
@@ -737,6 +738,18 @@ class DashboardTab(ttk.Frame):
         ttk.Label(row2, text=bark_str, foreground=colors.get(bark_state, "gray")).pack(side=tk.LEFT, padx=5)
         ttk.Label(row2, text="|", foreground="#ccc").pack(side=tk.LEFT, padx=5)
         ttk.Label(row2, text=sched_str, foreground="green" if sched.get("daily_done") else "gray").pack(side=tk.LEFT, padx=5)
+
+        last_up = ds.get("last_updated", "")
+        if last_up:
+            try:
+                from datetime import datetime, timezone, timedelta
+                up_dt = datetime.fromisoformat(last_up)
+                age = (datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=8))) - up_dt).total_seconds()
+                if age > 120:
+                    ttk.Label(row2, text="|", foreground="#ccc").pack(side=tk.LEFT, padx=5)
+                    ttk.Label(row2, text=f"⚠ daemon {int(age)}s无响应", foreground="red").pack(side=tk.LEFT, padx=5)
+            except Exception:
+                pass
 
         errors = ds.get("errors", [])
         if errors:
