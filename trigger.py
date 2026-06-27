@@ -1475,6 +1475,13 @@ def main():
     global CHAT_MODEL
     print("DS老师 在呢，打字聊天，输入 q 退出\n")
 
+    # ── trigger.log 15天自动裁剪 ──
+    try:
+        from shared import trim_trigger_log
+        trim_trigger_log(15)
+    except Exception as _te:
+        print(f"[trim] 跳过: {_te}")
+
     # ── 启动自检：老卡 link 回填（link 表为空时自动重建） ──
     # 注：日记追补和矿工蒸馏已统一由 polling_loop.py 的 _ensure_diary / _ensure_miner 负责
     try:

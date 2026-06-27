@@ -649,6 +649,8 @@ def preflight(user_input: str, json_mode: bool = False, skip_va: bool = False, m
 
     output_cards = []
     silent_count = 0
+    misfire_ids = []
+    first_exposure_shown = 0
     _freeze_log = []  # (card_id, freeze_deg, effective_times, original_new_times)
 
     for c in top_cards:
@@ -673,65 +675,97 @@ def preflight(user_input: str, json_mode: bool = False, skip_va: bool = False, m
                 pass
             continue
 
-        # B. 三权分立门控：根据退化阶段，用对应向量做余弦比对升级
-        if qv is not None:
-            deg_display = _triple_cosine_gate(card_id, deg_display, qv, triple_embs, category)
-
-        # C. 语义相关性层级
+        # C. 语义相关性层级（首次/非首次都需要）
         rel_tier = relevance_tiers.get(card_id, "medium")
         rel_cos = cos_map.get(card_id, 0.0)
-        # 相关性想要的展示级别
-        if rel_tier == "high":
-            rel_wants = "full"
-        elif rel_tier == "medium":
-            rel_wants = "summary"
-        else:
-            rel_wants = "title"
 
-        # D. 双层门控组合
-        # 展示级别阶梯: full > summary > quote > title
-        DISPLAY_ORDER = {"full": 4, "summary": 3, "quote": 2, "title": 1}
-
-        deg_level = DISPLAY_ORDER.get(deg_display, 1)
-        rel_level = DISPLAY_ORDER.get(rel_wants, 1)
-
-        # 静默不可破（已在上面 continue），剩下：相关高升舱，相关低节流
-        if rel_tier == "high" and deg_level < 4:
-            final_display = "full"  # 语义高度匹配 → 破例升到全文
-        elif rel_tier == "low" and deg_level >= 4:
-            final_display = "summary"  # 退化全量但语义低 → 降为概括
-        elif rel_tier == "low" and deg_level >= 3:
-            final_display = "title"  # 退化不够+语义低 → 仅标题
-        else:
-            # 取两者中较高的（但不超过 deg 的上限）
-            final_level = min(deg_level, rel_level) if rel_tier == "low" else max(deg_level, rel_level)
-            final_display = {v: k for k, v in DISPLAY_ORDER.items()}.get(final_level, deg_display)
-
-        # E. 用户原话-卡片余弦终审门禁
-        # 复用 user 输入时已生成的豆包 embedding（retrieve._cached_query_vec）
-        # 和三张召回的卡片三向量做 max cosine 比对：
-        #   高(c≥0.82) → 全量展示   用户就在讲这件事，帮 DS 回忆完整上下文
-        #   中(0.65≤c<0.82) → 标题+关键词+梗概   相关但不直接
-        #   低(c<0.65) → 维持原有展示，但不计退化   错误召回，不该为此付出退化代价
         UTT_FULL = 0.82
         UTT_PARTIAL = 0.65
-        freeze_deg = False
+        MISFIRE_FLOOR = 0.40
+        DISPLAY_ORDER = {"full": 4, "summary": 3, "quote": 2, "title": 1}
 
-        if qv is not None and card_id in triple_embs:
-            embs = triple_embs[card_id]
-            cos_vals = []
-            for key in ("summary", "kw", "quote"):
-                if key in embs:
-                    cos_vals.append(_cosine(qv, embs[key]))
-            cos_utt = max(cos_vals) if cos_vals else 0.0
+        # ── 首次曝光快速通道：展示级别由 UTT 余弦决定，不走退化 ──
+        if new_times == 1:
+            cos_utt = 0.0
+            if qv is not None and card_id in triple_embs:
+                embs = triple_embs[card_id]
+                cos_vals = []
+                for key in ("summary", "kw", "quote"):
+                    if key in embs:
+                        cos_vals.append(_cosine(qv, embs[key]))
+                cos_utt = max(cos_vals) if cos_vals else 0.0
+
+            if cos_utt < MISFIRE_FLOOR:
+                misfire_ids.append(card_id)
+                try:
+                    import json as _json_m3
+                    mycelium_write("preflight", card_id, intensity=0.05, halflife_s=3600,
+                                   meta=_json_m3.dumps({"display": "misfire", "cos_utt": round(cos_utt, 4), "first_exposure": True},
+                                                      ensure_ascii=False))
+                except Exception:
+                    pass
+                continue
 
             if cos_utt >= UTT_FULL:
                 final_display = "full"
             elif cos_utt >= UTT_PARTIAL:
-                if DISPLAY_ORDER.get(final_display, 1) > DISPLAY_ORDER["summary"]:
-                    final_display = "summary"
+                final_display = "summary"
             else:
-                freeze_deg = True  # 相似度低：错误召回，冻结退化计数
+                final_display = "title"
+
+            _update_seen_entry(seen, card_id, 1)
+            first_exposure_shown += 1
+            freeze_deg = False
+
+        else:
+            # ── 非首次：走完整退化管线 B→C→D→E ──
+            # B. 三权分立门控：根据退化阶段，用对应向量做余弦比对升级
+            if qv is not None:
+                deg_display = _triple_cosine_gate(card_id, deg_display, qv, triple_embs, category)
+
+            # D. 双层门控组合
+            if rel_tier == "high":
+                rel_wants = "full"
+            elif rel_tier == "medium":
+                rel_wants = "summary"
+            else:
+                rel_wants = "title"
+
+            deg_level = DISPLAY_ORDER.get(deg_display, 1)
+            rel_level = DISPLAY_ORDER.get(rel_wants, 1)
+
+            if rel_tier == "high" and deg_level < 4:
+                final_display = "full"
+            elif rel_tier == "low" and deg_level >= 4:
+                final_display = "summary"
+            elif rel_tier == "low" and deg_level >= 3:
+                final_display = "title"
+            else:
+                final_level = min(deg_level, rel_level) if rel_tier == "low" else max(deg_level, rel_level)
+                final_display = {v: k for k, v in DISPLAY_ORDER.items()}.get(final_level, deg_display)
+
+            # E. 用户原话-卡片余弦终审门禁
+            freeze_deg = False
+
+            if qv is not None and card_id in triple_embs:
+                embs = triple_embs[card_id]
+                cos_vals = []
+                for key in ("summary", "kw", "quote"):
+                    if key in embs:
+                        cos_vals.append(_cosine(qv, embs[key]))
+                cos_utt = max(cos_vals) if cos_vals else 0.0
+
+                if cos_utt >= UTT_FULL:
+                    final_display = "full"
+                elif cos_utt >= UTT_PARTIAL:
+                    if DISPLAY_ORDER.get(final_display, 1) > DISPLAY_ORDER["summary"]:
+                        final_display = "summary"
+                else:
+                    freeze_deg = True
+
+            effective_times = new_times - 1 if freeze_deg else new_times
+            _update_seen_entry(seen, card_id, effective_times)
+            _freeze_log.append((card_id, freeze_deg, effective_times, new_times))
 
         # F. 组装输出
         card_out = {
@@ -759,10 +793,7 @@ def preflight(user_input: str, json_mode: bool = False, skip_va: bool = False, m
             card_out["keywords"] = keywords
             card_out["display"] = "title"
 
-        effective_times = new_times - 1 if freeze_deg else new_times
-        _update_seen_entry(seen, card_id, effective_times)
         output_cards.append(card_out)
-        _freeze_log.append((card_id, freeze_deg, effective_times, new_times))
 
         # 信息素：被展示的卡写痕，强度=检索分数，半衰 2h
         try:
@@ -783,12 +814,16 @@ def preflight(user_input: str, json_mode: bool = False, skip_va: bool = False, m
     result = {"va": va_info, "cards": output_cards}
     if silent_count > 0:
         result["silent_count"] = silent_count
+    if misfire_ids:
+        result["misfire_count"] = len(misfire_ids)
+        result["misfire_ids"] = misfire_ids
 
-    # ── 全局终审闸：三张卡全低相似度 → 整轮清空，退化全部回退 ──
+    # ── 全局终审闸：非首次卡片全冻结 + 无首次卡片展出 → 整轮清空 ──
     # 模型看到不相关卡片会强行脑补关联，宁可空着也别硬凑
+    # 但如果首次曝光卡片通过了余弦门禁（cos≥0.40），不清空——它至少有点关系
     non_silent_frozen = [(cid, fd, et, nt) for cid, fd, et, nt in _freeze_log if fd]
     non_silent_total = len(_freeze_log)
-    if non_silent_total > 0 and len(non_silent_frozen) == non_silent_total:
+    if first_exposure_shown == 0 and non_silent_total > 0 and len(non_silent_frozen) == non_silent_total:
         for cid, _, effective_times, original_new_times in non_silent_frozen:
             if cid in seen.setdefault("cards", {}):
                 seen["cards"][cid]["times_shown"] = effective_times - 1
@@ -838,6 +873,8 @@ def preflight(user_input: str, json_mode: bool = False, skip_va: bool = False, m
             print(f"│ (无相关记忆)                                               │")
         if silent_count > 0:
             print(f"│ ({silent_count} 张卡在深度冷却中)                                      │")
+        if misfire_ids:
+            print(f"│ ({len(misfire_ids)} 张卡召回但相似度过低已跳过: {', '.join(misfire_ids)[:40]}...)                                      │")
         if result.get("all_frozen"):
             print(f"│ (本轮召回卡片全低相关度，已全部跳过不展示)                                     │")
         if result.get("music"):

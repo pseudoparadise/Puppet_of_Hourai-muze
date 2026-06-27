@@ -289,3 +289,36 @@ def trace(tag: str, detail: str = ""):
             _tf.write(json.dumps({"timestamp": _dt.now().isoformat(), "event": "trace", "tag": tag, "detail": detail}, ensure_ascii=False) + "\n")
     except Exception:
         pass
+
+
+def trim_trigger_log(retention_days: int = 15):
+    """trim trigger.log to last retention_days."""
+    from datetime import timedelta as _td
+    log_path = os.path.join(PROJECT_ROOT, "trigger.log")
+    if not os.path.exists(log_path):
+        return
+    cutoff = (datetime.now() - _td(days=retention_days)).isoformat()[:10]
+    try:
+        with open(log_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        kept, removed = 0, 0
+        with open(log_path, "w", encoding="utf-8") as f:
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ts = json.loads(line).get("timestamp", "")
+                except json.JSONDecodeError:
+                    f.write(line + chr(92) + "n")
+                    kept += 1
+                    continue
+                if ts >= cutoff:
+                    f.write(line + chr(92) + "n")
+                    kept += 1
+                else:
+                    removed += 1
+        if removed > 0:
+            print(f"[trim] trigger.log: -{removed} old entries, kept {kept} (>={cutoff})")
+    except Exception as e:
+        print(f"[trim] trigger.log trim failed: {e}")
