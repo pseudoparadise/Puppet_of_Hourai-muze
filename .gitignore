@@ -185,6 +185,12 @@ backups/
 360_smart_unpacked/
 360_clean/
 360_patched/
+
+# ── 临时抓包/截屏/运行时杂文件 ──
+captures/
+screen_check.png
+ui_check.xml
+.boot_cache
 360_patched*.apk
 360_patched*.apk.idsig
 _apk_merge/
