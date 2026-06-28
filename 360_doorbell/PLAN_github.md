@@ -42,6 +42,14 @@
 
 key 通过 RC4 加密的信令通道传输。破解了 RC4 信令层，15 个 ChaCha20 key 就全裸了。这不是纵深防御——这是把两扇门装在同一个门框上，第一扇门的钥匙挂在第二扇门上。
 
+**但是——libjiagu 是真的能打。**
+
+得替 360 工程师说句公道话。libjiagu 反加固不是纸糊的：mmap(0x0) 预占、ptrace 劫持、exit/_exit/abort 全部劫持、kill/raise/tkill/tgkill 五个信号全拦、mprotect 强制 R+X——五层 syscall 劫持少一个都跑不起来。spawn 模式必死，attach 要卡四秒窗口。这个反调试壳是认真做了的。
+
+可能他们的想法很简单：APP 启动→libjiagu 保住前门→后面随便传。毕竟谁闲着没事去劫持五个 syscall 来逆向一台门铃呢？
+
+……好吧，是我们。
+
 **总结：**
 
 ```
