@@ -10,7 +10,8 @@
 **ChaCha20 keys**: 云端下发 15 个 32B ASCII key，索引 30-44，12h 轮换(43200s)。key 是字符串不是 hex 派生——不需要 PBKDF2。
 **Frida 可用**: 五劫持抗 libjiagu 验证通过，`auto_keyhunt.py` 一键抓 key。
 **D 路不是花椒**: DNS 境外不通。type=0x0106 是电话信令走 P2P relay，不是 FLV CDN。
-**0x0230/0x0231 已分析**: 0x0230 inner JSON RC4 解密 ✅ (algo=1, play_type=1)。0x0231 是纯二进制 ACK (104B) ❌不含加密开关。加密决策定位到 native `onDeviceBaseCapacityCallBack`。
+**0x0230/0x0231 已分析**: 0x0230 inner JSON RC4 解密 ✅ (algo=1, play_type=1)。0x0231 是纯二进制 ACK (104B) ❌不含加密开关。
+**Ghidra native 分析**: ChaCha20XOR 由 relay_client::DoProcessPacket 调用，触发条件 flag==0x1000000。key 从父对象 +0x100 复制 (云端下发)。加密开关=relay 服务端在数据包设 flag 位，APP 被动响应。baseCapacity/onDeviceBaseCapacityCallBack 不在 native so 里，是 Java 层 (classes4.dex)。
 
 ---
 
@@ -238,6 +239,7 @@ t=34.1s  UDP 电话信令开始 (0x0106, wrapper=6f0e)
 | 23 | wrapper f594=视频音频, 6f0e=电话信令, 同端口复用 |
 | 24 | 43.141.130.88 = api.deepseek.com, 不是花椒 CDN |
 | 25 | 0x0231 relay回复是纯二进制 ACK (104B)，结构: flags+prefix+PK/SN+MID+ts+ret_code+flag_byte，不含 JSON/data 字段，不含加密开关 |
+| 26 | ChaCha20XOR 由 relay 服务端 flag 位控制 ( → 设 secure mode,  → 执行解密)。APP 不主动决定加密，等 relay 给 flag |
 
 ---
 
@@ -265,8 +267,8 @@ t=34.1s  UDP 电话信令开始 (0x0106, wrapper=6f0e)
 
 ## 下一步 (6/28 晚间)
 
-1. **加密开关溯源** — 0x0231 relay回复不含加密参数 → 加密决策不在 relay。查 native onDeviceBaseCapacityCallBack → Ghidra 定位 caller, 看 baseCapacity 从哪来 (云控配置? 设备硬编码?)
-2. **flag=0x1000000 session** — 门铃在线 + motion + APP 进直播, 触发 ChaCha20XOR, 匹配 key hex 到具体槽位
+1. **flag=0x1000000 session** — Ghidra 确认: 加密由 relay 在数据包设 flag 位控制，APP 被动解密。等 relay 下发 flag!=0 的 session，当下 flag=0 就是 relay 决定不加密
+2. **云控/baseCapacity 溯源** — baseCapacity 不在 native so，在 classes4.dex (Java)。用 jadx 搜 `onDeviceBaseCapacityCallBack` / `encryptAlgoCache` 看 algo 怎么从云控 JSON 流入信令加密
 3. **B2路** — Frida hook Java Conscrypt → TCP cloud TLS 明文
 4. **0x0106 电话信令** — 深挖 6f0e wrapper 下的协议结构
 5. **C 路 API 封装** — self_sign.py 已有, 集成到统一 CLI
