@@ -11,7 +11,8 @@
 **Frida 可用**: 五劫持抗 libjiagu 验证通过，`auto_keyhunt.py` 一键抓 key。
 **D 路不是花椒**: DNS 境外不通。type=0x0106 是电话信令走 P2P relay，不是 FLV CDN。
 **0x0230/0x0231 已分析**: 0x0230 inner JSON RC4 解密 ✅ (algo=1, play_type=1)。0x0231 是纯二进制 ACK (104B) ❌不含加密开关。
-**Ghidra native 分析**: ChaCha20XOR 由 relay_client::DoProcessPacket 调用，触发条件 flag==0x1000000。key 从父对象 +0x100 复制 (云端下发)。加密开关=relay 服务端在数据包设 flag 位，APP 被动响应。baseCapacity/onDeviceBaseCapacityCallBack 不在 native so 里，是 Java 层 (classes4.dex)。
+**Ghidra native 分析**: ChaCha20XOR 由 relay_client::DoProcessPacket 调用，触发条件 flag==0x1000000。key 从父对象 +0x100 复制 (云端下发)。
+**RC4 信令解密 (Frida)**: 抓到 base_capacity_res → ea=1 (encryption algorithm=RC4)。req_relay_res → ea=1, ec=0 (encryption cipher=0=ChaCha20不启用), flag=3。**加密开关完整链路**: 云控 JSON → base_capacity (ea=1) → relay 响应 (ea=1,ec=0) → UDP flag=0 → 视频明文。ec=0 就是 flag=0 的原因！
 
 ---
 
@@ -28,7 +29,7 @@ A路 UDP P2P (主力):  🟡 全通但flag=0→全明文, 等加密session
   │   ├─ wrapper=f594: 0x0002(I帧14帧) + 0x0003(P/B帧410帧) + 0x000a(AAC音频525帧@18fps)
   │   └─ wrapper=6f0e: 0x0106(电话信令323帧, 99-132B, 34s后才出现)
   ├─ 15个32B ChaCha20 key已抓 (索引30-44, 12h轮换), 存captures/chacha20_keys.json
-  └─ 阻塞: flag=0→ChaCha20XOR从未调用 → 全部明文。等flag=0x1000000 session
+  └─ 阻塞: flag=0=ec=0→ChaCha20XOR从未调用 → 全部明文。根因: relay 响应 ec=0(encryption cipher off)。等 ec≠0 的 session
 
 B路 TCP 信令relay:  ❌ 已死
 B2路 TCP cloud (护盘): 🟡 TLS加密, 比UDP先开, 同一视频流
@@ -240,6 +241,7 @@ t=34.1s  UDP 电话信令开始 (0x0106, wrapper=6f0e)
 | 24 | 43.141.130.88 = api.deepseek.com, 不是花椒 CDN |
 | 25 | 0x0231 relay回复是纯二进制 ACK (104B)，结构: flags+prefix+PK/SN+MID+ts+ret_code+flag_byte，不含 JSON/data 字段，不含加密开关 |
 | 26 | ChaCha20XOR 由 relay 服务端 flag 位控制 ( → 设 secure mode,  → 执行解密)。APP 不主动决定加密，等 relay 给 flag |
+| 27 | RC4 解密 relay 响应: base_capacity_res → ea=1 (信令RC4)。req_relay_res → ea=1, ec=0, flag=3。**ec=0 就是视频 flag=0 的根因**。ec 由 relay 下发，受云控 JSON 控制 |
 
 ---
 
@@ -267,7 +269,7 @@ t=34.1s  UDP 电话信令开始 (0x0106, wrapper=6f0e)
 
 ## 下一步 (6/28 晚间)
 
-1. **flag=0x1000000 session** — Ghidra 确认: 加密由 relay 在数据包设 flag 位控制，APP 被动解密。等 relay 下发 flag!=0 的 session，当下 flag=0 就是 relay 决定不加密
+1. **触发 ec≠0** — 根因确认: relay 响应 ec=0 → flag=0 → 无 ChaCha20。需搞清楚什么条件让 relay 设 ec=1 (云控JSON字段? 设备白名单? 固件版本?) 。最直接: Frida hook Stats.decrypt 抓 5208B 云控 JSON, 搜 encrypt/crypto/security 字段
 2. **云控/baseCapacity 溯源** — baseCapacity 不在 native so，在 classes4.dex (Java)。用 jadx 搜 `onDeviceBaseCapacityCallBack` / `encryptAlgoCache` 看 algo 怎么从云控 JSON 流入信令加密
 3. **B2路** — Frida hook Java Conscrypt → TCP cloud TLS 明文
 4. **0x0106 电话信令** — 深挖 6f0e wrapper 下的协议结构
