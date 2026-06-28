@@ -177,8 +177,9 @@ backups/
 *.swo
 *.swn
 
-# ── 360门铃逆向攻坚（工具+抓包+APK打包，不提交） ──
-360_doorbell/
+# ── 360门铃逆向攻坚（除了PLAN_github卖惨版，其余不提交） ──
+360_doorbell/*
+!360_doorbell/PLAN_github.md
 360_smart*.apk
 360_smart*.apk.idsig
 360_smart_unpacked/
