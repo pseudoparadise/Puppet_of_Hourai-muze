@@ -32,6 +32,7 @@ rolling_summary.md
 delegate/prompts/
 persona/prompt_v1.txt
 persona/prompt_v1_base.txt
+persona/erotic_style.txt
 persona/backups/
 persona/miner_state.json
 
@@ -50,6 +51,9 @@ manual_va.json
 
 # ── Persona 情感状态（私人情感数据） ──
 memory/persona_state.json
+
+# ── 内部设计文档（架构蓝图，不公开） ──
+memory/DESIGN_*.md
 
 # ── DS 自省日记（私密反思内容） ──
 memory/reflections/
@@ -220,3 +224,4 @@ mcd_*.gif
 .gitignore
 ghost-trigger项目摘要_简历附件.md
 360门铃项目摘要_简历附件.md
+.mode
